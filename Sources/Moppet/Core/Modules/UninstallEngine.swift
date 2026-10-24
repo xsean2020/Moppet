@@ -1,0 +1,303 @@
+import Foundation
+import AppKit
+
+/// App uninstall engine — SwiftUI cousin of `mo uninstall`:
+/// enumerate apps, resolve bundle IDs, locate related files, review, trash.
+enum UninstallEngine {
+
+    struct AppEntry: Identifiable {
+        let id: String          // bundle identifier or path
+        let name: String
+        let url: URL
+        let bundleID: String?
+        let bytes: Int64
+        var icon: NSImage { NSWorkspace.shared.icon(forFile: url.path) }
+    }
+
+    struct RelatedFile: Identifiable {
+        let id = UUID()
+        let url: URL
+        let bytes: Int64
+        let kind: String     // preferences / caches / containers / support…
+        let deletable: Bool  // false → needs admin or is protected
+    }
+
+    // MARK: - List installed apps
+
+    /// Fast metadata-only listing (bundle ids + names, no sizing) — sizing is
+    /// a heavy recursive walk, so it is computed off-view in `sizeApps`.
+    static func listApps() -> [AppEntry] {
+        let roots = [
+            URL(fileURLWithPath: "/Applications"),
+            // /System/Applications stays out: the SIP volume rejects recycle,
+            // so every system app row was an uninstall that can only fail.
+            FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications"),
+        ]
+        var entries: [AppEntry] = []
+        for root in roots {
+            guard let children = try? FileManager.default.contentsOfDirectory(
+                at: root, includingPropertiesForKeys: [.isDirectoryKey]) else { continue }
+            for child in children where child.pathExtension == "app" {
+                let bundle = Bundle(url: child)
+                let name = bundle?.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
+                    ?? bundle?.object(forInfoDictionaryKey: "CFBundleName") as? String
+                    ?? child.deletingPathExtension().lastPathComponent
+                // id = path: the same bundleID installed in two roots made
+                // both rows share selection state and kill each other's data.
+                entries.append(
+                    AppEntry(
+                        id: child.path,
+                        name: name,
+                        url: child,
+                        bundleID: bundle?.bundleIdentifier,
+                        bytes: 0
+                    )
+                )
+            }
+        }
+        return entries.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    /// Sizes apps in parallel (off the view); returns id → bytes.
+    static func sizeApps(_ apps: [AppEntry],
+                         progress: @escaping @Sendable (Int, Int) -> Void = { _, _ in }) async -> [String: Int64] {
+        await withTaskGroup(of: (String, Int64).self) { group in
+            for (index, app) in apps.enumerated() {
+                group.addTask {
+                    let bytes = await ScanEngine.parallelSize(of: app.url).bytes
+                    await MainActor.run { progress(index + 1, apps.count) }
+                    return (app.id, bytes)
+                }
+            }
+            var sizes: [String: Int64] = [:]
+            for await (id, bytes) in group { sizes[id] = bytes }
+            return sizes
+        }
+    }
+
+    // MARK: - Related files for a bundle ID
+
+    static func relatedFiles(appName: String, bundleID: String?) -> [RelatedFile] {
+        guard let bundleID, !bundleID.isEmpty else { return [] }
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let fm = FileManager.default
+        // User-level hidden directories, by bundle id AND by app name.
+        var candidates: [(URL, String, Bool)] = [
+            (home.appendingPathComponent("Library/Preferences/\(bundleID).plist"), "preferences", true),
+            (home.appendingPathComponent("Library/Caches/\(bundleID)"), "caches", true),
+            (home.appendingPathComponent("Library/Caches/\(appName)"), "caches (by name)", true),
+            (home.appendingPathComponent("Library/Application Support/\(bundleID)"), "app support", true),
+            (home.appendingPathComponent("Library/Application Support/\(appName)"), "app support", true),
+            (home.appendingPathComponent("Library/Containers/\(bundleID)"), "container", true),
+            (home.appendingPathComponent("Library/Saved Application State/\(bundleID).savedState"), "saved state", true),
+            (home.appendingPathComponent("Library/HTTPStorages/\(bundleID)"), "http storage", true),
+            (home.appendingPathComponent("Library/WebKit/\(bundleID)"), "webkit", true),
+            (home.appendingPathComponent("Library/Logs/\(bundleID)"), "logs", true),
+            (home.appendingPathComponent("Library/Logs/\(appName)"), "logs (by name)", true),
+            (home.appendingPathComponent("Library/Application Support/CrashReporter/\(appName)"), "crash logs", true),
+            (home.appendingPathComponent("Library/LaunchAgents/\(bundleID).plist"), "launch agent", true),
+        ]
+        // ~/Library/Preferences/ByHost/<bundleID>.*.plist
+        let byHost = home.appendingPathComponent("Library/Preferences/ByHost")
+        if let entries = try? fm.contentsOfDirectory(atPath: byHost.path) {
+            for entry in entries where entry.hasPrefix(bundleID + ".") {
+                candidates.append((byHost.appendingPathComponent(entry), "preferences (ByHost)", true))
+            }
+        }
+        // System-level leftovers (need admin to remove).
+        candidates.append(contentsOf: [
+            (URL(fileURLWithPath: "/Library/Preferences/\(bundleID).plist"), "system preferences (admin)", false),
+            (URL(fileURLWithPath: "/Library/Caches/\(bundleID)"), "system caches (admin)", false),
+            (URL(fileURLWithPath: "/Library/Application Support/\(bundleID)"), "system app support (admin)", false),
+            (URL(fileURLWithPath: "/Library/LaunchAgents/\(bundleID).plist"), "system launch agent (admin)", false),
+            // NOTE: no by-appName candidates at system scope — the removal is
+            // a root `rm -rf`, and name collisions with other products under
+            // /Library would destroy their data. bundleID paths only.
+            (URL(fileURLWithPath: "/private/var/db/receipts/\(bundleID).plist"), "pkg receipt (report)", false),
+            (URL(fileURLWithPath: "/private/var/db/receipts/\(bundleID).bom"), "pkg bom (report)", false),
+        ])
+        var results: [RelatedFile] = []
+        // Group containers partial match (report-only; group containers are protected).
+        let groupRoot = home.appendingPathComponent("Library/Group Containers")
+        if let groups = try? FileManager.default.contentsOfDirectory(atPath: groupRoot.path) {
+            for g in groups where g.contains(bundleID) {
+                let url = groupRoot.appendingPathComponent(g)
+                results.append(RelatedFile(url: url, bytes: ScanEngine.cachedSize(of: url).bytes,
+                                           kind: "group container", deletable: false))
+            }
+        }
+
+        for (url, kind, userLevel) in candidates {
+            guard fm.fileExists(atPath: url.path) else { continue }
+            let bytes = ScanEngine.cachedSize(of: url).bytes
+            // A bundle-scoped preference plist IS deletable even though
+            // ~/Library/Preferences is a protected category as a whole —
+            // without the exemption the most common uninstall leftover was
+            // a dead locked row.
+            let bundleScopedPref = url.path.hasPrefix(home.path + "/Library/Preferences/")
+                && (url.lastPathComponent == "\(bundleID).plist"
+                    || url.lastPathComponent.hasPrefix(bundleID + "."))
+            let allowed = SafetyGuard.checkDeletable(url).allowed || bundleScopedPref
+            results.append(RelatedFile(
+                url: url, bytes: bytes, kind: kind,
+                deletable: userLevel && allowed))
+        }
+        // The by-name LaunchAgent plist and the by-content scan hit the SAME
+        // file → the second recycle always failed ("failures: 1").
+        var seen = Set<String>()
+        results = results.filter { seen.insert($0.url.path).inserted }
+        // Launch agents/daemons that reference the bundle id BY CONTENT — both
+        // user-level and system-level (the usual "zombie" startup items).
+        let launchRoots = [
+            (home.appendingPathComponent("Library/LaunchAgents"), true),
+            (URL(fileURLWithPath: "/Library/LaunchAgents"), false),
+            (URL(fileURLWithPath: "/Library/LaunchDaemons"), false),
+        ]
+        for (root, userLevel) in launchRoots {
+            guard let entries = try? fm.contentsOfDirectory(atPath: root.path) else { continue }
+            for entry in entries {
+                let p = root.appendingPathComponent(entry)
+                guard let text = try? String(contentsOf: p, encoding: .utf8),
+                      text.contains(bundleID) else { continue }
+                let kind = userLevel
+                    ? "launch agent (references app)"
+                    : (root.path.contains("Daemons") ? "system launch daemon (admin)"
+                                                     : "system launch agent (admin)")
+                results.append(RelatedFile(
+                    url: p, bytes: 0, kind: kind,
+                    deletable: userLevel && SafetyGuard.checkDeletable(p).allowed))
+            }
+        }
+        return results
+    }
+
+    /// Removes SYSTEM-level leftovers with an administrator prompt
+    /// (AppleScript privileges — the GUI counterpart of mole's sudo).
+    @MainActor
+    static func removeSystemLeftovers(_ files: [RelatedFile]) async -> [(String, String?)] {
+        var results: [(String, String?)] = []
+        for file in files {
+            let path = file.url.path
+            guard path.hasPrefix("/Library/") || path.hasPrefix("/private/var/db/receipts/") else {
+                results.append((path, "not a system path"))
+                continue
+            }
+            do {
+                _ = try await OptimizeEngine.shellWithAdmin(
+                    "rm -rf '\(path.replacingOccurrences(of: "'", with: "'\\''"))'")
+                results.append((path, nil))
+            } catch {
+                results.append((path, error.localizedDescription))
+            }
+        }
+        return results
+    }
+
+    // MARK: - Batch uninstall (multi-select)
+
+    struct BatchOutcome {
+        /// id = AppEntry.id (the app's path) — the view removes ONLY these
+        /// rows; names alone couldn't disambiguate and failed uninstalls
+        /// used to ghost their rows out of the list anyway.
+        var trashed: [(id: String, name: String)] = []
+        var failed: [(name: String, reason: String)] = []
+        var freedBytes: Int64 = 0
+    }
+
+    /// Moves several apps to the Trash in one recycle batch. Related user
+    /// data is only removed when `withData` is enabled and files are found.
+    @MainActor
+    static func batchUninstall(apps: [AppEntry], sizes: [String: Int64],
+                               withData: Bool) async -> BatchOutcome {
+        var outcome = BatchOutcome()
+        let urls = apps.map(\.url)
+        do {
+            _ = try await NSWorkspace.shared.recycle(urls)
+            for app in apps {
+                // Verify per app: recycle not throwing ≠ every URL moved
+                // (a still-present app must not leave the UI as "uninstalled").
+                if !FileManager.default.fileExists(atPath: app.url.path) {
+                    outcome.trashed.append((app.id, app.name))
+                    outcome.freedBytes += sizes[app.id] ?? 0
+                } else {
+                    outcome.failed.append((app.name, "could not move to Trash"))
+                }
+            }
+        } catch {
+            outcome.failed.append(("batch", error.localizedDescription))
+            return outcome
+        }
+        var relatedPaths: [String] = []
+        if withData {
+            for app in apps {
+                let files = relatedFiles(
+                    appName: app.name, bundleID: app.bundleID)
+                for file in files where file.deletable {
+                    guard SafetyGuard.checkDeletable(file.url).allowed else { continue }
+                    _ = try? await NSWorkspace.shared.recycle([file.url])
+                    relatedPaths.append(file.url.path)
+                }
+            }
+        }
+        let record = CleanRecord(
+            date: Date(), sectionTitles: ["Uninstall (batch)"],
+            requestedBytes: outcome.freedBytes, freedBytes: outcome.freedBytes,
+            itemCount: outcome.trashed.count + relatedPaths.count,
+            items: (apps.map { $0.url.path } + relatedPaths).map {
+                CleanRecordItem(path: $0, bytes: 0, mode: .trash, success: true, error: nil)
+            })
+        HistoryStore.append(record)
+        return outcome
+    }
+
+    // MARK: - Uninstall (app bundle + selected related files → Trash)
+
+    struct UninstallResult {
+        let appTrashed: Bool
+        let removedFiles: [String]
+        let failed: [(String, String)]
+    }
+
+    @MainActor
+    static func uninstall(app: AppEntry, files: [RelatedFile], removeData: Bool) async -> UninstallResult {
+        var removed: [String] = []
+        var failed: [(String, String)] = []
+        var appOK = false
+
+        // App bundle → Trash (works for user-writable /Applications subfolders and ~/Applications).
+        // removed/failed carry full paths so the history audit can show exactly what happened.
+        do {
+            _ = try await NSWorkspace.shared.recycle([app.url])
+            appOK = !FileManager.default.fileExists(atPath: app.url.path)
+            if appOK { removed.append(app.url.path) }
+        } catch {
+            failed.append((app.url.path, error.localizedDescription))
+        }
+
+        if removeData {
+            for file in files where file.deletable {
+                // Same bundle-scoped-preferences exemption as relatedFiles —
+                // otherwise the row is deletable in the UI but blocked here.
+                let prefExempt: Bool
+                if let bid = app.bundleID {
+                    prefExempt = file.url.path.hasSuffix("/\(bid).plist")
+                        || (file.url.path.contains("/Library/Preferences/")
+                            && file.url.lastPathComponent.hasPrefix(bid + "."))
+                } else {
+                    prefExempt = false
+                }
+                guard SafetyGuard.checkDeletable(file.url).allowed || prefExempt else {
+                    failed.append((file.url.path, "blocked by safety guard"))
+                    continue
+                }
+                do {
+                    _ = try await NSWorkspace.shared.recycle([file.url])
+                    removed.append(file.url.path)
+                } catch {
+                    failed.append((file.url.path, error.localizedDescription))
+                }
+            }
+        }
+        return UninstallResult(appTrashed: appOK, removedFiles: removed, failed: failed)
+    }
+}

@@ -1,0 +1,129 @@
+import Foundation
+
+/// Result cache for heavy scans (directory sizing) — mole's 7-day TTL
+/// directory-size cache, adapted. Entries invalidate on directory mtime
+/// change or TTL expiry; stored as JSON under ~/.moppet/brain/.
+final class SizeCache {
+
+    struct Entry: Codable {
+        var bytes: Int64
+        var files: Int
+        var dirMTime: Double
+        var cachedAt: Date
+    }
+
+    static let shared = SizeCache()
+
+    private var store: [String: Entry] = [:]
+    private let lock = NSLock()
+    private let ttl: TimeInterval = 3 * 24 * 3600
+    private var lastPersist = Date.distantPast
+    /// LRU cap — without one the store grew without bound. 5000, not 500:
+    /// ONE Analyze pass over ~/Library at depth 2 stores hundreds of subtree
+    /// entries; a 500 cap evicted the earlier ones DURING the scan, so the
+    /// next visit was cold everywhere ("nothing changed but it re-measured").
+    /// Entries are ~100B of JSON — 5000 ≈ 500KB on disk.
+    static let maxEntries = 5000
+
+    static var fileURL: URL {
+        let dir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".moppet/brain")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("size-cache.json")
+    }
+
+    private init() {
+        if let data = try? Data(contentsOf: Self.fileURL) {
+            // Must match persist()'s .iso8601 — the default decoder strategy
+            // made every reload fail silently, so the disk cache never worked.
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            if let decoded = try? decoder.decode([String: Entry].self, from: data) {
+                store = decoded
+            } else {
+                // Undecodable cache (schema change, corruption): drop the file
+                // rather than re-writing over it forever.
+                try? FileManager.default.removeItem(at: Self.fileURL)
+                store = [:]
+            }
+        }
+    }
+
+    private func persist() {
+        evictIfNeeded()
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys]
+        if let data = try? encoder.encode(store) {
+            try? data.write(to: Self.fileURL, options: .atomic)
+        }
+    }
+
+    /// Caller must hold `lock`.
+    private func evictIfNeeded() {
+        guard store.count > Self.maxEntries else { return }
+        let surplus = store.count - Self.maxEntries
+        let oldest = store.sorted { $0.value.cachedAt < $1.value.cachedAt }.prefix(surplus)
+        for (key, _) in oldest {
+            store.removeValue(forKey: key)
+        }
+    }
+
+    private func directoryMTime(_ url: URL) -> Double {
+        // URL.resourceValues(.contentModificationDateKey) does NOT update for
+        // directories when children are created/deleted (verified on macOS 26:
+        // identical value across create+delete — the old guard compared a
+        // constant, so cached sizes stuck until TTL no matter what changed).
+        // FileManager.attributesOfItem(.modificationDate) is the real signal.
+        ((try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate]
+            as? Date)?.timeIntervalSince1970 ?? 0
+    }
+
+    /// Canonical cache key: symlink/firmlink-resolved path. `contentsOfDirectory`
+    /// returns URLs under the RESOLVED path (/var → /private/var on macOS),
+    /// while a caller-built URL keeps the unresolved form — keys must match
+    /// or every enumerated child misses its own just-stored summary.
+    private static func cacheKey(_ url: URL) -> String {
+        url.resolvingSymlinksInPath().path
+    }
+
+    func lookup(_ url: URL) -> ScanEngine.SizeSummary? {
+        lock.lock(); defer { lock.unlock() }
+        let key = Self.cacheKey(url)
+        guard let entry = store[key] else { return nil }
+        guard Date().timeIntervalSince(entry.cachedAt) < ttl else {
+            store.removeValue(forKey: key)
+            return nil
+        }
+        guard entry.dirMTime == directoryMTime(url) else { return nil }
+        return ScanEngine.SizeSummary(bytes: entry.bytes, files: entry.files)
+    }
+
+    func store(_ url: URL, summary: ScanEngine.SizeSummary) {
+        lock.lock(); defer { lock.unlock() }
+        store[Self.cacheKey(url)] = Entry(
+            bytes: summary.bytes, files: summary.files,
+            dirMTime: directoryMTime(url), cachedAt: Date())
+        // Throttle disk writes during big cold scans.
+        if Date().timeIntervalSince(lastPersist) > 2 {
+            lastPersist = Date()
+            persist()
+        }
+    }
+
+    func persistNow() {
+        lock.lock(); defer { lock.unlock() }
+        persist()
+    }
+
+    var count: Int {
+        lock.lock(); defer { lock.unlock() }
+        return store.count
+    }
+
+    func clear() {
+        lock.lock(); defer { lock.unlock() }
+        store.removeAll()
+        try? FileManager.default.removeItem(at: Self.fileURL)
+    }
+}

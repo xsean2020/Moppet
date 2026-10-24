@@ -1,0 +1,14 @@
+# SwiftPM build products (never commit — tens of GB of intermediates)
+.build/
+.swiftpm/
+Package.resolved.lock
+
+# Xcode / macOS noise
+DerivedData/
+*.xcuserstate
+*.xcworkspace/xcuserdata/
+.DS_Store
+
+# Local data that must never be tracked
+*.p12
+*.mobileprovision
