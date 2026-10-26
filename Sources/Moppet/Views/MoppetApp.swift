@@ -21,7 +21,11 @@ struct MoppetApp: App {
                                        "--brain-exec", "--yes", "--probe-floater",
                                        "--probe-models", "--route-perf", "--win-debug"]
         let args = CommandLine.arguments
-        let unknown = args.dropFirst().filter { $0.hasPrefix("--") && !knownFlags.contains($0) }
+        // A bare "--" is the conventional separator (`swift run Moppet -- --smoke`)
+        // and must not count as an unknown flag.
+        let unknown = args.dropFirst().filter {
+            $0.hasPrefix("--") && $0 != "--" && !knownFlags.contains($0)
+        }
         if !unknown.isEmpty {
             FileHandle.standardError.write(Data("error: unknown flag(s): \(unknown.joined(separator: " "))\n".utf8))
             exit(2)
