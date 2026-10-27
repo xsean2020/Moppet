@@ -707,7 +707,10 @@ final class BrainAgent {
                 streamingText = ""
                 let message: String? = turnFinal ?? (streamed.isEmpty ? nil : streamed)
                 if let finalText = message, !finalText.isEmpty {
-                    PetBus.shared.say(String(finalText.prefix(90)), state: .talking)
+                    // Full answer, and it stays until the next turn replaces
+                    // it (hideAfter 0). The old prefix(90) cut answers short
+                    // in the pet bubble; the bubble itself scrolls now.
+                    PetBus.shared.say(finalText, state: .talking, hideAfter: 0)
                 }
                 emit(.turnCompleted(outputMessage: message, usage: usage))
                 return

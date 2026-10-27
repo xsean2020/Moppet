@@ -63,7 +63,7 @@ final class QuickChat {
         // SDK surface a raw error 8s later, with no path to fix it.
         if !AISettings.load().isConfigured {
             PetBus.shared.say(L("No AI provider configured yet — open Settings to add an API key or sign in."),
-                              state: .talking, hideAfter: 12)
+                              state: .talking, hideAfter: 0)
             WindowRouter.shared.showMain()
             NotificationCenter.default.post(name: .moppetNavigateSettings, object: nil)
             return
@@ -76,7 +76,7 @@ final class QuickChat {
             Task { @MainActor in
                 let result = await BrainSlash.run(trimmed, brain: brain)
                     ?? String(format: L("%@ is chat-window only — double-click the pet to open it"), command)
-                PetBus.shared.say(Self.bubbleTail(result), state: .talking, hideAfter: 10)
+                PetBus.shared.say(result, state: .talking, hideAfter: 0)
             }
             return
         }
@@ -105,7 +105,8 @@ final class QuickChat {
         switch event {
         case .assistantMessageDelta(let delta):
             answerText += delta
-            PetBus.shared.say(Self.bubbleTail(answerText), state: .talking, hideAfter: 0)
+            // Full text, never a tail slice — the bubble scrolls.
+            PetBus.shared.say(answerText, state: .talking, hideAfter: 0)
         case .toolStarted:
             // Result-only bubble: no "🔧 tool…" text. The pet still shows a
             // working pose so the turn doesn't look dead during long tool runs.
@@ -116,13 +117,14 @@ final class QuickChat {
             let final = output ?? answerText
             answerText = final
             let tk = usage.map { " · \($0.totalTokens) tk" } ?? ""
-            PetBus.shared.say(Self.bubbleTail(final, suffix: tk),
-                              state: .celebrating, hideAfter: 12)
+            // Persistent by request: the answer stays on screen until the
+            // next question replaces it (hideAfter 0 = no auto-hide).
+            PetBus.shared.say(final + tk, state: .celebrating, hideAfter: 0)
         case .error(let message):
             answerText = "✗ \(message)"
-            // 12s (was 8) + the bubble's double-click → chat window gives the
-            // user somewhere to take the failed turn.
-            PetBus.shared.say("✗ \(message)", state: .sad, hideAfter: 12)
+            // Errors persist as well: the bubble is the only place the quick
+            // bar reports failures, and it is replaced by the next answer.
+            PetBus.shared.say("✗ \(message)", state: .sad, hideAfter: 0)
         default:
             break
         }
@@ -131,11 +133,6 @@ final class QuickChat {
     /// The bubble is a small overlay — show only the tail of long answers
     /// (the full text stays in the chat window's rollout). Markdown markers
     /// are kept: the pet bubble renders them (MarkdownUI).
-    private static func bubbleTail(_ text: String, suffix: String = "") -> String {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.count > 320 else { return trimmed + suffix }
-        return "…" + String(trimmed.suffix(320)) + suffix
-    }
 }
 
 // MARK: - Centered input bar (AppKit host)

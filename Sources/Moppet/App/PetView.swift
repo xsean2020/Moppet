@@ -728,6 +728,23 @@ struct PetView: View {
         return min(232, max(80, longest + 20))   // + h/v padding, floor for one-word bubbles
     }
 
+    /// Markdown body of the speech bubble (shared by the hug and the
+    /// scrolling variant so both look identical).
+    private var bubbleText: some View {
+        Markdown(bus.message)
+            .markdownTheme(.basic)
+            .markdownTextStyle {
+                FontSize(12)
+                // Adaptive ink on the adaptive cardBackground — readable in
+                // both appearances.
+                ForegroundColor(Airi.neutral900)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .frame(width: bubbleWidth, alignment: .leading)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
     private var bubble: some View {
         Group {
             if bubbleVisible {
@@ -736,21 +753,19 @@ struct PetView: View {
                     // (bold, lists, code) and leaked literal markers as plain
                     // Text ("**最快的办法：**"). Same engine as the chat
                     // window's transcript.
-                    Markdown(bus.message)
-                        .markdownTheme(.basic)
-                        .markdownTextStyle {
-                            FontSize(12)
-                            // Adaptive ink on the adaptive cardBackground —
-                            // readable in both appearances.
-                            ForegroundColor(Airi.neutral900)
+                    // Full answer, never clipped: a lineLimit(12) cut long
+                    // answers mid-sentence (read as "the bubble is broken").
+                    // ViewThatFits keeps short messages hugging their content
+                    // and only switches to a scrolling viewport when the text
+                    // would overflow the panel.
+                    ViewThatFits(in: .vertical) {
+                        bubbleText
+                        ScrollView(.vertical, showsIndicators: true) {
+                            bubbleText
                         }
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 7)
-                        // Adaptive width (hug the longest line up to the
-                        // 232pt cap); the mole flexes to make room.
-                        .frame(width: bubbleWidth, alignment: .leading)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .lineLimit(12)
+                    }
+                        .frame(width: bubbleWidth)
+                        .frame(maxHeight: 208)
                         // Same card recipe as SettingsCard (cardBackground +
                         // neutral200 hairline) so the bubble matches the app.
                         .background(
@@ -764,7 +779,9 @@ struct PetView: View {
                         )
                 }
                 // Double-click the bubble → full chat window (which has a
-                // real close button in its header).
+                // real close button in its header). contentShape keeps the
+                // hit target alive now that the body is a ViewThatFits.
+                .contentShape(Rectangle())
                 .onTapGesture(count: 2) {
                     WindowRouter.shared.showChat()
                 }

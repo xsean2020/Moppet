@@ -867,6 +867,21 @@ enum SmokeTest {
                 HistoryStore.save(backup)
             }
 
+            // Bubble persistence: answers must NOT auto-hide (hideAfter 0 =
+            // keep until the next say replaces it). This is the contract the
+            // quick bar and the chat turn rely on.
+            do {
+                PetBus.shared.say("ANSWER-TEXT", state: .talking, hideAfter: 0)
+                expect("pet: hideAfter 0 keeps the bubble up",
+                       PetBus.shared.messageHideInterval == 0)
+                expect("pet: the bubble carries the whole answer text",
+                       PetBus.shared.message == "ANSWER-TEXT")
+                PetBus.shared.say("PROGRESS", state: .scanning)
+                expect("pet: announcements still auto-hide by default",
+                       (PetBus.shared.messageHideInterval ?? PetBus.shared.autoHideInterval) > 0)
+                PetBus.shared.settle()
+            }
+
             // Pet states: every PetState must map to a bundled sticker
             // (sad/angry were dead code — errors showed no emotion), and
             // the sad pose must auto-settle via PetBus.
