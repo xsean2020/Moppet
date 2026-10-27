@@ -402,12 +402,12 @@ enum SlimEngine {
 
         HistoryStore.append(CleanRecord(
             date: Date(),
-            sectionTitles: ["Slim"],
+            sectionTitles: [candidate.name],
             requestedBytes: candidate.intelBytes,
             freedBytes: candidate.intelBytes,
             itemCount: 1,
             items: [CleanRecordItem(path: candidate.path, bytes: candidate.intelBytes,
-                                    mode: .trash, success: true, error: nil)]))
+                                    mode: .trash, success: true, error: nil)], source: .slim))
 
         return Outcome(name: candidate.name, path: candidate.path, success: true,
                        savedBytes: candidate.intelBytes,
@@ -417,12 +417,12 @@ enum SlimEngine {
     private static func fail(_ candidate: Candidate, _ message: String) -> Outcome {
         HistoryStore.append(CleanRecord(
             date: Date(),
-            sectionTitles: ["Slim"],
+            sectionTitles: [candidate.name],
             requestedBytes: candidate.intelBytes,
             freedBytes: 0,
             itemCount: 1,
             items: [CleanRecordItem(path: candidate.path, bytes: 0,
-                                    mode: .trash, success: false, error: message)]))
+                                    mode: .trash, success: false, error: message)], source: .slim))
         return Outcome(name: candidate.name, path: candidate.path, success: false,
                        savedBytes: 0, message: message)
     }

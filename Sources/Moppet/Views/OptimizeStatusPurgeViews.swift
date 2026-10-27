@@ -597,12 +597,12 @@ struct PurgeView: View {
                     failures.prefix(3).map { "\($0.0.kind): \($0.1!)" }.joined(separator: "; ")
             }
             let record = CleanRecord(
-                date: Date(), sectionTitles: ["Purge"],
+                date: Date(), sectionTitles: Array(Set(chosen.map(\.kind))).sorted(),
                 requestedBytes: freed, freedBytes: freed, itemCount: results.count,
                 items: results.map {
                     CleanRecordItem(path: $0.0.url.path, bytes: $0.0.bytes, mode: .permanent,
                                     success: $0.1 == nil, error: $0.1)
-                })
+                }, source: .purge)
             HistoryStore.append(record)
             UXFeedback.success()
             PetBus.shared.say(String(format: L("Purged %@"), freed.bytesFormatted) + " 🧹", state: .celebrating)

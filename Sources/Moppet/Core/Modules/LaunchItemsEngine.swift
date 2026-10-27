@@ -219,14 +219,14 @@ enum LaunchItemsEngine {
     private static func record(_ item: Item, enabled: Bool, success: Bool, message: String) {
         HistoryStore.append(CleanRecord(
             date: Date(),
-            sectionTitles: ["Startup"],
+            sectionTitles: [item.label],
             requestedBytes: 0,
             freedBytes: 0,
             itemCount: 1,
             items: [CleanRecordItem(
                 path: item.path, bytes: 0, mode: .permanent,
                 success: success,
-                error: success ? nil : message)]))
+                error: success ? nil : message)], source: .startup))
     }
 
     private static func shell(_ command: String, admin: Bool) async -> String {

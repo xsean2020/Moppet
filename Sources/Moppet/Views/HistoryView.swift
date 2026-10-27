@@ -92,19 +92,31 @@ struct HistoryView: View {
                     }
                 } label: {
                     HStack(spacing: Airi.space3) {
-                        Image(systemName: Self.icon(for: record.sectionTitles))
+                        let source = Self.resolvedSource(record)
+                        Image(systemName: source.icon)
                             .font(.system(size: 15, weight: .light))
                             .foregroundStyle(Airi.primary)
                             .frame(width: 32, height: 32)
                             .background(RoundedRectangle(cornerRadius: Airi.radiusControl).fill(Airi.neutral100))
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(record.date.formatted(date: .abbreviated, time: .shortened))
-                                .font(Airi.cardTitleFont)
-                                .foregroundStyle(Airi.neutral950)
+                        VStack(alignment: .leading, spacing: 3) {
                             HStack(spacing: 6) {
-                                Text(record.sectionTitles.joined(separator: " · "))
+                                // Which menu produced this run — the question
+                                // an audit log has to answer first.
+                                Text(source.title)
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundStyle(Airi.primary)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Capsule().fill(Airi.primary.opacity(0.12)))
+                                Text(record.date.formatted(date: .abbreviated, time: .shortened))
                                     .font(Airi.captionFont)
                                     .foregroundStyle(Airi.neutral500)
+                                    .monospacedDigit()
+                            }
+                            HStack(spacing: 6) {
+                                Text(record.sectionTitles.joined(separator: " · "))
+                                    .font(Airi.cardTitleFont)
+                                    .foregroundStyle(Airi.neutral900)
                                     .lineLimit(1)
                                 if failedCount > 0 {
                                     Text(String(format: L("%lld failed"), failedCount))
@@ -194,13 +206,20 @@ struct HistoryView: View {
     // MARK: - Helpers
 
     /// Record icon by operation type (first section title decides).
-    private static func icon(for sectionTitles: [String]) -> String {
-        let key = sectionTitles.first ?? ""
-        if key.contains("AI") { return "brain" }
-        if key.contains("Uninstall") { return "app.badge.minus" }
-        if key.contains("Analyze") { return "magnifyingglass" }
-        if key.contains("Purge") { return "flame" }
-        return "sparkles"
+    /// Records written before `source` existed are mapped from their
+    /// section titles so old and new rows still show a menu badge.
+    static func resolvedSource(_ record: CleanRecord) -> RecordSource {
+        if let source = record.source { return source }
+        let key = record.sectionTitles.first ?? ""
+        if key.contains("Uninstall (batch)") { return .uninstallBatch }
+        if key.contains("Uninstall") { return .uninstall }
+        if key.contains("AI Agent") { return .aiAgent }
+        if key.contains("Analyze") { return .analyze }
+        if key.contains("Purge") { return .purge }
+        if key.contains("Slim") { return .slim }
+        if key.contains("Startup") { return .startup }
+        if key.contains("Optimize") { return .optimize }
+        return .clean
     }
 
     /// `/Users/sean/Library/...` → `~/Library/...` so rows stay readable.

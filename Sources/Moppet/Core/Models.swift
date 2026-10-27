@@ -70,6 +70,52 @@ struct CleanRecordItem: Codable, Hashable {
     let error: String?
 }
 
+/// Which surface produced a history record. The audit log used to carry only
+/// section titles (e.g. "Browsers"), so the History page could not answer
+/// "which menu did this come from?" — the one thing users ask of an audit
+/// trail. Optional in the model so older files still decode.
+enum RecordSource: String, Codable, CaseIterable {
+    case clean          // Clean page (scan → review → clean)
+    case quickScan      // menu bar / pet menu / ⌘S quick sweep
+    case aiAgent        // the AI agent's cleaning tools (scan_clean → execute_clean)
+    case uninstall      // single-app uninstall
+    case uninstallBatch // multi-app uninstall
+    case analyze        // Analyze → Trash selection
+    case purge          // project artifact purge
+    case slim           // binary slimming
+    case startup        // startup item enable/disable
+    case optimize       // maintenance tasks
+
+    var icon: String {
+        switch self {
+        case .clean: "sparkles"
+        case .quickScan: "bolt"
+        case .aiAgent: "brain"
+        case .uninstall, .uninstallBatch: "app.badge.minus"
+        case .analyze: "magnifyingglass"
+        case .purge: "flame"
+        case .slim: "scissors"
+        case .startup: "power"
+        case .optimize: "wrench.and.screwdriver"
+        }
+    }
+
+    /// Localized menu name shown as the record's badge.
+    var title: String {
+        switch self {
+        case .clean: L("Clean")
+        case .quickScan: L("Quick Scan")
+        case .aiAgent: L("AI Agent")
+        case .uninstall, .uninstallBatch: L("Uninstall")
+        case .analyze: L("Analyze")
+        case .purge: L("Purge")
+        case .slim: L("Slim")
+        case .startup: L("Startup")
+        case .optimize: L("Optimize")
+        }
+    }
+}
+
 struct CleanRecord: Codable, Identifiable {
     var id: UUID = UUID()
     let date: Date
@@ -78,18 +124,22 @@ struct CleanRecord: Codable, Identifiable {
     let freedBytes: Int64
     let itemCount: Int
     let items: [CleanRecordItem]
+    /// Which menu produced this run (nil for records written before the field
+    /// existed — the UI falls back to inferring it from sectionTitles).
+    var source: RecordSource? = nil
 
     // Forward-compatible decode: a default value on a non-optional field is
     // NOT optional at decode time — any missing key used to fail the WHOLE
     // history file (which then got overwritten with just the new record).
     init(date: Date, sectionTitles: [String], requestedBytes: Int64, freedBytes: Int64,
-         itemCount: Int, items: [CleanRecordItem]) {
+         itemCount: Int, items: [CleanRecordItem], source: RecordSource? = nil) {
         self.date = date
         self.sectionTitles = sectionTitles
         self.requestedBytes = requestedBytes
         self.freedBytes = freedBytes
         self.itemCount = itemCount
         self.items = items
+        self.source = source
     }
 
     init(from decoder: Decoder) throws {
@@ -101,6 +151,7 @@ struct CleanRecord: Codable, Identifiable {
         freedBytes = try c.decodeIfPresent(Int64.self, forKey: .freedBytes) ?? 0
         itemCount = try c.decodeIfPresent(Int.self, forKey: .itemCount) ?? 0
         items = try c.decodeIfPresent([CleanRecordItem].self, forKey: .items) ?? []
+        source = try c.decodeIfPresent(RecordSource.self, forKey: .source)
     }
 }
 

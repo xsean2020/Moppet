@@ -271,8 +271,15 @@ final class CleanViewModel {
         }
         outcomes = results
 
-        let sectionTitles = sections.filter { $0.scannedBytes > 0 || $0.findingCount > 0 }
-            .map(\.section.title)
+        // Name what was actually cleaned (item level), deduped: the old list
+        // used section titles and included sections that were never touched
+        // (`findingCount > 0` ignored selection), so History described runs
+        // that did not match the deletion.
+        let cleanedItemIDs = Set(findings.map(\.itemID))
+        var seenItems: Set<String> = []
+        let sectionTitles = sections.flatMap(\.items)
+            .filter { cleanedItemIDs.contains($0.id) && seenItems.insert($0.id).inserted }
+            .map(\.item.name)
         let record = CleanRecord(
             date: Date(),
             sectionTitles: sectionTitles,
@@ -283,8 +290,7 @@ final class CleanViewModel {
                 CleanRecordItem(path: $0.path, bytes: $0.bytes,
                                 mode: $0.mode,
                                 success: $0.success, error: $0.error)
-            }
-        )
+            }, source: .clean)
         HistoryStore.append(record)
         lastRecord = record
         phase = .done

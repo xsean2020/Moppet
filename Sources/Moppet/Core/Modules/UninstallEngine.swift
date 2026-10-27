@@ -202,11 +202,32 @@ enum UninstallEngine {
         var trashed: [(id: String, name: String)] = []
         var failed: [(name: String, reason: String)] = []
         var freedBytes: Int64 = 0
+        /// App-data sweep (withData): how many related files went away and
+        /// how many bytes they held. Zero when the sweep was not requested.
+        var relatedFiles: Int = 0
+        var relatedBytes: Int64 = 0
+    }
+
+    /// A related file is removable when SafetyGuard allows it, with ONE
+    /// exemption: a preference plist scoped to this bundle. ~/Library/
+    /// Preferences is a protected category as a whole, but the app's own
+    /// `<bundleid>.plist` / `<bundleid>.<host>.plist` is exactly the leftover
+    /// users expect an uninstall to sweep. Both the single and batch paths
+    /// must agree, or the batch leaves preferences behind in silence.
+    static func isDeletableRelated(_ file: RelatedFile, bundleID: String?) -> Bool {
+        guard file.deletable else { return false }
+        if SafetyGuard.checkDeletable(file.url).allowed { return true }
+        guard let bundleID, !bundleID.isEmpty else { return false }
+        guard file.url.path.contains("/Library/Preferences/") else { return false }
+        let name = file.url.lastPathComponent
+        return name == "\(bundleID).plist" || name.hasPrefix(bundleID + ".")
     }
 
     /// Moves several apps to the Trash in one recycle batch. Related user
     /// data is only removed when `withData` is enabled and files are found.
-    @MainActor
+    /// NOT @MainActor on purpose: the batch is pure async file work, and the
+    /// MainActor annotation deadlocked every headless caller (smoke blocks the
+    /// main thread on a semaphore, so a MainActor hop can never run).
     static func batchUninstall(apps: [AppEntry], sizes: [String: Int64],
                                withData: Bool,
                                appendRecord: Bool = true) async -> BatchOutcome {
@@ -238,10 +259,15 @@ enum UninstallEngine {
             for app in apps {
                 let files = relatedFiles(
                     appName: app.name, bundleID: app.bundleID)
-                for file in files where file.deletable {
-                    guard SafetyGuard.checkDeletable(file.url).allowed else { continue }
-                    if (try? await Task.detached { try FileManager.default.removeItem(at: file.url) }.value) != nil {
+                for file in files where Self.isDeletableRelated(file, bundleID: app.bundleID) {
+                    do {
+                        try await Task.detached { try FileManager.default.removeItem(at: file.url) }.value
                         relatedItems.append((file.url.path, file.bytes))
+                        outcome.relatedFiles += 1
+                        outcome.relatedBytes += file.bytes
+                    } catch {
+                        outcome.failed.append((file.url.lastPathComponent,
+                                               error.localizedDescription))
                     }
                 }
             }
@@ -260,7 +286,7 @@ enum UninstallEngine {
                 CleanRecordItem(path: $0.path, bytes: $0.bytes, mode: .trash, success: true, error: nil)
             } + relatedItems.map {
                 CleanRecordItem(path: $0.path, bytes: $0.bytes, mode: .trash, success: true, error: nil)
-            })
+            }, source: .uninstallBatch)
         // Callers that run several single-app passes (the UI's sequential
         // progress loop) pass appendRecord:false and write ONE aggregated
         // record themselves — otherwise History got a row per app.

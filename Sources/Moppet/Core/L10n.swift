@@ -52,6 +52,11 @@ enum L10n {
 func L(_ key: String) -> String { L10n.t(key) }
 
 private let zh: [String: String] = [
+    // uninstall batch + history source
+    "+%lld more": "另 %lld 个",
+    "Apps and their user data (preferences, caches, containers, saved state, logs…) are moved to the Trash together. Nothing is deleted permanently — you can restore from the Trash.": "App 与其用户数据（偏好设置、缓存、容器、恢复状态、日志等）会一起移入废纸篓。不会永久删除——可从废纸篓恢复。",
+    "%1$@ apps · %2$@ data": "App %1$@ · 数据 %2$@",
+    " · %lld leftover files": " · %lld 个残留文件",
     // dashboard lifetime stats
     "Cleaned so far": "累计清理",
     "Open the cleanup history": "打开清理历史",

@@ -360,7 +360,9 @@ struct AnalyzeView: View {
             }
             let freed = removed.reduce(0) { $0 + $1.bytes }
             let record = CleanRecord(
-                date: Date(), sectionTitles: ["Analyze"],
+                date: Date(), sectionTitles: [
+                    String(format: L("%lld analyzed paths"), nodes.count)
+                ],
                 requestedBytes: freed, freedBytes: freed, itemCount: nodes.count,
                 items: removed.map {
                     CleanRecordItem(path: $0.url.path, bytes: $0.bytes, mode: .permanent,
@@ -371,7 +373,7 @@ struct AnalyzeView: View {
                 } + blocked.map {
                     CleanRecordItem(path: $0.url.path, bytes: $0.bytes, mode: .permanent,
                                     success: false, error: "blocked by safety guard")
-                })
+                }, source: .analyze)
             HistoryStore.append(record)
             UXFeedback.success()
             PetBus.shared.say(String(format: L("Deleted %lld paths 🗑"), removed.count), state: .celebrating)

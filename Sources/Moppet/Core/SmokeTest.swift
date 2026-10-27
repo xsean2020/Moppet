@@ -737,6 +737,98 @@ enum SmokeTest {
                        !foundPaths.contains(blocked.resolvingSymlinksInPath().path))
             }
 
+            // Batch uninstall must sweep app DATA too (the reported bug):
+            // fake .app + fake Application Support payload in a temp tree.
+            do {
+                let fm = FileManager.default
+                let root = fm.temporaryDirectory
+                    .appendingPathComponent("moppet-batch-\(UUID().uuidString)", isDirectory: true)
+                let appURL = root.appendingPathComponent("Fake.app", isDirectory: true)
+                let contents = appURL.appendingPathComponent("Contents", isDirectory: true)
+                try? fm.createDirectory(at: contents, withIntermediateDirectories: true)
+                let info: [String: Any] = ["CFBundleIdentifier": "com.moppet.smoketest",
+                                           "CFBundleName": "Fake"]
+                (info as NSDictionary).write(to: contents.appendingPathComponent("Info.plist"), atomically: true)
+                let payload = contents.appendingPathComponent("MacOS/Fake")
+                try? fm.createDirectory(at: payload.deletingLastPathComponent(), withIntermediateDirectories: true)
+                fm.createFile(atPath: payload.path, contents: Data(repeating: 1, count: 4096))
+                defer { try? fm.removeItem(at: root) }
+
+                let entry = UninstallEngine.AppEntry(
+                    id: appURL.path, name: "Fake", url: appURL,
+                    bundleID: "com.moppet.smoketest", bytes: 0)
+                // Plan only: the engine's data sweep targets the REAL home
+                // (Application Support/com.moppet.smoketest). Create that
+                // payload so the assertion is about behaviour, then clean up.
+                let homeData = fm.homeDirectoryForCurrentUser
+                    .appendingPathComponent("Library/Application Support/com.moppet.smoketest",
+                                            isDirectory: true)
+                let createdHomeData = !fm.fileExists(atPath: homeData.path)
+                if createdHomeData {
+                    try? fm.createDirectory(at: homeData, withIntermediateDirectories: true)
+                    fm.createFile(atPath: homeData.appendingPathComponent("state.db").path,
+                                  contents: Data(repeating: 2, count: 2048))
+                }
+                defer { if createdHomeData { try? fm.removeItem(at: homeData) } }
+
+                let outcome = awaitSync {
+                    await UninstallEngine.batchUninstall(
+                        apps: [entry], sizes: [entry.id: 4096],
+                        withData: true, appendRecord: false)
+                }
+                expect("uninstall batch: app bundle was removed",
+                       !fm.fileExists(atPath: appURL.path) && outcome.trashed.count == 1)
+                if createdHomeData {
+                    expect("uninstall batch: app DATA is swept with the app",
+                           !fm.fileExists(atPath: homeData.path) && outcome.relatedFiles > 0)
+                }
+                expect("uninstall batch: data bytes counted in the outcome",
+                       outcome.relatedBytes > 0 || !createdHomeData)
+            }
+
+            // History records name their SOURCE menu (old files without the
+            // field must still decode), and the uninstall deletability rule
+            // must accept a bundle-scoped preference plist.
+            do {
+                let record = CleanRecord(date: Date(), sectionTitles: ["Browsers"],
+                                         requestedBytes: 10, freedBytes: 10,
+                                         itemCount: 1, items: [], source: .clean)
+                let encoder = JSONEncoder()
+                encoder.dateEncodingStrategy = .iso8601
+                let decoder = JSONDecoder()
+                decoder.dateDecodingStrategy = .iso8601
+                if let data = try? encoder.encode(record),
+                   let back = try? decoder.decode(CleanRecord.self, from: data) {
+                    expect("history: source survives the JSON round-trip", back.source == .clean)
+                } else {
+                    expect("history: source survives the JSON round-trip", false, "encode/decode failed")
+                }
+                // Legacy record: no "source" key at all.
+                let legacyJSON = #"{"id":"11111111-1111-1111-1111-111111111111","date":"2026-01-01T00:00:00Z","sectionTitles":["Analyze"],"requestedBytes":5,"freedBytes":5,"itemCount":1,"items":[]}"#
+                let legacy = try? decoder.decode(CleanRecord.self, from: Data(legacyJSON.utf8))
+                expect("history: legacy record without source still decodes",
+                       legacy != nil && legacy?.source == nil)
+                // Inference used by the History row for such records.
+                expect("history: legacy record source is inferred from its section title",
+                       legacy.map { HistoryView.resolvedSource($0) == .analyze } == true)
+
+                // Bundle-scoped preferences are removable; the category as a
+                // whole is not (batch uninstall used to skip them entirely).
+                let home = FileManager.default.homeDirectoryForCurrentUser
+                let prefFile = home.appendingPathComponent("Library/Preferences/com.example.app.plist")
+                let rel = UninstallEngine.RelatedFile(url: prefFile, bytes: 1,
+                                                      kind: "preferences", deletable: true)
+                expect("uninstall: bundle-scoped preference plist is removable",
+                       UninstallEngine.isDeletableRelated(rel, bundleID: "com.example.app"))
+                expect("uninstall: another app's preference plist is not",
+                       !UninstallEngine.isDeletableRelated(rel, bundleID: "com.other.app"))
+                let prefDir = home.appendingPathComponent("Library/Preferences")
+                let dirRel = UninstallEngine.RelatedFile(url: prefDir, bytes: 1,
+                                                         kind: "preferences", deletable: true)
+                expect("uninstall: the Preferences CATEGORY itself stays protected",
+                       !UninstallEngine.isDeletableRelated(dirRel, bundleID: "com.example.app"))
+            }
+
             // Dashboard lifetime totals come from the audit log: only
             // SUCCESSFUL items count, split by deletion mode, and failures
             // never inflate the number.
@@ -861,6 +953,18 @@ enum SmokeTest {
         }
         semaphore.wait()
         return output
+    }
+
+    /// Runs an async operation from the synchronous smoke body.
+    private static func awaitSync<T>(_ work: @escaping () async -> T) -> T {
+        let semaphore = DispatchSemaphore(value: 0)
+        var result: T?
+        Task {
+            result = await work()
+            semaphore.signal()
+        }
+        semaphore.wait()
+        return result!
     }
 
     /// Serializes tools/list the way the MCP server would.

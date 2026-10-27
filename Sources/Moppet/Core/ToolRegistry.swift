@@ -273,8 +273,7 @@ enum ToolRegistry {
                 items: outcomes.map {
                     CleanRecordItem(path: $0.path, bytes: $0.bytes, mode: $0.mode,
                                     success: $0.success, error: $0.error)
-                }
-            )
+                }, source: .aiAgent)
             HistoryStore.append(record)
             PetBus.shared.say("Freed \(freed.bytesFormatted) 🎉", state: .celebrating)
             var text = "Freed \(freed.bytesFormatted) across \(outcomes.count - failed.count) items."

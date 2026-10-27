@@ -92,7 +92,7 @@ struct UninstallView: View {
             }
             Button(L("Cancel"), role: .cancel) {}
         } message: {
-            Text(L("Apps are deleted permanently (cannot be undone). Related files listed in the detail pane are NOT touched by batch uninstall."))
+            Text(L("Apps and their user data (preferences, caches, containers, saved state, logs…) are moved to the Trash together. Nothing is deleted permanently — you can restore from the Trash."))
         }
         .confirmationDialog(
             Text(singleRemoveData
@@ -206,7 +206,12 @@ struct UninstallView: View {
                                 .font(Airi.caption2Font)
                                 .foregroundStyle(Airi.danger)
                         }
-                        Text(String(format: L("Freed %@"), outcome.freedBytes.bytesFormatted))
+                        Text(String(format: L("%1$@ apps · %2$@ data"),
+                                    outcome.freedBytes.bytesFormatted,
+                                    outcome.relatedBytes.bytesFormatted)
+                             + (outcome.relatedFiles > 0
+                                ? String(format: L(" · %lld leftover files"), outcome.relatedFiles)
+                                : ""))
                             .font(Airi.caption2Font)
                             .foregroundStyle(Airi.neutral500)
                     }
@@ -231,26 +236,52 @@ struct UninstallView: View {
             // Sequential so the per-app progress counter means something; each
             // call is told NOT to append its own record.
             var outcome = UninstallEngine.BatchOutcome()
+            var dataItems: [CleanRecordItem] = []
             for (index, app) in picked.enumerated() {
+                // Batch uninstall ALWAYS sweeps app data. Leaving
+                // Preferences/Caches/Containers behind made "uninstalled" apps
+                // keep their footprint (and reappear with old state on
+                // reinstall) — the behaviour users reported as a bug.
                 let single = await UninstallEngine.batchUninstall(
-                    apps: [app], sizes: effectiveSizes, withData: false, appendRecord: false)
+                    apps: [app], sizes: effectiveSizes, withData: true, appendRecord: false)
                 outcome.trashed += single.trashed
                 outcome.freedBytes += single.freedBytes
                 outcome.failed += single.failed
+                outcome.relatedFiles += single.relatedFiles
+                outcome.relatedBytes += single.relatedBytes
+                if single.relatedFiles > 0 {
+                    // The engine only reports counts; list the actual paths it
+                    // was allowed to remove for the per-path audit trail.
+                    let touched = UninstallEngine.relatedFiles(
+                        appName: app.name, bundleID: app.bundleID)
+                        .filter { UninstallEngine.isDeletableRelated($0, bundleID: app.bundleID) }
+                        .filter { !FileManager.default.fileExists(atPath: $0.url.path) }
+                    dataItems += touched.map {
+                        CleanRecordItem(path: $0.url.path, bytes: $0.bytes,
+                                        mode: .trash, success: true, error: nil)
+                    }
+                }
                 batchProgress = (index + 1, picked.count)
             }
             // ONE audit record for the whole batch — previously every app
             // produced its own row, so a 5-app uninstall spammed History with
             // five 1-path entries at the same timestamp.
             if !outcome.trashed.isEmpty {
+                // Section titles = the app names, so the History row answers
+                // "what did this run remove?" instead of only "Uninstall".
+                let appNames = outcome.trashed.map(\.name)
+                let titles = appNames.count <= 3
+                    ? appNames
+                    : Array(appNames.prefix(3)) + [String(format: L("+%lld more"), appNames.count - 3)]
                 let items = outcome.trashed.map {
                     CleanRecordItem(path: $0.id, bytes: effectiveSizes[$0.id] ?? 0,
-                                    mode: .permanent, success: true, error: nil)
-                }
+                                    mode: .trash, success: true, error: nil)
+                } + dataItems
                 HistoryStore.append(CleanRecord(
-                    date: Date(), sectionTitles: ["Uninstall (batch)"],
-                    requestedBytes: outcome.freedBytes, freedBytes: outcome.freedBytes,
-                    itemCount: items.count, items: items))
+                    date: Date(), sectionTitles: titles,
+                    requestedBytes: outcome.freedBytes + outcome.relatedBytes,
+                    freedBytes: outcome.freedBytes + outcome.relatedBytes,
+                    itemCount: items.count, items: items, source: .uninstallBatch))
             }
             // Ghost rows: only apps that actually trashed leave the list —
             // a failed recycle used to make a still-installed app vanish.
@@ -546,14 +577,14 @@ struct UninstallView: View {
             }
             // removedFiles/failed carry full paths (see UninstallEngine.uninstall).
             let record = CleanRecord(
-                date: Date(), sectionTitles: ["Uninstall"],
+                date: Date(), sectionTitles: [appCopy.name],
                 requestedBytes: freed, freedBytes: freed,
                 itemCount: result.removedFiles.count + result.failed.count,
                 items: result.removedFiles.map {
                     CleanRecordItem(path: $0, bytes: sizeByPath[$0] ?? 0, mode: .permanent, success: true, error: nil)
                 } + result.failed.map {
                     CleanRecordItem(path: $0.0, bytes: sizeByPath[$0.0] ?? 0, mode: .permanent, success: false, error: $0.1)
-                })
+                }, source: .uninstall)
             HistoryStore.append(record)
             if result.appTrashed {
                 UXFeedback.success()
