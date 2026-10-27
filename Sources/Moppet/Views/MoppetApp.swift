@@ -20,7 +20,7 @@ struct MoppetApp: App {
         let knownFlags: Set<String> = ["--smoke", "--brain-smoke", "--mcp", "--mcp-http",
                                        "--brain-exec", "--yes", "--probe-floater",
                                        "--probe-models", "--probe-pet-bubble",
-                                       "--route-perf", "--win-debug"]
+                                       "--route-perf", "--win-debug", "--scheduled-clean"]
         let args = CommandLine.arguments
         // A bare "--" is the conventional separator (`swift run Moppet -- --smoke`)
         // and must not count as an unknown flag.
@@ -35,6 +35,11 @@ struct MoppetApp: App {
         // Headless self-test: `Moppet --smoke` exercises the core engine and exits.
         if args.contains("--smoke") {
             SmokeTest.run()
+        }
+        // LaunchAgent entry: the scheduled safe clean. Runs headless, records
+        // to history with source .scheduled, exits.
+        if args.contains("--scheduled-clean") {
+            Scheduler.runScheduledClean()
         }
         // Pet bubble sizing probe: measures real laid-out heights.
         if args.contains("--probe-pet-bubble") {
@@ -184,7 +189,8 @@ extension Notification.Name {
 // MARK: - Sidebar navigation
 
 enum Route: String, Hashable, CaseIterable, Identifiable {
-    case dashboard, clean, uninstall, optimize, startup, analyze, status, purge, slim, history, settings
+    case dashboard, clean, orphans, uninstall, optimize, startup, analyze, status,
+         purge, slim, hogs, largeFiles, history, settings
 
     var id: String { rawValue }
 
@@ -199,6 +205,9 @@ enum Route: String, Hashable, CaseIterable, Identifiable {
         case .status: L("Status")
         case .purge: L("Purge")
         case .slim: L("Slim")
+        case .hogs: L("Space Hogs")
+        case .largeFiles: L("Large Files")
+        case .orphans: L("Orphans")
         case .history: L("History")
         case .settings: L("Settings")
         }
@@ -215,6 +224,9 @@ enum Route: String, Hashable, CaseIterable, Identifiable {
         case .status: "cpu"
         case .purge: "shippingbox"
         case .slim: "scissors"
+        case .hogs: "internaldrive"
+        case .largeFiles: "doc.magnifyingglass"
+        case .orphans: "tray.full"
         case .history: "clock.arrow.circlepath"
         case .settings: "gearshape"
         }
@@ -231,10 +243,10 @@ private enum RouteGroup {
         ("", [.dashboard]),
     ]
     static let cleaning: [(label: String, routes: [Route])] = [
-        (L("Clean"), [.clean, .uninstall, .purge, .slim]),
+        (L("Clean"), [.clean, .orphans, .uninstall, .purge, .slim]),
     ]
     static let system: [(label: String, routes: [Route])] = [
-        (L("System"), [.optimize, .startup, .status, .analyze]),
+        (L("System"), [.hogs, .largeFiles, .optimize, .startup, .status, .analyze]),
     ]
     static let bottom: [(label: String, routes: [Route])] = [
         ("", [.history, .settings]),
@@ -430,8 +442,9 @@ struct RootView: View {
     /// ⌘1…⌘9 jumps to the first nine sidebar routes (dashboard first),
     /// giving the whole app keyboard navigation without touching the flow.
     private static func routeShortcut(_ route: Route) -> KeyboardShortcut? {
-        let ordered: [Route] = [.dashboard, .clean, .uninstall, .purge, .slim,
-                                .optimize, .startup, .status, .analyze, .history, .settings]
+        let ordered: [Route] = [.dashboard, .clean, .orphans, .uninstall, .purge,
+                                .slim, .hogs, .largeFiles, .optimize, .startup,
+                                .status, .analyze, .history, .settings]
         guard let index = ordered.firstIndex(of: route), index < 9 else { return nil }
         return KeyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: .command)
     }
@@ -445,6 +458,8 @@ struct RootView: View {
             HomeView(navigate: { route = $0 }, openChat: { openWindow(id: "chat") })
         case .clean:
             CleanView(onClose: backToDashboard)
+        case .orphans:
+            OrphansView(onClose: backToDashboard)
         case .uninstall:
             UninstallView(onClose: backToDashboard)
         case .optimize:
@@ -459,6 +474,10 @@ struct RootView: View {
             PurgeView(onClose: backToDashboard)
         case .slim:
             SlimView(onClose: backToDashboard)
+        case .hogs:
+            SystemHogsView(onClose: backToDashboard)
+        case .largeFiles:
+            LargeFilesView(onClose: backToDashboard)
         case .history:
             HistoryView(onClose: backToDashboard)
         case .settings:

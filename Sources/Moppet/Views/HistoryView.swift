@@ -1,4 +1,6 @@
 import SwiftUI
+import AppKit
+import UniformTypeIdentifiers
 
 /// Clean-run audit trail — SwiftUI cousin of `mo history`.
 /// Every record expands to the exact paths removed, their size, whether they
@@ -40,6 +42,17 @@ struct HistoryView: View {
                     .font(Airi.captionFont)
                     .foregroundStyle(Airi.neutral500)
                 Spacer()
+                if !records.isEmpty {
+                    AiriButton(title: L("Export CSV"), icon: "square.and.arrow.up", variant: .secondary) {
+                        export(.csv)
+                    }
+                    AiriButton(title: L("Export JSON"), icon: "square.and.arrow.up", variant: .secondary) {
+                        export(.json)
+                    }
+                    AiriButton(title: L("Export PDF"), icon: "square.and.arrow.up", variant: .secondary) {
+                        exportPDF()
+                    }
+                }
                 AiriButton(title: L("Reload"), icon: "arrow.clockwise", variant: .secondary) {
                     records = HistoryStore.load()
                     expanded = []
@@ -201,6 +214,99 @@ struct HistoryView: View {
             .padding(.vertical, 2)
             .background(Capsule().fill(mode == .trash ? Airi.neutral100 : Airi.warning.opacity(0.15)))
             .foregroundStyle(mode == .trash ? Airi.neutral500 : Airi.warning)
+    }
+
+    // MARK: - Export (gap-analysis P0: dry-run / audit report export)
+
+    private enum ExportFormat {
+        case csv, json
+        var fileExtension: String { self == .csv ? "csv" : "json" }
+        var prompt: String { self == .csv ? L("Export history as CSV") : L("Export history as JSON") }
+    }
+
+    /// Save-panel driven export. Written on the main actor (NSSavePanel is
+    /// AppKit UI); file IO is a single atomic write.
+    @MainActor
+    private func export(_ format: ExportFormat) {
+        let panel = NSSavePanel()
+        panel.title = format.prompt
+        panel.allowedContentTypes = [format == .csv ? .commaSeparatedText : .json]
+        panel.nameFieldStringValue = "moppet-history-\(Date().formatted(.iso8601.year().month().day())).\(format.fileExtension)"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            switch format {
+            case .csv:
+                try HistoryStore.csvExport(records: records)
+                    .write(to: url, atomically: true, encoding: .utf8)
+            case .json:
+                try HistoryStore.jsonExport(records: records).write(to: url, options: .atomic)
+            }
+        } catch {
+            // Export failure must be visible, not silent — the audit log is
+            // the app's evidence trail.
+            let alert = NSAlert()
+            alert.messageText = L("Export failed")
+            alert.informativeText = error.localizedDescription
+            alert.runModal()
+        }
+    }
+
+    /// PDF report: a readable audit document (runs + per-path rows) printed
+    /// straight to a chosen file via NSPrintOperation's .save disposition.
+    @MainActor
+    private func exportPDF() {
+        let panel = NSSavePanel()
+        panel.title = L("Export history as PDF")
+        panel.allowedContentTypes = [.pdf]
+        panel.nameFieldStringValue = "moppet-history-\(Date().formatted(.iso8601.year().month().day())).pdf"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        let report = Self.buildPDFReport(records)
+        let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: 620, height: 840))
+        textView.string = report
+        textView.font = NSFont.userFixedPitchFont(ofSize: 9)
+        textView.isVerticallyResizable = true
+        textView.textContainer?.widthTracksTextView = true
+        textView.sizeToFit()
+
+        let printInfo = NSPrintInfo()
+        printInfo.horizontalPagination = .fit
+        printInfo.verticalPagination = .automatic
+        printInfo.jobDisposition = .save
+        printInfo.dictionary()[NSPrintInfo.AttributeKey.jobSavingURL] = url
+        printInfo.topMargin = 36; printInfo.bottomMargin = 36
+        printInfo.leftMargin = 36; printInfo.rightMargin = 36
+
+        let operation = NSPrintOperation(view: textView, printInfo: printInfo)
+        operation.showsPrintPanel = false
+        operation.showsProgressPanel = false
+        operation.run()
+    }
+
+    /// Plain-text audit report — one section per run, one line per path.
+    /// (Non-actor: pure string building, shared with future doc exports.)
+    static func buildPDFReport(_ records: [CleanRecord]) -> String {
+        var lines: [String] = []
+        let title = L("Moppet — Clean History Export")
+        lines.append(title)
+        lines.append(String(format: L("Exported %@ · %lld runs"),
+                            ISO8601DateFormatter().string(from: Date()), Int64(records.count)))
+        lines.append(String(repeating: "=", count: 64))
+        let formatter = ISO8601DateFormatter()
+        for record in records.reversed() {
+            let source = (record.source?.rawValue ?? resolvedSource(record).rawValue)
+            lines.append("")
+            lines.append("\(formatter.string(from: record.date)) · \(source) · \(record.sectionTitles.joined(separator: ", "))")
+            lines.append(String(format: L("Freed %@ in %lld paths"),
+                                record.freedBytes.bytesFormatted, Int64(record.itemCount)))
+            for item in record.items {
+                let mark = item.success ? "✓" : "✗"
+                let mode = item.mode == .trash ? L("Trash") : L("Permanent")
+                let error = item.error.map { " — \($0)" } ?? ""
+                lines.append("  \(mark) [\(mode)] \(item.path) (\(item.bytes.bytesFormatted))\(error)")
+            }
+        }
+        return lines.joined(separator: "\n") + "\n"
     }
 
     // MARK: - Helpers

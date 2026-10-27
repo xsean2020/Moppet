@@ -85,6 +85,10 @@ enum RecordSource: String, Codable, CaseIterable {
     case slim           // binary slimming
     case startup        // startup item enable/disable
     case optimize       // maintenance tasks
+    case largeFiles     // Large Files page → Trash
+    case orphans        // orphan residue cleanup
+    case hogs           // system hogs (snapshots / Docker / Homebrew)
+    case scheduled      // the LaunchAgent's --scheduled-clean run
 
     var icon: String {
         switch self {
@@ -97,6 +101,10 @@ enum RecordSource: String, Codable, CaseIterable {
         case .slim: "scissors"
         case .startup: "power"
         case .optimize: "wrench.and.screwdriver"
+        case .largeFiles: "doc.magnifyingglass"
+        case .orphans: "tray.full"
+        case .hogs: "internaldrive"
+        case .scheduled: "clock.badge.checkmark"
         }
     }
 
@@ -112,6 +120,10 @@ enum RecordSource: String, Codable, CaseIterable {
         case .slim: L("Slim")
         case .startup: L("Startup")
         case .optimize: L("Optimize")
+        case .largeFiles: L("Large Files")
+        case .orphans: L("Orphans")
+        case .hogs: L("Space Hogs")
+        case .scheduled: L("Scheduled")
         }
     }
 }

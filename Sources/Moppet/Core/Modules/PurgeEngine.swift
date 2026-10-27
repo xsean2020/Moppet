@@ -94,7 +94,8 @@ enum PurgeEngine {
     }
 }
 
-/// Large-file finder — the report-only `large files` section of `mo clean`.
+/// Large-file finder — the report-only `large files` section of `mo clean`,
+/// now also the engine behind the Large Files page (P0 in the gap analysis).
 enum LargeFilesEngine {
 
     struct LargeFile: Identifiable {
@@ -103,8 +104,28 @@ enum LargeFilesEngine {
         let bytes: Int64
     }
 
+    /// Where the UI (and the tool) look. `wholeHome` relies on Spotlight —
+    /// the `find` fallback over an entire home measured >600s, so when
+    /// mdfind comes back empty we run the control query and TRUST an empty
+    /// result instead of walking (same contract as deepScan).
+    enum Scope: CaseIterable {
+        case userFolders      // Downloads / Documents / Desktop
+        case wholeHome        // ~ via Spotlight
+        case containers       // Containers / Caches / Application Support
+
+        var roots: [String] {
+            switch self {
+            case .userFolders: return ["~/Downloads", "~/Documents", "~/Desktop"]
+            case .wholeHome: return ["~"]
+            case .containers: return ["~/Library/Containers", "~/Library/Caches",
+                                      "~/Library/Application Support"]
+            }
+        }
+    }
+
     /// Spotlight-backed search for files above `minBytes`; falls back to
-    /// a bounded `find` pass when mdfind yields nothing.
+    /// a bounded `find` pass when mdfind yields nothing (except for
+    /// `wholeHome`, where the fallback is prohibitively slow).
     static func find(minBytes: Int64, limit: Int = 50,
                      in paths: [String] = ["~/Downloads", "~/Library/Mobile Documents",
                                            "~/Library/Containers", "~/Documents"]) async -> [LargeFile] {
@@ -131,6 +152,43 @@ enum LargeFilesEngine {
             files = parseAndStat(await runShell(findScript), minBytes: minBytes, limit: limit)
         }
         return Array(files.sorted { $0.bytes > $1.bytes }.prefix(limit))
+    }
+
+    /// Scope-aware search for the Large Files page. Whole-home scans trust
+    /// Spotlight (control-query disambiguated) and never fall back to the
+    /// slow walk.
+    static func find(minBytes: Int64, limit: Int = 200, scope: Scope) async -> [LargeFile] {
+        let expanded = scope.roots.map {
+            $0.hasPrefix("~") ? FileManager.default.homeDirectoryForCurrentUser.path + $0.dropFirst() : $0
+        }
+        var files: [LargeFile] = []
+        for dir in expanded {
+            let script = """
+            mdfind -onlyin \(shellQuote(dir)) 'kMDItemFSSize > \(minBytes * 1_000_000)' 2>/dev/null | head -\(limit * 2)
+            """
+            files += parseAndStat(await runShell(script), minBytes: minBytes, limit: limit)
+        }
+        if files.isEmpty && scope != .wholeHome {
+            let minMB = max(1, minBytes / 1_000_000)
+            let findScript = expanded.map { dir in
+                "find \(shellQuote(dir)) -type f -size +\(minMB)M -not -path '*/Library/Caches/*' 2>/dev/null | head -\(limit)"
+            }.joined(separator: "; ")
+            files = parseAndStat(await runShell(findScript), minBytes: minBytes, limit: limit)
+        }
+        // Dedupe (nested scopes can report the same file twice) + sort.
+        var seen = Set<String>()
+        return files
+            .filter { seen.insert($0.url.path).inserted }
+            .sorted { $0.bytes > $1.bytes }
+    }
+
+    /// Whether Spotlight indexing works in `dir` — a control query for
+    /// plists (present on every Mac) disambiguates "no big files" from
+    /// "indexing off".
+    static func spotlightWorks(in dir: String) async -> Bool {
+        let script = "mdfind -onlyin \(shellQuote(dir)) '(kMDItemFSName == \\\"*.plist\\\"c)' 2>/dev/null | head -1"
+        let output = await runShell(script)
+        return !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private static func parseAndStat(_ output: String, minBytes: Int64, limit: Int) -> [LargeFile] {

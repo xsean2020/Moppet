@@ -7,6 +7,9 @@ struct UninstallView: View {
 
     @State private var apps: [UninstallEngine.AppEntry] = []
     @State private var sizes: [String: Int64] = [:]
+    /// Deletable user-data bytes per app id — what "uninstall + data" sweeps
+    /// beyond the bundle. Streams in behind the app-sizing round.
+    @State private var dataSizes: [String: Int64] = [:]
     @State private var sizingProgress: (done: Int, total: Int)? = nil
     @State private var loadingPulse = false
     @State private var selectedApps: Set<String> = []
@@ -83,16 +86,16 @@ struct UninstallView: View {
         }
         .background(Airi.pageBackground.opacity(0.001))
         .confirmationDialog(
-            Text(String(format: L("Uninstall %lld apps (%@)?"), pickedApps.count, pickedBytes.bytesFormatted)),
+            Text(String(format: L("Uninstall %lld apps + data (%@)?"), pickedApps.count, pickedBytes.bytesFormatted)),
             isPresented: $confirmingBatch,
             titleVisibility: .visible
         ) {
-            Button(String(format: L("Uninstall %lld apps"), pickedApps.count), role: .destructive) {
+            Button(String(format: L("Uninstall %lld apps + data"), pickedApps.count), role: .destructive) {
                 runBatch()
             }
             Button(L("Cancel"), role: .cancel) {}
         } message: {
-            Text(L("Apps and their user data (preferences, caches, containers, saved state, logs…) are moved to the Trash together. Nothing is deleted permanently — you can restore from the Trash."))
+            Text(L("The apps and their user data (preferences, caches, containers, saved state, logs…) are deleted permanently. This cannot be undone."))
         }
         .confirmationDialog(
             Text(singleRemoveData
@@ -130,6 +133,32 @@ struct UninstallView: View {
             sizes = sized
             apps.sort { (sizes[$0.id] ?? 0) > (sizes[$1.id] ?? 0) }
             sizingProgress = nil
+            // Batch uninstall ALWAYS sweeps user data, so its byte count must
+            // include it — an app-only total made the destructive button read
+            // 11 MB while the run actually removed 56 MB.
+            dataSizes = await Self.relatedDataBytes(for: loaded)
+        }
+    }
+
+    /// Deletable user-data bytes per app (preferences, caches, containers…).
+    /// Only `isDeletableRelated` files count — group containers and admin-
+    /// scope paths stay behind and must not inflate the number. relatedFiles
+    /// sizes through SizeCache (NSLock-guarded, throttled writes), so the
+    /// parallel fan-out is safe.
+    static func relatedDataBytes(for apps: [UninstallEngine.AppEntry]) async -> [String: Int64] {
+        await withTaskGroup(of: (String, Int64).self) { group in
+            for app in apps {
+                group.addTask {
+                    let files = UninstallEngine.relatedFiles(appName: app.name, bundleID: app.bundleID)
+                    let bytes = files
+                        .filter { UninstallEngine.isDeletableRelated($0, bundleID: app.bundleID) }
+                        .reduce(0) { $0 + $1.bytes }
+                    return (app.id, bytes)
+                }
+            }
+            var out: [String: Int64] = [:]
+            for await (id, bytes) in group { out[id] = bytes }
+            return out
         }
     }
 
@@ -137,8 +166,9 @@ struct UninstallView: View {
         apps.filter { selectedApps.contains($0.id) }
     }
 
+    /// What the batch actually removes: bundles + deletable user data.
     private var pickedBytes: Int64 {
-        pickedApps.reduce(0) { $0 + (sizes[$1.id] ?? 0) }
+        pickedApps.reduce(0) { $0 + (sizes[$1.id] ?? 0) + (dataSizes[$1.id] ?? 0) }
     }
 
     private var batchBar: some View {
@@ -187,7 +217,7 @@ struct UninstallView: View {
                 AiriButton(
                     title: batchRunning
                         ? L("Uninstalling…")
-                        : String(format: L("Uninstall %lld apps (%@)"), pickedApps.count, pickedBytes.bytesFormatted),
+                        : String(format: L("Uninstall %lld apps + data (%@)"), pickedApps.count, pickedBytes.bytesFormatted),
                     icon: "trash.fill",
                     variant: .destructive,
                     disabled: pickedApps.isEmpty || batchRunning
@@ -258,7 +288,7 @@ struct UninstallView: View {
                         .filter { !FileManager.default.fileExists(atPath: $0.url.path) }
                     dataItems += touched.map {
                         CleanRecordItem(path: $0.url.path, bytes: $0.bytes,
-                                        mode: .trash, success: true, error: nil)
+                                        mode: .permanent, success: true, error: nil)
                     }
                 }
                 batchProgress = (index + 1, picked.count)
@@ -275,7 +305,7 @@ struct UninstallView: View {
                     : Array(appNames.prefix(3)) + [String(format: L("+%lld more"), appNames.count - 3)]
                 let items = outcome.trashed.map {
                     CleanRecordItem(path: $0.id, bytes: effectiveSizes[$0.id] ?? 0,
-                                    mode: .trash, success: true, error: nil)
+                                    mode: .permanent, success: true, error: nil)
                 } + dataItems
                 HistoryStore.append(CleanRecord(
                     date: Date(), sectionTitles: titles,

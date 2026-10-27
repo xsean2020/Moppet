@@ -21,6 +21,9 @@ struct SettingsView: View {
     @State private var petName = PetIdentity.name
     @State private var personaText = PetIdentity.persona ?? ""
     @State private var identitySaved = false
+    @State private var schedule = Scheduler.Settings.load()
+    @State private var scheduleBusy = false
+    @State private var scheduleStatus: String?
     /// Explicit focus plumbing for every text input (see labeledField).
     private enum Field: Hashable { case petName, persona, baseURL, model, apiKey, whitelist }
     @FocusState private var focusedField: Field?
@@ -62,6 +65,7 @@ struct SettingsView: View {
                     if section == .all || section == .general {
                         identityCard
                         languageCard
+                        scheduledCleanCard
                         petCard
                     }
                     if section == .all || section == .ai {
@@ -716,6 +720,107 @@ struct SettingsView: View {
     /// froze every settings render. Cache it: read once off-main, write
     /// optimistically (the setter's result isn't surfaced by the lib anyway).
     @State private var launchAtLogin = false
+
+    /// Scheduled cleaning (gap-analysis P0): a LaunchAgent that runs the
+    /// safe, headless clean on a calendar interval. The toggle installs/
+    /// removes `~/Library/LaunchAgents/com.moppet.schedule.plist`.
+    private var scheduledCleanCard: some View {
+        SettingsCard {
+            VStack(alignment: .leading, spacing: Airi.space2) {
+                Label(L("Scheduled Clean"), systemImage: "clock.badge.checkmark")
+                    .font(Airi.cardTitleFont)
+                    .foregroundStyle(Airi.neutral950)
+                ToggleRow(title: L("Clean automatically"),
+                          subtitle: L("Runs the safe set (caches, logs, dev package caches) in the background — never the Trash, installers or whole-home scans."),
+                          isOn: Binding(
+                            get: { schedule.enabled },
+                            set: { on in
+                                schedule.enabled = on
+                                Task { await applySchedule() }
+                            }))
+                if schedule.enabled {
+                    HStack(spacing: Airi.space2) {
+                        Picker(L("Frequency"), selection: Binding(
+                            get: { schedule.frequency },
+                            set: { newValue in
+                                schedule.frequency = newValue
+                                Task { await applySchedule() }
+                            })) {
+                            Text(L("Every day")).tag(Scheduler.Frequency.daily)
+                            Text(L("Every week")).tag(Scheduler.Frequency.weekly)
+                        }
+                        .pickerStyle(.segmented)
+                        .frame(maxWidth: 220)
+                        if schedule.frequency == .weekly {
+                            Picker("", selection: Binding(
+                                get: { schedule.weekday },
+                                set: { newValue in
+                                    schedule.weekday = newValue
+                                    Task { await applySchedule() }
+                                })) {
+                                ForEach(1...7, id: \.self) { day in
+                                    Text(Self.weekdayName(day)).tag(day)
+                                }
+                            }
+                            .pickerStyle(.menu)
+                            .frame(maxWidth: 130)
+                            .labelsHidden()
+                        }
+                        Picker("", selection: Binding(
+                            get: { schedule.hour },
+                            set: { newValue in
+                                schedule.hour = newValue
+                                Task { await applySchedule() }
+                            })) {
+                            ForEach(0..<24, id: \.self) { hour in
+                                Text(String(format: "%02d:00", hour)).tag(hour)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .frame(maxWidth: 110)
+                        .labelsHidden()
+                        Spacer()
+                    }
+                }
+                HStack(spacing: Airi.space2) {
+                    if scheduleBusy { ProgressView().controlSize(.small) }
+                    Text(scheduleStatus ?? (Scheduler.isInstalled
+                        ? String(format: L("Installed — %@"), Scheduler.describe(schedule))
+                        : L("Not installed")))
+                        .font(Airi.captionFont)
+                        .foregroundStyle(scheduleStatus == nil ? Airi.neutral500 : Airi.neutral700)
+                        .lineLimit(2)
+                    Spacer()
+                }
+            }
+        }
+    }
+
+    @MainActor
+    private func applySchedule() async {
+        scheduleBusy = true
+        defer { scheduleBusy = false }
+        do {
+            if schedule.enabled {
+                try await Scheduler.install(settings: schedule)
+                scheduleStatus = String(format: L("Installed — %@"), Scheduler.describe(schedule))
+            } else {
+                await Scheduler.uninstall()
+                scheduleStatus = L("Not installed")
+            }
+        } catch {
+            // The toggle stays where the user put it, but the failure and
+            // the launchctl output are surfaced — a silently dead scheduler
+            // would look like "it just doesn't clean".
+            scheduleStatus = String(format: L("Failed: %@"), error.localizedDescription)
+            schedule.enabled = false
+        }
+    }
+
+    private static func weekdayName(_ day: Int) -> String {
+        [L("Sunday"), L("Monday"), L("Tuesday"), L("Wednesday"),
+         L("Thursday"), L("Friday"), L("Saturday")][day - 1]
+    }
 
     private var petCard: some View {
         SettingsCard {

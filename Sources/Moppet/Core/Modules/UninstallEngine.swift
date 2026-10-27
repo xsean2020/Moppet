@@ -223,7 +223,7 @@ enum UninstallEngine {
         return name == "\(bundleID).plist" || name.hasPrefix(bundleID + ".")
     }
 
-    /// Moves several apps to the Trash in one recycle batch. Related user
+    /// Removes several apps permanently in one pass. Related user
     /// data is only removed when `withData` is enabled and files are found.
     /// NOT @MainActor on purpose: the batch is pure async file work, and the
     /// MainActor annotation deadlocked every headless caller (smoke blocks the
@@ -283,9 +283,9 @@ enum UninstallEngine {
             freedBytes: outcome.freedBytes + relatedBytes,
             itemCount: appItems.count + relatedItems.count,
             items: appItems.map {
-                CleanRecordItem(path: $0.path, bytes: $0.bytes, mode: .trash, success: true, error: nil)
+                CleanRecordItem(path: $0.path, bytes: $0.bytes, mode: .permanent, success: true, error: nil)
             } + relatedItems.map {
-                CleanRecordItem(path: $0.path, bytes: $0.bytes, mode: .trash, success: true, error: nil)
+                CleanRecordItem(path: $0.path, bytes: $0.bytes, mode: .permanent, success: true, error: nil)
             }, source: .uninstallBatch)
         // Callers that run several single-app passes (the UI's sequential
         // progress loop) pass appendRecord:false and write ONE aggregated
@@ -308,7 +308,7 @@ enum UninstallEngine {
         var failed: [(String, String)] = []
         var appOK = false
 
-        // App bundle → Trash (works for user-writable /Applications subfolders and ~/Applications).
+        // App bundle removal (works for user-writable /Applications subfolders and ~/Applications).
         // removed/failed carry full paths so the history audit can show exactly what happened.
         do {
             // Permanent delete (the user opted out of Trash): removeItem is

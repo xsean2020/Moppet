@@ -970,6 +970,196 @@ enum SmokeTest {
             }
         }
 
+        // ---- Gap-analysis P0 engines (snapshots / Docker / Homebrew / orphans /
+        // scheduler / export) — parsers exercised on fixtures, never on the
+        // live system, and never executing destructive tools. ----
+        do {
+            // Snapshot list parsing: full mount names AND bare tokens,
+            // deduped, newest first.
+            let snapOutput = """
+            Snapshot dates for /:
+            com.apple.TimeMachine.2026-10-27-123456.local
+            com.apple.TimeMachine.2026-10-26-020101.local
+            2026-10-25-101112
+            not-a-snapshot-line
+            com.apple.TimeMachine.2026-10-27-123456.local
+            """
+            let snaps = SnapshotEngine.parseListOutput(snapOutput)
+            expect("snapshots: parses 3 unique, newest first",
+                   snaps.count == 3 && snaps[0].id == "2026-10-27-123456"
+                   && snaps[2].id == "2026-10-25-101112")
+            expect("snapshots: token extraction strict",
+                   SnapshotEngine.extractSnapshotToken("com.apple.TimeMachine.2026-01-01-000000.local") == "2026-01-01-000000"
+                   && SnapshotEngine.extractSnapshotToken("2026-01-01-000000") == "2026-01-01-000000"
+                   && SnapshotEngine.extractSnapshotToken("garbage") == nil)
+            expect("snapshots: date parses from token",
+                   SnapshotEngine.date(from: "2026-10-27-123456") != nil
+                   && SnapshotEngine.date(from: "nope") == nil)
+            // One malformed token must never pass the delete guard.
+            expect("snapshots: delete rejects non-tokens",
+                   // can't call the throwing shell path in smoke; the guard
+                   // is the same extractSnapshotToken check — assert its verdict.
+                   SnapshotEngine.extractSnapshotToken("2026-13-99-999999") == nil)
+
+            // Docker df NDJSON: Int and String number shapes both parse.
+            let dockerJSON = """
+            {"Type":"images","Images":4,"Size":3200000000}
+            {"Type":"containers","Containers":7,"Size":"1024000000"}
+            {"Type":"local Volumes","Volumes":2,"Size":512000000}
+            {"Type":"build-cache","BuildCache":11,"Size":"2048000000"}
+            """
+            let usage = DockerEngine.parseDFJSONL(dockerJSON)
+            expect("docker: df NDJSON parses all four types",
+                   usage.imagesCount == 4 && usage.imagesBytes == 3_200_000_000
+                   && usage.containersCount == 7 && usage.containersBytes == 1_024_000_000
+                   && usage.volumesCount == 2 && usage.volumesBytes == 512_000_000
+                   && usage.cacheCount == 11 && usage.cacheBytes == 2_048_000_000)
+            expect("docker: totals sum", usage.totalBytes == 6_784_000_000)
+
+            // Homebrew preview: "Would remove:" block + human-size parser.
+            let brewOutput = """
+            Warning: some tap warning line
+            Would remove:
+            /opt/homebrew/Cellar/foo/1.0 (12 files, 3.5MB)
+            /opt/homebrew/Cellar/bar/2.0 (1,004 files, 75.5MB)
+            /opt/homebrew/Cellar/baz/3.0 (2 files, 900KB)
+            ==> Nothing else
+            """
+            let brew = HomebrewEngine.parseCleanupPreview(brewOutput)
+            expect("homebrew: preview parses 3 lines",
+                   brew.lines.count == 3 && brew.lines[0].contains("foo/1.0"))
+            expect("homebrew: sizes sum (3.5MB + 75.5MB + 900KB)",
+                   brew.totalBytes == 3_500_000 + 75_500_000 + 900_000,
+                   "\(brew.totalBytes)")
+            expect("homebrew: size parser handles GB/B",
+                   HomebrewEngine.parseHumanSize(in: "(1.25GB)") == 1_250_000_000
+                   && HomebrewEngine.parseHumanSize(in: "(512B)") == 512
+                   && HomebrewEngine.parseHumanSize(in: "no size here") == 0)
+
+            // Orphan residue classification (pure rules — no disk walk).
+            expect("orphans: bundle id extraction",
+                   OrphanResidueEngine.bundleID(fromEntryName: "com.example.app") == "com.example.app"
+                   && OrphanResidueEngine.bundleID(fromEntryName: "com.example.app.plist") == "com.example.app"
+                   && OrphanResidueEngine.bundleID(fromEntryName: "com.example.app.savedState") == "com.example.app")
+            expect("orphans: ByHost plist collapses to the bundle id",
+                   OrphanResidueEngine.bundleID(fromEntryName: "com.example.app.A1B2C3D4.plist") == "com.example.app")
+            expect("orphans: non-reverse-DNS names rejected",
+                   OrphanResidueEngine.bundleID(fromEntryName: "notabundle") == nil
+                   && OrphanResidueEngine.bundleID(fromEntryName: "readme.txt") == nil)
+            expect("orphans: vendor helpers of installed apps are kept",
+                   OrphanResidueEngine.belongsToInstalledApp("com.google.Keystone",
+                       installedIDs: ["com.google.Chrome"])
+                   && OrphanResidueEngine.belongsToInstalledApp("com.example.app.helper",
+                       installedIDs: ["com.example.app"]))
+            expect("orphans: unrelated ids are NOT kept",
+                   !OrphanResidueEngine.belongsToInstalledApp("com.unknown.thing",
+                       installedIDs: ["com.google.Chrome"]))
+            expect("orphans: Apple-owned never reported",
+                   OrphanResidueEngine.isSystemOwned("com.apple.sandboxd")
+                   && !OrphanResidueEngine.isSystemOwned("com.example.app"))
+            expect("orphans: updater ids protected by default",
+                   OrphanResidueEngine.builtinProtectedIDs.contains("com.google.Keystone"))
+            // Preferences deletability: bundle-scoped plist exempt, the
+            // category and unrelated plists are not.
+            let orphanPref = SafetyGuard.home
+                .appendingPathComponent("Library/Preferences/com.deadapp.example.plist")
+            expect("orphans: bundle-scoped preference plist deletable",
+                   OrphanResidueEngine.deletable(orphanPref, bundleID: "com.deadapp.example"))
+            expect("orphans: unrelated preference plist NOT deletable",
+                   !OrphanResidueEngine.deletable(orphanPref, bundleID: "com.other.app"))
+
+            // Scheduler: generated plists are VALID launchd XML (launchd
+            // rejects JSON), carry the headless flag, and clamp bad values.
+            let dailyPlist = Scheduler.plistXML(
+                settings: Scheduler.Settings(enabled: true, frequency: .daily, weekday: 1, hour: 3),
+                executablePath: "/usr/local/bin/Moppet")
+            let dailyObj = try? PropertyListSerialization.propertyList(
+                from: Data(dailyPlist.utf8), options: [], format: nil) as? [String: Any]
+            let dailyArgs = (dailyObj?["ProgramArguments"] as? [String]) ?? []
+            expect("scheduler: daily plist is valid XML with the headless flag",
+                   dailyObj?["Label"] as? String == "com.moppet.schedule"
+                   && dailyArgs.count == 2 && dailyArgs[1] == "--scheduled-clean"
+                   && dailyArgs[0] == "/usr/local/bin/Moppet")
+            let dailyCal = dailyObj?["StartCalendarInterval"] as? [String: Any]
+            expect("scheduler: daily has Hour but no Weekday",
+                   (dailyCal?["Hour"] as? Int) == 3 && dailyCal?["Weekday"] == nil)
+            let weeklyPlist = Scheduler.plistXML(
+                settings: Scheduler.Settings(enabled: true, frequency: .weekly, weekday: 2, hour: 23),
+                executablePath: "/usr/local/bin/Moppet")
+            let weeklyCal = ((try? PropertyListSerialization.propertyList(
+                from: Data(weeklyPlist.utf8), options: [], format: nil)) as? [String: Any])?["StartCalendarInterval"] as? [String: Any]
+            expect("scheduler: weekly carries Weekday and clamps Hour",
+                   (weeklyCal?["Weekday"] as? Int) == 2 && (weeklyCal?["Hour"] as? Int) == 23)
+            let bogusPlist = Scheduler.plistXML(
+                settings: Scheduler.Settings(enabled: true, frequency: .weekly, weekday: 9, hour: 77),
+                executablePath: "/usr/local/bin/Moppet")
+            let bogusCal = ((try? PropertyListSerialization.propertyList(
+                from: Data(bogusPlist.utf8), options: [], format: nil)) as? [String: Any])?["StartCalendarInterval"] as? [String: Any]
+            expect("scheduler: hour/weekday clamped into launchd range",
+                   (bogusCal?["Hour"] as? Int) == 23 && (bogusCal?["Weekday"] as? Int) == 7)
+            // The safe set is permanent-only, non-deep, never the Trash.
+            let safeItems = Scheduler.safeCleanItems()
+            expect("scheduler: safe set is permanent/non-deep/no-trash",
+                   !safeItems.isEmpty
+                   && safeItems.allSatisfy { $0.mode == .permanent && $0.deepExtensions == nil && $0.id != "trash" })
+
+            // History export: CSV round shape + JSON round-trip.
+            let exportRecord = CleanRecord(
+                date: Date(timeIntervalSince1970: 1_770_000_000),
+                sectionTitles: ["Clean", "Big, \"quoted\" section"],
+                requestedBytes: 300, freedBytes: 200, itemCount: 2,
+                items: [
+                    CleanRecordItem(path: "/tmp/a,b.csv", bytes: 100, mode: .permanent,
+                                    success: true, error: nil),
+                    CleanRecordItem(path: "/tmp/b", bytes: 200, mode: .trash,
+                                    success: false, error: "said \"no\""),
+                ], source: .hogs)
+            let csv = HistoryStore.csvExport(records: [exportRecord])
+            expect("export: CSV has header and rows",
+                   csv.hasPrefix("run_date,run_source,run_sections,path,bytes,mode,success,error\n")
+                   && csv.contains("hogs"))
+            expect("export: CSV quotes commas and quotes",
+                   csv.contains("\"/tmp/a,b.csv\"")
+                   && csv.contains("\"said \"\"no\"\"\""))
+            let csvRows = csv.trimmingCharacters(in: .whitespacesAndNewlines)
+                .components(separatedBy: "\n")
+            expect("export: CSV one row per item", csvRows.count == 3)
+            let jsonDecoder = JSONDecoder()
+            jsonDecoder.dateDecodingStrategy = .iso8601
+            let jsonBack = try? jsonDecoder.decode(
+                [CleanRecord].self, from: HistoryStore.jsonExport(records: [exportRecord]))
+            expect("export: JSON round-trips",
+                   jsonBack?.count == 1 && jsonBack?[0].items.count == 2
+                   && jsonBack?[0].source == .hogs)
+            // PDF report: readable text with run + path rows (marks included).
+            let pdfReport = HistoryView.buildPDFReport([exportRecord])
+            expect("export: PDF report carries runs, paths and failure marks",
+                   pdfReport.contains("hogs")
+                   && pdfReport.contains("/tmp/a,b.csv")
+                   && pdfReport.contains("✗ [") && pdfReport.contains("✓ ["))
+
+            // New tool registrations + destructive flags.
+            expect("tools: hogs/orphan tools registered",
+                   ToolRegistry.tool(named: "scan_space_hogs") != nil
+                   && ToolRegistry.tool(named: "scan_orphans") != nil)
+            expect("tools: hog mutations are destructive",
+                   ToolRegistry.tool(named: "delete_local_snapshots")?.destructive == true
+                   && ToolRegistry.tool(named: "docker_prune")?.destructive == true
+                   && ToolRegistry.tool(named: "brew_cleanup")?.destructive == true
+                   && ToolRegistry.tool(named: "clean_orphans")?.destructive == true)
+            // New record sources render a badge (icon + localized title).
+            for source in [RecordSource.largeFiles, .orphans, .hogs, .scheduled] {
+                expect("history: source badge for \(source.rawValue)",
+                       !source.icon.isEmpty && !source.title.isEmpty)
+            }
+
+            // Permissions probe runs and answers a Bool (the TCC read may
+            // succeed or fail on this machine — both are valid).
+            let fda = Permissions.hasFullDiskAccess
+            expect("permissions: FDA probe returns a stable Bool",
+                   fda == Permissions.hasFullDiskAccess)
+        }
+
         print(failures == 0 ? "SMOKE PASS" : "SMOKE FAIL (\(failures) failures)")
         exit(failures == 0 ? 0 : 1)
     }

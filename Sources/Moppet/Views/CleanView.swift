@@ -132,6 +132,9 @@ struct CleanView: View {
         VStack(spacing: 0) {
             ScrollView {
                 VStack(spacing: Airi.space3) {
+                    if !Permissions.hasFullDiskAccess {
+                        fdaBanner
+                    }
                     ForEach(viewModel.sections) { section in
                         sectionCard(section)
                     }
@@ -189,6 +192,33 @@ struct CleanView: View {
                     viewModel.startScan()
                 }
                 .disabled(viewModel.selectedItems.isEmpty)
+            }
+        }
+    }
+
+    /// Full Disk Access guidance (gap-analysis P0): without FDA the TCC-
+    /// protected trees are invisible, so scans "look empty" and users read
+    /// the app as broken. One card at the top, one click into Settings.
+    private var fdaBanner: some View {
+        SettingsCard(padding: Airi.space3) {
+            HStack(spacing: Airi.space3) {
+                Image(systemName: "lock.shield")
+                    .font(.system(size: 18))
+                    .foregroundStyle(Airi.warning)
+                    .frame(width: 36, height: 36)
+                    .background(RoundedRectangle(cornerRadius: Airi.radiusControl).fill(Airi.neutral100))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(L("Full Disk Access is off"))
+                        .font(Airi.cardTitleFont)
+                        .foregroundStyle(Airi.neutral950)
+                    Text(L("Some locations (Mail, Messages, Safari data) can't be scanned without it — the scan may look emptier than reality."))
+                        .font(Airi.captionFont)
+                        .foregroundStyle(Airi.neutral500)
+                }
+                Spacer()
+                AiriButton(title: L("Open Settings"), icon: "arrow.up.right.square") {
+                    Task { @MainActor in Permissions.openFullDiskAccessSettings() }
+                }
             }
         }
     }

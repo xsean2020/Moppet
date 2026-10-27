@@ -189,6 +189,57 @@ enum HistoryStore {
     static func clear() {
         try? FileManager.default.removeItem(at: storageURL)
     }
+
+    // MARK: - Export (CSV / JSON)
+
+    /// CSV: one row per audited path. Empty records produce a header-only
+    /// sheet so a "no runs yet" export still opens cleanly in spreadsheets.
+    static func csvExport(records: [CleanRecord]) -> String {
+        let header = ["run_date", "run_source", "run_sections", "path", "bytes",
+                      "mode", "success", "error"]
+        var rows = [header.joined(separator: ",")]
+        let formatter = ISO8601DateFormatter()
+        for record in records {
+            let date = formatter.string(from: record.date)
+            let source = (record.source?.rawValue
+                          ?? HistoryView.resolvedSource(record).rawValue)
+            let sections = record.sectionTitles.joined(separator: " | ")
+            let items = record.items.isEmpty
+                ? [CleanRecordItem(path: "-", bytes: record.freedBytes,
+                                   mode: .permanent, success: true, error: nil)]
+                : record.items
+            for item in items {
+                let fields: [String] = [
+                    date,
+                    source,
+                    sections,
+                    item.path,
+                    String(item.bytes),
+                    item.mode.rawValue,
+                    item.success ? "true" : "false",
+                    item.error ?? "",
+                ]
+                rows.append(fields.map(csvField).joined(separator: ","))
+            }
+        }
+        return rows.joined(separator: "\n") + "\n"
+    }
+
+    /// RFC 4180 quoting: wrap when the field contains a quote, comma,
+    /// newline — or an escaped quote inside.
+    private static func csvField(_ value: String) -> String {
+        if value.contains("\"") || value.contains(",") || value.contains("\n") {
+            return "\"" + value.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+        }
+        return value
+    }
+
+    static func jsonExport(records: [CleanRecord]) -> Data {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return (try? encoder.encode(records)) ?? Data("[]\n".utf8)
+    }
 }
 
 // MARK: - Disk info

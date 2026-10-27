@@ -624,6 +624,176 @@ enum ToolRegistry {
             return report
         })
 
+        // ---- Space hogs (snapshots / Docker / Homebrew / read-only reports) ----
+        list.append(Tool(
+            name: "scan_space_hogs",
+            description: "Report the big system-level space consumers a file scan can't see: APFS/Time Machine local snapshots, Docker disk usage, Homebrew old-version preview, and read-only sizes of iOS backups / Mail / Messages (never deleted). Read-only.",
+            params: [], destructive: false
+        ) { _, _ in
+            var text = ""
+            let snapshots = await SnapshotEngine.list()
+            text += "APFS local snapshots: \(snapshots.count)\n"
+            text += snapshots.prefix(10).map { "  · \($0.id)" }.joined(separator: "\n")
+            text += "\n"
+            if DockerEngine.installed {
+                if let usage = await DockerEngine.usage() {
+                    text += "Docker: \(usage.totalBytes.bytesFormatted) total (images \(usage.imagesBytes.bytesFormatted), containers \(usage.containersBytes.bytesFormatted), volumes \(usage.volumesBytes.bytesFormatted), build cache \(usage.cacheBytes.bytesFormatted))\n"
+                } else {
+                    text += "Docker: installed, daemon not running\n"
+                }
+            } else {
+                text += "Docker: not installed\n"
+            }
+            if HomebrewEngine.installed {
+                if let preview = await HomebrewEngine.preview(), !preview.isEmpty {
+                    text += "Homebrew: \(preview.totalBytes.bytesFormatted) reclaimable in \(preview.lines.count) items (brew cleanup)\n"
+                } else {
+                    text += "Homebrew: nothing to clean\n"
+                }
+            } else {
+                text += "Homebrew: not installed\n"
+            }
+            for report in SystemHogs.reports() {
+                let name = report.kind.rawValue
+                if report.needsFullDiskAccess {
+                    text += "\(name): needs Full Disk Access to measure (read-only, never deleted)\n"
+                } else {
+                    text += "\(name): \(report.bytes.bytesFormatted) (read-only, never deleted)\n"
+                }
+            }
+            return text
+        })
+
+        list.append(Tool(
+            name: "delete_local_snapshots",
+            description: "Delete APFS/Time Machine LOCAL snapshots by their exact date tokens from scan_space_hogs (e.g. 2026-10-27-123456). IRREVERSIBLE — removes those restore points. Confirm with the user first.",
+            params: [
+                Param("dates", "array", "Exact snapshot date tokens, e.g. [\"2026-10-27-123456\"]", required: true),
+            ],
+            destructive: true
+        ) { args, _ in
+            guard let dates = strArray(args, "dates"), !dates.isEmpty else {
+                throw ToolError(message: "dates required — run scan_space_hogs first and pass exact tokens")
+            }
+            var removed = 0
+            var failures: [String] = []
+            for date in dates {
+                do {
+                    _ = try await SnapshotEngine.delete(date)
+                    removed += 1
+                } catch {
+                    failures.append("\(date): \(error.localizedDescription)")
+                }
+            }
+            HistoryStore.append(CleanRecord(
+                date: Date(), sectionTitles: ["Space Hogs"],
+                requestedBytes: 0, freedBytes: 0, itemCount: dates.count,
+                items: dates.map { date in
+                    // Failure strings are "date: message" — prefix match
+                    // recovers the per-date success flag for the audit row.
+                    let failure = failures.first { $0.hasPrefix(date) }
+                    return CleanRecordItem(path: "tmutil deletelocalsnapshots \(date)", bytes: 0,
+                                           mode: .permanent, success: failure == nil,
+                                           error: failure)
+                }, source: .hogs))
+            var text = "Deleted \(removed) of \(dates.count) snapshots."
+            if !failures.isEmpty { text += "\nFailures:\n" + failures.joined(separator: "\n") }
+            return text
+        })
+
+        list.append(Tool(
+            name: "docker_prune",
+            description: "Run `docker system prune -f`: removes STOPPED containers, unused networks, dangling images and build cache. Running containers and volumes are never touched. Confirm with the user first.",
+            params: [], destructive: true
+        ) { _, _ in
+            let output = try await DockerEngine.prune()
+            HistoryStore.append(CleanRecord(
+                date: Date(), sectionTitles: ["Space Hogs"],
+                requestedBytes: 0, freedBytes: 0, itemCount: 1,
+                items: [CleanRecordItem(path: "docker system prune", bytes: 0,
+                                        mode: .permanent, success: true, error: nil)],
+                source: .hogs))
+            return output.isEmpty ? "Prune finished — nothing to remove." : output
+        })
+
+        list.append(Tool(
+            name: "brew_cleanup",
+            description: "Run `brew cleanup`: removes old Cellar versions and expired downloads. Rollback means reinstalling. Confirm with the user first.",
+            params: [], destructive: true
+        ) { _, _ in
+            let output = try await HomebrewEngine.run()
+            HistoryStore.append(CleanRecord(
+                date: Date(), sectionTitles: ["Space Hogs"],
+                requestedBytes: 0, freedBytes: 0, itemCount: 1,
+                items: [CleanRecordItem(path: "brew cleanup", bytes: 0,
+                                        mode: .permanent, success: true, error: nil)],
+                source: .hogs))
+            return output.isEmpty ? "brew cleanup finished." : output
+        })
+
+        // ---- Orphan residue ----
+        list.append(Tool(
+            name: "scan_orphans",
+            description: "Find Library leftovers (caches, preferences, containers…) of apps that are NO LONGER installed. Conservative: Apple items, vendor helpers of installed apps, and anything touched in the last 30 days are excluded. Read-only.",
+            params: [], destructive: false
+        ) { _, _ in
+            let orphans = await OrphanResidueEngine.scan()
+            guard !orphans.isEmpty else { return "No orphan residue found." }
+            let total = orphans.reduce(0) { $0 + $1.bytes }
+            return orphans.map {
+                "· [\($0.kind)] \($0.bundleID) — \($0.bytes.bytesFormatted) @ \($0.url.path)"
+            }.joined(separator: "\n") + "\nTotal: \(total.bytesFormatted)"
+        })
+
+        list.append(Tool(
+            name: "clean_orphans",
+            description: "Move orphan residue (from scan_orphans) to the Trash by exact path. Recoverable. Confirm with the user first.",
+            params: [
+                Param("paths", "array", "Exact orphan paths from scan_orphans", required: true),
+            ],
+            destructive: true
+        ) { args, _ in
+            guard let requested = strArray(args, "paths"), !requested.isEmpty else {
+                throw ToolError(message: "paths required — run scan_orphans and pass the exact paths")
+            }
+            // Scope params never silently widen (HANDOFF §6.22): unknown
+            // paths are an error listing what IS available.
+            let available = await OrphanResidueEngine.scan()
+            var picks: [OrphanResidueEngine.Candidate] = []
+            var unknown: [String] = []
+            for path in requested {
+                if let match = available.first(where: { $0.url.path == path }) {
+                    picks.append(match)
+                } else {
+                    unknown.append(path)
+                }
+            }
+            if !unknown.isEmpty {
+                throw ToolError(message: """
+                not orphan residue (still installed, whitelisted, or recently active): \(unknown.joined(separator: ", ")).
+                Available: \(available.map { $0.url.path }.joined(separator: "\n"))
+                """)
+            }
+            guard !picks.isEmpty else { return "Nothing left to clean." }
+            let outcomes = await OrphanResidueEngine.trash(picks)
+            let ok = outcomes.filter(\.success)
+            let freed = picks.filter { candidate in
+                ok.contains { $0.path == candidate.url.path }
+            }.reduce(0) { $0 + $1.bytes }
+            HistoryStore.append(CleanRecord(
+                date: Date(), sectionTitles: ["Orphan Residue"],
+                requestedBytes: picks.reduce(0) { $0 + $1.bytes },
+                freedBytes: freed, itemCount: picks.count,
+                items: picks.map { candidate in
+                    let outcome = outcomes.first { $0.path == candidate.url.path }
+                    return CleanRecordItem(path: candidate.url.path, bytes: candidate.bytes,
+                                           mode: .trash, success: outcome?.success == true,
+                                           error: outcome?.error)
+                }, source: .orphans))
+            return "Moved \(ok.count) of \(picks.count) orphan items to the Trash (\(freed.bytesFormatted))."
+                + (outcomes.count == ok.count ? "" : " \(outcomes.count - ok.count) failed.")
+        })
+
         return list
     }
 
