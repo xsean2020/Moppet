@@ -737,6 +737,44 @@ enum SmokeTest {
                        !foundPaths.contains(blocked.resolvingSymlinksInPath().path))
             }
 
+            // Dashboard lifetime totals come from the audit log: only
+            // SUCCESSFUL items count, split by deletion mode, and failures
+            // never inflate the number.
+            do {
+                let backup = HistoryStore.load()
+                let date = Date()
+                HistoryStore.save([
+                    CleanRecord(date: date, sectionTitles: ["Test"], requestedBytes: 300,
+                                freedBytes: 300, itemCount: 3, items: [
+                        CleanRecordItem(path: "/tmp/a", bytes: 100, mode: .permanent,
+                                        success: true, error: nil),
+                        CleanRecordItem(path: "/tmp/b", bytes: 200, mode: .trash,
+                                        success: true, error: nil),
+                        CleanRecordItem(path: "/tmp/c", bytes: 900, mode: .permanent,
+                                        success: false, error: "boom"),
+                    ]),
+                    CleanRecord(date: date.addingTimeInterval(-3600), sectionTitles: ["Test"],
+                                requestedBytes: 50, freedBytes: 50, itemCount: 1, items: [
+                        CleanRecordItem(path: "/tmp/d", bytes: 50, mode: .permanent,
+                                        success: true, error: nil),
+                    ]),
+                ])
+                let totals = HistoryStore.totals()
+                expect("dashboard totals: runs counted",
+                       totals.runs == 2)
+                expect("dashboard totals: successful items only, split by mode",
+                       totals.permanentBytes == 150 && totals.trashBytes == 200)
+                expect("dashboard totals: total excludes failed outcomes",
+                       totals.totalBytes == 350 && totals.itemCount == 3)
+                expect("dashboard totals: last run is the newest record",
+                       totals.lastRun.map { abs($0.timeIntervalSince(date)) < 1 } == true)
+                expect("dashboard totals: recent runs oldest→newest",
+                       totals.recentRuns.count == 2
+                       && totals.recentRuns.first?.bytes == 50
+                       && totals.recentRuns.last?.bytes == 300)
+                HistoryStore.save(backup)
+            }
+
             // Pet states: every PetState must map to a bundled sticker
             // (sad/angry were dead code — errors showed no emotion), and
             // the sad pose must auto-settle via PetBus.

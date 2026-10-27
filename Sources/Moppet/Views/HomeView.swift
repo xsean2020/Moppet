@@ -10,12 +10,15 @@ struct HomeView: View {
     @State private var disk = DiskInfo.snapshot()
     @State private var ai = AISettings.load()
     @State private var recentSessions = 0
+    /// Lifetime cleanup totals from the audit log (nil until loaded).
+    @State private var totals: HistoryStore.Totals?
 
     var body: some View {
         ScrollView {
             VStack(spacing: Airi.space3) {
                 header
                 diskCard
+                cleanStatsCard
                 quickActions
                 statusRow
             }
@@ -34,6 +37,10 @@ struct HomeView: View {
                     BrainRollout.listSessions(limit: 50).total
                 }.value
                 recentSessions = count
+                // The audit log is a file read + JSON decode — keep it off
+                // the main thread like the session count above.
+                let loaded = await Task.detached { HistoryStore.totals() }.value
+                withAnimation(Airi.controlAnimation) { totals = loaded }
             }
         }
     }
@@ -111,6 +118,108 @@ struct HomeView: View {
             }
         }
         .animation(Airi.controlAnimation, value: disk.usedFraction)
+    }
+
+    // MARK: - Lifetime cleanup stats
+
+    /// "How much junk has this app removed for me?" — the one number the
+    /// dashboard was missing. Everything comes from HistoryStore.totals().
+    private var cleanStatsCard: some View {
+        Button {
+            navigate(.history)
+        } label: {
+            SettingsCard {
+                HStack(alignment: .center, spacing: Airi.space4) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 6) {
+                            Text(L("Cleaned so far"))
+                                .font(Airi.captionFont)
+                                .foregroundStyle(Airi.neutral500)
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(Airi.neutral400)
+                        }
+                        Text(totals.map { $0.totalBytes.bytesFormatted } ?? "—")
+                            .font(.system(size: 30, weight: .semibold, design: .rounded))
+                            .foregroundStyle(Airi.primary)
+                            .monospacedDigit()
+                            .contentTransition(.numericText())
+                        Text(statsDetail)
+                            .font(Airi.captionFont)
+                            .foregroundStyle(Airi.neutral500)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: Airi.space3)
+                    VStack(alignment: .trailing, spacing: 6) {
+                        splitBar
+                        legend
+                    }
+                    .frame(width: 168)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .help(L("Open the cleanup history"))
+    }
+
+    /// "12 runs · last 2026-10-27 13:06 · 1,204 paths"
+    private var statsDetail: String {
+        guard let totals else { return L("Reading history…") }
+        guard totals.runs > 0 else {
+            return L("No runs yet — your first clean will show up here.")
+        }
+        var parts: [String] = [String(format: L("%lld runs"), totals.runs)]
+        if totals.itemCount > 0 {
+            parts.append(String(format: L("%lld paths"), totals.itemCount))
+        }
+        if let last = totals.lastRun {
+            parts.append(String(format: L("last %@"),
+                                last.formatted(date: .abbreviated, time: .shortened)))
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    /// Permanent vs Trash proportion — trash bytes are recoverable, so the
+    /// split matters more than the total alone.
+    private var splitBar: some View {
+        GeometryReader { geo in
+            let permanent = CGFloat(totals?.permanentBytes ?? 0)
+            let trash = CGFloat(totals?.trashBytes ?? 0)
+            let sum = max(permanent + trash, 1)
+            let permWidth = geo.size.width * (permanent / sum)
+            ZStack(alignment: .leading) {
+                Capsule().fill(Airi.neutral200.opacity(0.6))
+                HStack(spacing: 2) {
+                    Capsule().fill(Airi.danger.opacity(0.75))
+                        .frame(width: max(0, permWidth - 1))
+                    Capsule().fill(Airi.primary.opacity(0.75))
+                }
+            }
+        }
+        .frame(height: 8)
+        .animation(Airi.controlAnimation, value: totals?.totalBytes ?? 0)
+    }
+
+    private var legend: some View {
+        VStack(alignment: .trailing, spacing: 2) {
+            legendRow(color: Airi.danger, label: L("Permanent"),
+                      bytes: totals?.permanentBytes ?? 0)
+            legendRow(color: Airi.primary, label: L("Trash"),
+                      bytes: totals?.trashBytes ?? 0)
+        }
+    }
+
+    private func legendRow(color: Color, label: String, bytes: Int64) -> some View {
+        HStack(spacing: 5) {
+            Circle().fill(color.opacity(0.8)).frame(width: 6, height: 6)
+            Text(label)
+                .font(Airi.caption2Font)
+                .foregroundStyle(Airi.neutral500)
+            Text(bytes.bytesFormatted)
+                .font(Airi.caption2Font)
+                .foregroundStyle(Airi.neutral700)
+                .monospacedDigit()
+        }
     }
 
     // MARK: - Quick actions

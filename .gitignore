@@ -12,3 +12,6 @@ DerivedData/
 # Local data that must never be tracked
 *.p12
 *.mobileprovision
+
+# Local tool output (Qoder repowiki / IDE caches) — never published
+.qoder/

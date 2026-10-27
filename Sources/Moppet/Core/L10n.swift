@@ -52,6 +52,14 @@ enum L10n {
 func L(_ key: String) -> String { L10n.t(key) }
 
 private let zh: [String: String] = [
+    // dashboard lifetime stats
+    "Cleaned so far": "累计清理",
+    "Open the cleanup history": "打开清理历史",
+    "Reading history…": "正在读取历史…",
+    "No runs yet — your first clean will show up here.": "还没有清理记录——第一次清理后会出现在这里。",
+    "%lld runs": "%lld 次清理",
+    "%lld paths": "%lld 个路径",
+    "last %@": "最近 %@",
     // scan-scope round (clean/quick scan must never widen)
     "%1$lld / %2$lld": "%1$lld / %2$lld",
     "%1$@ (%2$lld/%3$lld)": "%1$@（%2$lld/%3$lld）",

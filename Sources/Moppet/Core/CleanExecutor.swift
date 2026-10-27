@@ -119,6 +119,47 @@ enum HistoryStore {
         return []
     }
 
+    /// Lifetime totals for the dashboard: how much has Moppet cleaned, how
+    /// often, and how it was split between permanent removal and the Trash.
+    struct Totals {
+        var runs: Int = 0
+        /// Successful deletions only (failed outcomes never freed bytes).
+        var permanentBytes: Int64 = 0
+        var trashBytes: Int64 = 0
+        var itemCount: Int = 0
+        var lastRun: Date?
+        /// Freed bytes per run, oldest → newest (dashboard sparkline).
+        var recentRuns: [(date: Date, bytes: Int64)] = []
+
+        var totalBytes: Int64 { permanentBytes + trashBytes }
+    }
+
+    /// Computed from the audit log — the History page and the dashboard show
+    /// the same numbers because both come from here.
+    static func totals(limitRecent: Int = 10) -> Totals {
+        // Sort by date: the dashboard sparkline must read chronologically
+        // regardless of the order records happen to sit in the file.
+        let records = load().sorted { $0.date < $1.date }
+        var totals = Totals()
+        totals.runs = records.count
+        for record in records {
+            totals.lastRun = max(totals.lastRun ?? .distantPast, record.date)
+            for item in record.items where item.success {
+                totals.itemCount += 1
+                switch item.mode {
+                case .permanent: totals.permanentBytes += item.bytes
+                case .trash: totals.trashBytes += item.bytes
+                }
+            }
+        }
+        // Older records (pre-item-detail schemas) may carry only freedBytes.
+        if totals.totalBytes == 0 {
+            totals.permanentBytes = records.reduce(0) { $0 + $1.freedBytes }
+        }
+        totals.recentRuns = records.suffix(limitRecent).map { ($0.date, $0.freedBytes) }
+        return totals
+    }
+
     /// load→append→save is read-modify-write; the UI and the agent's
     /// cleaning tools call it from different threads and used to drop each
     /// other's audit records.
