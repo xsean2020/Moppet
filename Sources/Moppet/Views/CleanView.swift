@@ -106,9 +106,31 @@ struct CleanView: View {
                 .frame(maxWidth: .infinity)
             }
             bottomBar {
-                // Scope preview: the Scan button covers exactly the ticked
-                // items — make that visible so "why did it scan that?" can't
-                // happen silently.
+                // Scope preview: named chips of every section that has ticked
+                // items, so "what will Scan cover" is on screen BEFORE the
+                // click — the "selected installers, browsers got scanned"
+                // report came from invisible scope.
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(viewModel.sections.filter { $0.items.contains(where: \.selected) }) { section in
+                            HStack(spacing: 4) {
+                                Image(systemName: section.section.icon)
+                                    .font(.system(size: 9, weight: .medium))
+                                Text(String(format: L("%1$@ (%2$lld/%3$lld)"),
+                                            section.section.title,
+                                            section.items.filter(\.selected).count,
+                                            section.items.count))
+                                    .font(Airi.caption2Font)
+                                    .lineLimit(1)
+                            }
+                            .foregroundStyle(Airi.neutral700)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Capsule().fill(Airi.neutral100.opacity(0.8)))
+                            .overlay(Capsule().strokeBorder(Airi.neutral200.opacity(0.7), lineWidth: 1))
+                        }
+                    }
+                }
                 Text(String(format: L("%1$lld of %2$lld categories selected"),
                             viewModel.selectedItems.count,
                             viewModel.sections.reduce(0) { $0 + $1.items.count }))
@@ -209,7 +231,12 @@ struct CleanView: View {
 
         var body: some View {
             Button {
-                onChange(state == 2 ? false : true)
+                // Partial -> CLEAR, not select-all: in a cleaner app the
+                // dominant intent when a section is partially ticked and you
+                // don't want it is "get it out of my scope". (Selecting all
+                // from partial is one extra click; accidentally WIDENING the
+                // deletion scope with one click is the dangerous direction.)
+                onChange(state != 0)
             } label: {
                 Image(systemName: symbol)
                     .font(.system(size: 15, weight: .semibold))
@@ -247,7 +274,7 @@ struct CleanView: View {
         private var sectionHint: String {
             switch state {
             case 2: L("All items selected — click to clear")
-            case 1: L("Some items selected — click to select all")
+            case 1: L("Some items selected — click to clear the section")
             default: L("No items selected — click to select all")
             }
         }
