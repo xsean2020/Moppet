@@ -39,7 +39,9 @@ final class ChatSessionStore {
         agent.onEvent = { event in
             switch event {
             case .error(let message):
-                PetBus.shared.say(L("Oops, error:") + " \(message.prefix(60))", state: .idle)
+                // Sad pose, not idle — a failure used to look like nothing
+                // happened (the sad sticker was dead code until now).
+                PetBus.shared.say(L("Oops, error:") + " \(message.prefix(60))", state: .sad)
             case .approvalRequested(let name, _):
                 PetBus.shared.say(L("Needs your approval:") + " \(name)", state: .talking)
             default:

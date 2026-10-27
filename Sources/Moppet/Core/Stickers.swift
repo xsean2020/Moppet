@@ -10,6 +10,7 @@ enum Stickers {
         case .scanning: return "airi-confused"
         case .cleaning: return "airi-surprised"
         case .celebrating: return "airi-celebrate"
+        case .sad: return "airi-sad"
         case .sleeping: return "airi-tired"
         }
     }
@@ -17,21 +18,6 @@ enum Stickers {
     static func image(for state: PetState) -> NSImage? {
         guard let url = Bundle.module.url(
             forResource: name(for: state), withExtension: "png", subdirectory: "stickers"
-        ) else { return nil }
-        return NSImage(contentsOf: url)
-    }
-
-    /// Sad variant for failures.
-    static var sad: NSImage? {
-        guard let url = Bundle.module.url(
-            forResource: "airi-sad", withExtension: "png", subdirectory: "stickers"
-        ) else { return nil }
-        return NSImage(contentsOf: url)
-    }
-
-    static var angry: NSImage? {
-        guard let url = Bundle.module.url(
-            forResource: "airi-angry", withExtension: "png", subdirectory: "stickers"
         ) else { return nil }
         return NSImage(contentsOf: url)
     }

@@ -116,7 +116,10 @@ struct ChatView: View {
             UserInputSheet(request: request)
         }
         .onAppear {
-            inputFocused = true
+            // Next runloop: openWindow creates the window asynchronously —
+            // focusing synchronously during onAppear can reach IMK while the
+            // window isn't key yet (IMKCFRunLoopWakeUpReliable log noise).
+            DispatchQueue.main.async { inputFocused = true }
             aiSettings = AISettings.load()
             UserInputCenter.chatSurfaceVisible = true
             // While the chat window lives, it can also reopen both windows

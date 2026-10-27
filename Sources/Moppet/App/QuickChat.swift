@@ -40,8 +40,15 @@ final class QuickChat {
     }
 
     func showInput() {
-        panelVisible = true
+        // Order matters for IME: activate + makeKey FIRST, then flip
+        // panelVisible so the TextField's focus request flows through
+        // onChange while the panel is already key and the app active.
+        // The old order (focus flag first, onAppear focus during
+        // buildPanel) asked IMK for a keyboard channel from a background
+        // app — "error messaging the mach port for IMKCFRunLoopWakeUpReliable"
+        // in the log, and dropped Chinese composition on first open.
         panelController.show()
+        panelVisible = true
     }
 
     func hideInput() {
@@ -115,7 +122,7 @@ final class QuickChat {
             answerText = "✗ \(message)"
             // 12s (was 8) + the bubble's double-click → chat window gives the
             // user somewhere to take the failed turn.
-            PetBus.shared.say("✗ \(message)", state: .idle, hideAfter: 12)
+            PetBus.shared.say("✗ \(message)", state: .sad, hideAfter: 12)
         default:
             break
         }
@@ -269,7 +276,8 @@ struct QuickChatInputView: View {
         .onChange(of: quick.panelVisible) { _, visible in
             if visible { focused = true }
         }
-        .onAppear { focused = true }
+        // No onAppear focus: the panel is built BEFORE show() activates the
+        // app — focusing here hits IMK from a background app (see showInput).
     }
 
     private func send() {

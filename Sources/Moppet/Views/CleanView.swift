@@ -18,6 +18,9 @@ struct CleanView: View {
             Divider().overlay(Airi.neutral200.opacity(0.5))
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // Phase swaps cross-fade instead of hard-cutting. Cheap:
+                // the heavy review tree is only built in its own phase.
+                .animation(Airi.entranceCurve, value: viewModel.phase)
         }
         .background(Airi.pageBackground.opacity(0.001))
         .confirmationDialog(
@@ -143,10 +146,18 @@ struct CleanView: View {
                         .foregroundStyle(Airi.neutral500)
                 }
                 .buttonStyle(.plain)
-                Toggle("", isOn: sectionToggleBinding(section))
-                    .toggleStyle(.switch)
-                    .controlSize(.small)
-                    .labelsHidden()
+                // Counts + tristate master check: a partially-ticked section
+                // used to render its Toggle as OFF (allSatisfy), so "Browsers
+                // off + Installers on" scanned the browsers anyway.
+                Text(String(format: L("%1$lld / %2$lld"),
+                            section.items.filter(\.selected).count,
+                            section.items.count))
+                    .font(Airi.caption2Font)
+                    .foregroundStyle(Airi.neutral500)
+                    .monospacedDigit()
+                SectionTriState(section: section) { newValue in
+                    section.selected = newValue
+                }
             }
 
             if section.expanded {
@@ -181,13 +192,65 @@ struct CleanView: View {
         }
     }
 
-    private func sectionToggleBinding(_ section: CleanViewModel.SectionState) -> Binding<Bool> {
-        Binding(
-            get: { section.selected },
-            set: { newValue in
-                section.selected = newValue
+    /// macOS-style tristate master check for one section: filled check =
+    /// every item ticked, filled minus = SOME ticked, empty square = none.
+    /// Click cycles none→all / partial→all / all→none. A plain Toggle cannot
+    /// render the mixed state, which misread partially-ticked sections as off.
+    private struct SectionTriState: View {
+        let section: CleanViewModel.SectionState
+        let onChange: (Bool) -> Void
+
+        @State private var hovering = false
+
+        private var ticked: Int { section.items.filter(\.selected).count }
+        private var state: Int {   // 0 none · 1 partial · 2 all
+            ticked == 0 ? 0 : (ticked == section.items.count ? 2 : 1)
+        }
+
+        var body: some View {
+            Button {
+                onChange(state == 2 ? false : true)
+            } label: {
+                Image(systemName: symbol)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(state == 0 ? Airi.neutral400 : Airi.primary)
+                    .frame(width: 22, height: 22)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(state == 0 ? Color.clear
+                                  : hovering ? Airi.primary.opacity(0.22)
+                                  : Airi.primary.opacity(0.14))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .strokeBorder(state == 0 ? Airi.neutral200 : Color.clear,
+                                          lineWidth: 1.5)
+                    )
             }
-        )
+            .buttonStyle(.plain)
+            .scaleEffect(hovering ? 1.08 : 1)
+            .animation(Airi.hoverAnimation, value: hovering)
+            .animation(Airi.hoverAnimation, value: state)
+            .onHover { hovering = $0 }
+            .help(sectionHint)
+            .accessibilityLabel(Text(sectionHint))
+        }
+
+        private var symbol: String {
+            switch state {
+            case 2: "checkmark.square.fill"
+            case 1: "minus.square.fill"
+            default: "checkmark.square"
+            }
+        }
+
+        private var sectionHint: String {
+            switch state {
+            case 2: L("All items selected — click to clear")
+            case 1: L("Some items selected — click to select all")
+            default: L("No items selected — click to select all")
+            }
+        }
     }
 
     // MARK: - Scanning

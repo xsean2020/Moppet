@@ -16,6 +16,12 @@ final class MolePuppet {
     let body = SCNNode()          // breathing/sway animations here
     let nose: SCNNode
     let eyes: [SCNNode]
+    /// Ears + tail join every state animation (they used to be build-only
+    /// decorations — the "pet states feel unfinished" gap).
+    private(set) var ears: [SCNNode] = []
+    private(set) var tail: SCNNode?
+    private var baseEarPoses: [SCNVector3] = []   // per-ear position/scale snapshot
+    private var baseTailPose: SCNVector3 = SCNVector3(0, 0, 0)
     private var state: PetState = .idle
 
     init() {
@@ -80,7 +86,10 @@ final class MolePuppet {
             }())
             ear.position = SCNVector3(Float(0.20 * side), 0.24, 0.02)
             ear.scale = SCNVector3(1, 1.25, 0.7)
+            ear.name = side < 0 ? "ear-left" : "ear-right"
             body.addChildNode(ear)
+            ears.append(ear)
+            baseEarPoses.append(SCNVector3(ear.position.x, ear.position.y, ear.position.z))
         }
 
         // digging claws
@@ -102,6 +111,8 @@ final class MolePuppet {
         }())
         tail.position = SCNVector3(0, -0.02, -0.34)
         body.addChildNode(tail)
+        self.tail = tail
+        baseTailPose = tail.position
 
         // soft ground contact shadow (flattened dark disc, unlit)
         let shadow = SCNNode(geometry: {
@@ -180,6 +191,16 @@ final class MolePuppet {
         body.eulerAngles = SCNVector3(0, 0, 0)
         body.scale = baseBodyScale
         nose.scale = SCNVector3(1, 1, 1)
+        // Ears/tail too — removeAllActions does not roll back their transforms.
+        for (i, ear) in ears.enumerated() {
+            ear.removeAllActions()
+            ear.position = baseEarPoses[i]
+            ear.scale = SCNVector3(1, 1.25, 0.7)
+            ear.eulerAngles = SCNVector3(0, 0, 0)
+        }
+        tail?.removeAllActions()
+        tail?.position = baseTailPose
+        tail?.scale = SCNVector3(1, 1, 1)
 
         // breathing + idle sway always run. SCNAction.scale(to:) is UNIFORM
         // and flattened the egg-shaped base ratio (y = 1.12) → drive the
@@ -205,6 +226,19 @@ final class MolePuppet {
 
         switch newState {
         case .idle, .thinking:
+            // Idle: an occasional ear twitch keeps the mole alive between
+            // announcements; the tail sways slowly.
+            for (i, ear) in ears.enumerated() {
+                // Spheres show no rotation — twitch is a position jiggle.
+                let twitch = SCNAction.sequence([
+                    .wait(duration: Double.random(in: 2.5...6.0) + Double(i) * 1.7),
+                    .moveBy(x: 0, y: 0.02, z: 0.015, duration: 0.09),
+                    .moveBy(x: 0, y: -0.035, z: -0.02, duration: 0.16),
+                    .moveBy(x: 0, y: 0.015, z: 0.005, duration: 0.09),
+                ])
+                ear.runAction(.repeatForever(twitch))
+            }
+            if let tail { tail.runAction(.repeatForever(Self.tailSway(duration: 2.4, angle: 0.5))) }
             if newState == .thinking {
                 let bobUp = SCNAction.moveBy(x: 0, y: 0.03, z: 0, duration: 0.7)
                 bobUp.timingMode = .easeInEaseOut
@@ -213,6 +247,16 @@ final class MolePuppet {
                 root.runAction(.repeatForever(.sequence([bobUp, bobDown])))
             }
         case .talking:
+            // Ears bounce with the chirp rhythm; the tail wags along.
+            for (i, ear) in ears.enumerated() {
+                let bounce = SCNAction.sequence([
+                    .wait(duration: 0.12 * Double(i)),
+                    .moveBy(x: 0, y: 0.012, z: 0, duration: 0.12),
+                    .moveBy(x: 0, y: -0.012, z: 0, duration: 0.12),
+                ])
+                ear.runAction(.repeatForever(bounce))
+            }
+            tail?.runAction(.repeatForever(Self.tailWag(duration: 0.9, angle: 0.6)))
             let chirp = SCNAction.sequence([
                 .moveBy(x: 0, y: 0.025, z: 0, duration: 0.12),
                 .moveBy(x: 0, y: -0.025, z: 0, duration: 0.12),
@@ -224,6 +268,13 @@ final class MolePuppet {
             ])
             nose.runAction(.repeatForever(pulse))
         case .scanning:
+            // Ears perk forward while the head sweeps.
+            for ear in ears {
+                ear.runAction(.sequence([
+                    .moveBy(x: 0, y: 0.015, z: 0.05, duration: 0.3),
+                    Self.earScale(1.08, duration: 0.3),
+                ]))
+            }
             let look = SCNAction.sequence([
                 .rotateBy(x: 0, y: 0.45, z: 0.05, duration: 0.5),
                 .rotateBy(x: 0, y: -0.9, z: -0.1, duration: 1.0),
@@ -232,6 +283,14 @@ final class MolePuppet {
             look.timingMode = .easeInEaseOut
             root.runAction(.repeatForever(look))
         case .cleaning:
+            // Ears pin back and the tail flicks fast — busy work.
+            for ear in ears {
+                ear.runAction(.sequence([
+                    .moveBy(x: 0, y: -0.015, z: -0.045, duration: 0.25),
+                    Self.earScale(0.92, duration: 0.25),
+                ]))
+            }
+            tail?.runAction(.repeatForever(Self.tailWag(duration: 0.28, angle: 0.85)))
             let shiver = SCNAction.sequence([
                 .moveBy(x: 0.012, y: 0, z: 0, duration: 0.06),
                 .moveBy(x: -0.024, y: 0, z: 0, duration: 0.12),
@@ -253,6 +312,16 @@ final class MolePuppet {
                 .scale(to: 1.0, duration: 0.14),
             ])
             nose.runAction(.repeatForever(happy))
+            // Ears pop up and the tail wags like there is no tomorrow.
+            for (i, ear) in ears.enumerated() {
+                let pop = SCNAction.sequence([
+                    .wait(duration: 0.05 * Double(i)),
+                    Self.earScale(1.18, duration: 0.14),
+                    Self.earScale(1.0, duration: 0.2),
+                ])
+                ear.runAction(.repeatForever(pop))
+            }
+            tail?.runAction(.repeatForever(Self.tailWag(duration: 0.35, angle: 1.0)))
         case .sleeping:
             root.runAction(.sequence([
                 .rotateTo(x: 0.45, y: 0, z: 0.1, duration: 0.7, usesShortestUnitArc: true),
@@ -270,6 +339,38 @@ final class MolePuppet {
                 node.scale = SCNVector3(x, y, z)
             }
             body.runAction(.repeatForever(snore))
+            // Everything droops: ears sag outward, the tail settles low.
+            for (i, ear) in ears.enumerated() {
+                let side = CGFloat(i == 0 ? -1.0 : 1.0)
+                _ = side
+                ear.runAction(.sequence([
+                    .moveBy(x: 0, y: -0.05, z: 0.02, duration: 0.7),
+                    Self.earScale(0.85, duration: 0.7),
+                ]))
+            }
+            tail?.runAction(.sequence([
+                .moveBy(x: 0, y: -0.03, z: 0, duration: 0.7),
+            ]))
+        case .sad:
+            // Ears droop, tail hangs, head pitches slightly down — the
+            // "oops" pose for error announcements (was dead sticker code).
+            for (i, ear) in ears.enumerated() {
+                let side = CGFloat(i == 0 ? -1.0 : 1.0)
+                _ = side
+                ear.runAction(.sequence([
+                    .moveBy(x: 0, y: -0.04, z: 0.015, duration: 0.35),
+                    Self.earScale(0.9, duration: 0.35),
+                ]))
+            }
+            tail?.runAction(.sequence([
+                .moveBy(x: 0, y: -0.035, z: 0, duration: 0.4),
+                .wait(duration: 0.6),
+                .moveBy(x: 0, y: 0.015, z: 0, duration: 0.5),
+                .moveBy(x: 0, y: -0.015, z: 0, duration: 0.5),
+            ]))
+            root.runAction(.sequence([
+                .rotateBy(x: 0.1, y: 0, z: 0, duration: 0.4),
+            ]))
         }
         if newState != .sleeping {
             eyes.forEach { $0.scale = SCNVector3(1, 1, 1) }
@@ -277,6 +378,38 @@ final class MolePuppet {
             // the mole never blinked again after the very first state change.
             startBlinking()
         }
+    }
+
+    /// Slow left-right tail sway (idle / thinking).
+    private static func tailSway(duration: TimeInterval, angle: CGFloat) -> SCNAction {
+        // POSITION sweep — the tail is a sphere, rotations are invisible.
+        let amp = angle * 0.04
+        let left = SCNAction.moveBy(x: -amp, y: 0, z: 0, duration: duration / 2)
+        left.timingMode = .easeInEaseOut
+        let right = SCNAction.moveBy(x: amp * 2, y: 0, z: 0, duration: duration)
+        right.timingMode = .easeInEaseOut
+        return .sequence([left, right, SCNAction.moveBy(x: -amp, y: 0, z: 0, duration: duration / 2)])
+    }
+
+    /// Ear scale that PRESERVES the non-uniform base ratios (1, 1.25, 0.7) —
+    /// SCNAction.scale(to:) is uniform-only and would squash the ear shape.
+    private static func earScale(_ factor: CGFloat, duration: TimeInterval) -> SCNAction {
+        SCNAction.customAction(duration: duration) { node, elapsed in
+            let t = CGFloat(min(1, elapsed / duration))
+            let eased = t * t * (3 - 2 * t)   // smoothstep
+            let x: CGFloat = 1.0 * (1.0 + (factor - 1.0) * eased)
+            let y: CGFloat = 1.25 * (1.0 + (factor - 1.0) * eased)
+            let z: CGFloat = 0.7 * (1.0 + (factor - 1.0) * eased)
+            node.scale = SCNVector3(x, y, z)
+        }
+    }
+
+    /// Fast wag for expressive states (talking / cleaning / celebrating).
+    private static func tailWag(duration: TimeInterval, angle: CGFloat) -> SCNAction {
+        let amp = angle * 0.05
+        let left = SCNAction.moveBy(x: -amp, y: 0.008, z: 0, duration: duration / 2)
+        let right = SCNAction.moveBy(x: amp * 2, y: -0.016, z: 0, duration: duration)
+        return .sequence([left, right, SCNAction.moveBy(x: -amp, y: 0.008, z: 0, duration: duration / 2)])
     }
 
     /// One-shot tactile feedback for clicks: hop + body wiggle + nose boop.
@@ -504,8 +637,9 @@ struct PetView: View {
                 PetInteractionView(
                     panel: panel,
                     onTap: {
-                        if bus.state == .celebrating {
-                            // Click during a celebration means "got it".
+                        if bus.state == .celebrating || bus.state == .sad {
+                            // Click during a celebration or a sad moment
+                            // means "got it" — settle back to idle.
                             bus.settle()
                         } else if bus.state == .sleeping {
                             // A click on a sleeping pet wakes it (the old

@@ -465,6 +465,7 @@ private struct SidebarRowButton: View {
     let action: () -> Void
 
     @State private var hovering = false
+    @State private var pressed = false
 
     var body: some View {
         Button(action: action) {
@@ -474,6 +475,9 @@ private struct SidebarRowButton: View {
                     .symbolRenderingMode(.hierarchical)
                     .foregroundStyle(isActive ? Airi.primary : Airi.neutral500)
                     .frame(width: 20)
+                    // The icon bounces whenever its row BECOMES active —
+                    // the selection change reads as an event, not a repaint.
+                    .symbolEffect(.bounce, value: isActive)
                 Text(item.title)
                     .font(.system(size: 13, weight: isActive ? .semibold : .regular))
                     .foregroundStyle(isActive ? Airi.primary : Airi.neutral800)
@@ -483,15 +487,26 @@ private struct SidebarRowButton: View {
             .padding(.horizontal, 10)
             .padding(.vertical, 7)
             .background(
-                RoundedRectangle(cornerRadius: 8)
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .fill(isActive ? Airi.primary.opacity(0.1)
                           : hovering ? Airi.neutral100.opacity(0.6) : Color.clear)
+                    // Active pill gets a soft primary glow.
+                    .shadow(color: isActive ? Airi.primary.opacity(0.15) : .clear,
+                            radius: 6, y: 1)
             )
+            .scaleEffect(pressed ? 0.97 : 1)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
-        .animation(Airi.controlAnimation, value: hovering)
+        .animation(Airi.hoverAnimation, value: hovering)
+        .animation(Airi.hoverAnimation, value: isActive)
+        .animation(Airi.hoverAnimation, value: pressed)
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in pressed = true }
+                .onEnded { _ in pressed = false }
+        )
     }
 }
 

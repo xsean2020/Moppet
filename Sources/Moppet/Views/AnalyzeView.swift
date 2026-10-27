@@ -143,23 +143,31 @@ struct AnalyzeView: View {
         }
     }
 
-    /// First-scan progress (full-width, replaces the explorer until the
-    /// root layer lands).
+    /// First-scan progress — a large ring replaces the explorer until the
+    /// root layer lands. (Was a thin linear bar: technically fine but easy
+    /// to miss; the ring makes the measuring stage a visible centerpiece.)
     private var initialScanPane: some View {
-        VStack(spacing: Airi.space2) {
+        VStack(spacing: Airi.space3) {
             Spacer()
-            ProgressView(value: totalProgress)
-                .progressViewStyle(.linear)
-                .tint(Airi.primary)
-                .frame(maxWidth: 340)
+            let done = progress?.done ?? 0
+            let total = max(progress?.total ?? 0, 1)
+            ProgressRing(
+                progress: Double(done) / Double(total),
+                lineWidth: 12,
+                showValue: true,
+                valueText: "\(Int(Double(done) / Double(total) * 100))%",
+                valueFontSize: 20
+            )
+            .frame(width: 132, height: 132)
             HStack(spacing: 4) {
-                TickingNumber(value: progress?.done ?? 0)
+                TickingNumber(value: done)
+                    .font(.system(size: 17, weight: .semibold, design: .rounded))
                     .foregroundStyle(Airi.neutral900)
                 Text("/ \(progress?.total ?? 0) \(L("entries"))")
+                    .font(Airi.bodyFont)
             }
-            .font(Airi.captionFont)
             .foregroundStyle(Airi.neutral500)
-            .animation(.spring(response: 0.4, dampingFraction: 0.9), value: progress?.done ?? 0)
+            .animation(.spring(response: 0.4, dampingFraction: 0.9), value: done)
             Text(L("Measuring your home folder…"))
                 .font(Airi.captionFont)
                 .foregroundStyle(Airi.neutral500)

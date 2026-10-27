@@ -8,6 +8,7 @@ struct UninstallView: View {
     @State private var apps: [UninstallEngine.AppEntry] = []
     @State private var sizes: [String: Int64] = [:]
     @State private var sizingProgress: (done: Int, total: Int)? = nil
+    @State private var loadingPulse = false
     @State private var selectedApps: Set<String> = []
     @State private var loading = true
     @State private var batchRunning = false
@@ -43,7 +44,12 @@ struct UninstallView: View {
                     searchField
                     if loading {
                         Spacer()
-                        ProgressView().controlSize(.large)
+                        ProgressRing(progress: 0.5, lineWidth: 8, showValue: false)
+                            .frame(width: 56, height: 56)
+                            // Indeterminate phase: pulse instead of fake progress.
+                            .opacity(loadingPulse ? 0.45 : 1.0)
+                            .animation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true),
+                                       value: loadingPulse)
                         Spacer()
                     } else if filteredApps.isEmpty {
                         // Search miss used to be a blank list.
@@ -86,6 +92,7 @@ struct UninstallView: View {
         } message: {
             Text(L("Apps move to the Trash (recoverable). Related files listed in the detail pane are NOT touched by batch uninstall."))
         }
+        .onAppear { loadingPulse = true }
         .task {
             guard apps.isEmpty else { return }
             // Fast metadata first (sub-second), sizes stream in after.
@@ -137,7 +144,13 @@ struct UninstallView: View {
                 .buttonStyle(.plain)
                 Spacer()
                 if let progress = sizingProgress {
-                    HStack(spacing: 2) {
+                    HStack(spacing: 8) {
+                        ProgressRing(
+                            progress: Double(progress.done) / Double(max(progress.total, 1)),
+                            lineWidth: 4,
+                            showValue: false
+                        )
+                        .frame(width: 22, height: 22)
                         Text(L("sizing"))
                         TickingNumber(value: progress.done)
                         Text("/\(progress.total)")

@@ -114,11 +114,13 @@ struct CircleIconButton: View {
     var action: () -> Void
     @State private var hovering = false
     @State private var pressed = false
+    @State private var presses = 0
 
     var body: some View {
-        Button(action: action) {
+        Button(action: { presses += 1; action() }) {
             Image(systemName: icon)
                 .font(.system(size: 13, weight: .medium))
+                .symbolEffect(.bounce, value: presses)
                 .foregroundStyle(hovering ? Airi.primary : Airi.neutral700)
                 .frame(width: 32, height: 32)
                 .background(
@@ -152,6 +154,8 @@ struct AiriButton: View {
     let action: () -> Void
 
     @State private var pressed = false
+    @State private var hovering = false
+    @State private var presses = 0
 
     private var surface: Color {
         switch variant {
@@ -172,7 +176,9 @@ struct AiriButton: View {
                         .controlSize(.small)
                         .tint(foreground)
                 } else if let icon {
-                    Image(systemName: icon).font(.system(size: 12, weight: .semibold))
+                    Image(systemName: icon)
+                        .font(.system(size: 12, weight: .semibold))
+                        .symbolEffect(.bounce, value: presses)
                 }
                 Text(title).font(.system(size: 13, weight: .medium))
             }
@@ -182,19 +188,23 @@ struct AiriButton: View {
             .background(
                 RoundedRectangle(cornerRadius: Airi.radiusControl, style: .continuous)
                     .fill(surface)
+                    .brightness(hovering && !disabled ? 0.08 : 0)
             )
             .opacity(disabled ? 0.5 : 1)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .disabled(disabled || busy)
-        .scaleEffect(pressed ? 0.95 : 1)
-        .animation(Airi.controlAnimation, value: pressed)
-        .onHover { _ in pressed = false }
+        .scaleEffect(pressed ? 0.95 : hovering && !disabled ? 1.02 : 1)
+        .shadow(color: Airi.primary.opacity(variant == .primary && hovering && !disabled ? 0.25 : 0),
+                radius: 8, y: 2)
+        .animation(Airi.hoverAnimation, value: pressed)
+        .animation(Airi.hoverAnimation, value: hovering)
+        .onHover { hovering = $0; if $0 { pressed = false } }
         .simultaneousGesture(
             DragGesture(minimumDistance: 0)
                 .onChanged { _ in if !disabled { pressed = true } }
-                .onEnded { _ in pressed = false }
+                .onEnded { _ in pressed = false; presses += 1 }
         )
     }
 }
@@ -214,12 +224,21 @@ struct SettingsCard<Content: View>: View {
         .background(
             RoundedRectangle(cornerRadius: Airi.radiusCard, style: .continuous)
                 .fill(Airi.cardBackground)
-                .shadow(color: .black.opacity(0.06), radius: 6, y: 2)
+                .shadow(color: .black.opacity(0.07), radius: 8, y: 3)
         )
         .overlay(
             RoundedRectangle(cornerRadius: Airi.radiusCard, style: .continuous)
                 .strokeBorder(Airi.neutral200.opacity(0.6), lineWidth: 1)
         )
+        // One-pixel sheen along the top edge — glass cards read lit from
+        // above; opacity is low enough to stay subtle in dark mode.
+        .overlay(alignment: .top) {
+            LinearGradient(colors: [.white.opacity(0.10), .clear],
+                           startPoint: .top, endPoint: .bottom)
+                .frame(height: 1)
+                .clipShape(RoundedRectangle(cornerRadius: Airi.radiusCard, style: .continuous))
+                .allowsHitTesting(false)
+        }
     }
 }
 
@@ -244,6 +263,9 @@ struct ProgressRing: View {
     var track: Color = Airi.neutral200
     var showValue: Bool = false
     var valueText: String = ""
+    /// Scale the label with the ring: 12pt reads fine in an 84pt ring but
+    /// drowns in a 132pt one.
+    var valueFontSize: CGFloat = 12
 
     var body: some View {
         ZStack {
@@ -256,9 +278,11 @@ struct ProgressRing: View {
                     style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
                 )
                 .rotationEffect(.degrees(-90))
+                // Soft glow makes the ring feel emissive instead of flat.
+                .shadow(color: tint.opacity(0.35), radius: 3)
             if showValue {
                 Text(valueText)
-                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .font(.system(size: valueFontSize, weight: .semibold, design: .rounded))
                     .foregroundStyle(Airi.neutral700)
                     .monospacedDigit()
             }
@@ -317,16 +341,25 @@ struct IconItemCard: View {
         self.action = action
     }
 
+    @State private var pressed = false
+
     var body: some View {
         Button(action: action) { cardContent }
             .buttonStyle(.plain)
             .opacity(appeared ? 1 : 0)
             .offset(y: appeared ? 0 : 8)
+            .scaleEffect(pressed ? 0.98 : hovering ? 1.015 : 1)
+            .animation(Airi.hoverAnimation, value: pressed)
             .onAppear {
                 withAnimation(Airi.entranceCurve.delay(entranceIndex * 0.05)) { appeared = true }
             }
             .onHover { hovering = $0 }
             .animation(Airi.cardAnimation, value: hovering)
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { _ in pressed = true }
+                    .onEnded { _ in pressed = false }
+            )
     }
 
     private var cardContent: some View {
@@ -344,6 +377,7 @@ struct IconItemCard: View {
                     .foregroundStyle(hovering ? Airi.primary : Airi.neutral400)
                     .opacity(hovering ? 0.5 : 0.3)
                     .scaleEffect(hovering ? 1.2 : 1)
+                    .offset(x: hovering ? -4 : 0, y: hovering ? -3 : 0)
                     .padding(.trailing, 14)
                     .padding(.top, 10)
             }
@@ -384,6 +418,8 @@ struct ToggleRow: View {
     var subtitle: String? = nil
     @Binding var isOn: Bool
 
+    @State private var hovering = false
+
     var body: some View {
         HStack(alignment: .center, spacing: Airi.space3) {
             VStack(alignment: .leading, spacing: 2) {
@@ -398,6 +434,14 @@ struct ToggleRow: View {
                 .controlSize(.small)
                 .labelsHidden()
         }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 4)
+        .background(
+            RoundedRectangle(cornerRadius: Airi.radiusControl, style: .continuous)
+                .fill(hovering ? Airi.neutral100.opacity(0.55) : Color.clear)
+        )
+        .onHover { hovering = $0 }
+        .animation(Airi.hoverAnimation, value: hovering)
     }
 }
 
@@ -431,6 +475,8 @@ struct EmptyStateCard: View {
     var actionTitle: String? = nil
     var action: (() -> Void)? = nil
 
+    @State private var floating = false
+
     var body: some View {
         VStack(spacing: Airi.space2) {
             Image(systemName: icon)
@@ -438,6 +484,10 @@ struct EmptyStateCard: View {
                 .symbolRenderingMode(.hierarchical)
                 .foregroundStyle(Airi.neutral400)
                 .opacity(0.7)
+                .scaleEffect(floating ? 1.04 : 0.98)
+                .offset(y: floating ? -3 : 2)
+                .animation(.easeInOut(duration: 2.2).repeatForever(autoreverses: true),
+                           value: floating)
                 .padding(.bottom, 2)
             Text(title)
                 .font(Airi.emphasisFont)
@@ -465,6 +515,7 @@ struct EmptyStateCard: View {
             RoundedRectangle(cornerRadius: Airi.radiusCard, style: .continuous)
                 .strokeBorder(Airi.neutral200.opacity(0.6), lineWidth: 1)
         )
+        .onAppear { floating = true }
     }
 }
 

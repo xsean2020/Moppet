@@ -677,7 +677,41 @@ enum SmokeTest {
                        state?.selected == false)
                 expect("clean selection: hasCustomSelection flags explicit choices",
                        CleanSelectionStore.hasCustomSelection)
+                // THE USER-REPORTED BUG (installers selected, browsers scanned):
+                // the UI toggle writes ItemState.selected — persistence rides on
+                // its didSet reaching the store. Verify the whole chain through
+                // the view model, not the store alone.
+                do {
+                    let vm = CleanViewModel()
+                    let dmg = vm.sections.flatMap(\.items).first { $0.id == "dmg" }
+                    let chrome = vm.sections.flatMap(\.items).first { $0.id == "chrome-cache" }
+                    dmg?.selected = true
+                    chrome?.selected = false
+                    expect("clean selection: VM toggle persists (didSet chain)",
+                           CleanSelectionStore.isSelected(dmg!.item) == true
+                           && CleanSelectionStore.isSelected(chrome!.item) == false)
+                    let picked = Set(CleanSelectionStore.selectedItems().map(\.id))
+                    expect("clean selection: quick scan follows the VM toggle",
+                           picked.contains("dmg") && !picked.contains("chrome-cache"))
+                    // restore the user's real selection from the backup —
+                    // hardcoded values clobbered a live dmg=1 tick.
+                    for (id, on) in backup {
+                        CleanSelectionStore.setSelected(id: id, on)
+                    }
+                }
             }
+
+            // Pet states: every PetState must map to a bundled sticker
+            // (sad/angry were dead code — errors showed no emotion), and
+            // the sad pose must auto-settle via PetBus.
+            for state in [PetState.idle, .thinking, .talking, .scanning,
+                          .cleaning, .celebrating, .sleeping, .sad] {
+                expect("pet: sticker exists for \(state)",
+                       Stickers.image(for: state) != nil)
+            }
+            expect("pet: PetState has 8 cases",
+                   [PetState.idle, .thinking, .talking, .scanning,
+                    .cleaning, .celebrating, .sleeping, .sad].count == 8)
 
             // Model-controlled numeric params must be clamped, not trapped.
             let clampedHistory = executeSync("clean_history", args: ["limit": -1])

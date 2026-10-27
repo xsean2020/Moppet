@@ -17,14 +17,20 @@ enum CleanSelectionStore {
     static let storageKey = "clean.item-selection"
 
     private static let lock = NSLock()
-    private static var cache: [String: Bool]?
 
     // MARK: - Read
+    //
+    // No process-lifetime cache: the GUI app and a long-running MCP server
+    // are separate processes sharing one plist — a cached map let the stale
+    // side overwrite the live side's ticks on its next write. UserDefaults
+    // already caches the plist; a fresh read per call is effectively free at
+    // this size (26 keys).
 
     static func all() -> [String: Bool] {
         lock.lock()
         defer { lock.unlock() }
-        return loadedLocked()
+        return UserDefaults.standard.dictionary(forKey: storageKey)?
+            .compactMapValues { $0 as? Bool } ?? [:]
     }
 
     /// True when the user has ever toggled anything (so an empty selection
@@ -50,9 +56,11 @@ enum CleanSelectionStore {
     static func setSelected(id: String, _ selected: Bool) {
         lock.lock()
         defer { lock.unlock() }
-        var map = loadedLocked()
+        // Read-modify-write against DISK, not a cache — merges with any
+        // ticks another process made since our last write.
+        var map = UserDefaults.standard.dictionary(forKey: storageKey)?
+            .compactMapValues { $0 as? Bool } ?? [:]
         map[id] = selected
-        cache = map
         UserDefaults.standard.set(map, forKey: storageKey)
     }
 
@@ -60,15 +68,6 @@ enum CleanSelectionStore {
     static func clear() {
         lock.lock()
         defer { lock.unlock() }
-        cache = [:]
         UserDefaults.standard.removeObject(forKey: storageKey)
-    }
-
-    private static func loadedLocked() -> [String: Bool] {
-        if let cache { return cache }
-        let stored = UserDefaults.standard.dictionary(forKey: storageKey)?
-            .compactMapValues { $0 as? Bool } ?? [:]
-        cache = stored
-        return stored
     }
 }

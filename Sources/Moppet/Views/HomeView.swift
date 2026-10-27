@@ -70,12 +70,26 @@ struct HomeView: View {
 
     // MARK: - Disk
 
+    /// Ring color tracks disk pressure — the dashboard card is the first
+    /// thing on screen, so the state should read at a glance.
+    private var diskTint: Color {
+        switch disk.usedFraction {
+        case ..<0.75: return Airi.success
+        case ..<0.90: return Airi.warning
+        default: return Airi.danger
+        }
+    }
+
     private var diskCard: some View {
         SettingsCard(padding: Airi.space4) {
             HStack(alignment: .center, spacing: Airi.space4) {
-                ProgressRing(progress: disk.usedFraction, lineWidth: 8, showValue: true,
-                             valueText: disk.usedFraction.percentFormatted)
-                    .frame(width: 74, height: 74)
+                ProgressRing(progress: disk.usedFraction,
+                             lineWidth: 10,
+                             tint: diskTint,
+                             showValue: true,
+                             valueText: disk.usedFraction.percentFormatted,
+                             valueFontSize: 16)
+                    .frame(width: 96, height: 96)
 
                 VStack(alignment: .leading, spacing: 6) {
                     Text(disk.volumeName)
@@ -88,10 +102,15 @@ struct HomeView: View {
                         .font(Airi.captionFont)
                         .foregroundStyle(Airi.neutral500)
                         .monospacedDigit()
+                    Text(String(format: L("%@ free"), disk.freeBytes.bytesFormatted))
+                        .font(.system(size: 19, weight: .semibold, design: .rounded))
+                        .foregroundStyle(diskTint)
+                        .monospacedDigit()
                 }
                 Spacer()
             }
         }
+        .animation(Airi.controlAnimation, value: disk.usedFraction)
     }
 
     // MARK: - Quick actions

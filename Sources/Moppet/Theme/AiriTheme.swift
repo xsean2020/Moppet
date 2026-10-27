@@ -74,7 +74,10 @@ enum Airi {
 
     // MARK: - Motion
 
-    static let controlAnimation = Animation.easeInOut(duration: 0.2)
+    /// Spring everywhere: controls feel physical instead of linear-fading.
+    static let controlAnimation = Animation.spring(response: 0.3, dampingFraction: 0.85)
+    /// Slightly snappier spring for hover/press states.
+    static let hoverAnimation = Animation.spring(response: 0.22, dampingFraction: 0.8)
     static let cardAnimation = Animation.easeInOut(duration: 0.4)
     static let entranceCurve = Animation.timingCurve(0.16, 1, 0.3, 1, duration: 0.25)
 

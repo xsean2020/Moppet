@@ -10,6 +10,9 @@ enum PetState: Equatable {
     case cleaning
     case celebrating
     case sleeping
+    /// Brief "oops" pose after an error announcement (drooped ears/tail);
+    /// auto-settles to idle like celebrating does.
+    case sad
 }
 
 /// Shared event bus: engines post progress here, the desktop pet and the
@@ -44,6 +47,9 @@ final class PetBus {
             // Celebrate ~two full loops (hop+spin cycle is 1.6s) then fall
             // back to idle.
             scheduleSettle(after: 3.2)
+        } else if state == .sad {
+            // Sad is a moment, not a mood: droop, hold, recover.
+            scheduleSettle(after: 4.0)
         } else if state != nil {
             // Any new activity cancels a pending celebration settle.
             cancelSettle()
@@ -78,7 +84,7 @@ final class PetBus {
     func settle() {
         applyOnMain {
             switch self.state {
-            case .celebrating, .scanning, .cleaning:
+            case .celebrating, .scanning, .cleaning, .sad:
                 self.state = .idle
             default:
                 break

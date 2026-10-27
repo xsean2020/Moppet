@@ -53,6 +53,10 @@ func L(_ key: String) -> String { L10n.t(key) }
 
 private let zh: [String: String] = [
     // scan-scope round (clean/quick scan must never widen)
+    "%1$lld / %2$lld": "%1$lld / %2$lld",
+    "All items selected — click to clear": "已选全部——点击取消",
+    "Some items selected — click to select all": "已选部分——点击全选",
+    "No items selected — click to select all": "未选——点击全选",
     "Scanned %1$lld categories · found %2$lld paths (%3$@)": "已扫描 %1$lld 个类别 · 找到 %2$lld 个路径(%3$@)",
     "%1$lld of %2$lld categories selected": "已选 %1$lld / %2$lld 个类别",
     "Nothing selected — open Clean and pick what to scan.": "没有选中任何项目——请到「清理」页勾选要扫描的内容。",
