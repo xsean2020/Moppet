@@ -880,6 +880,12 @@ enum SmokeTest {
                 let short = "OK"
                 expect("pet: short messages keep a compact bubble",
                        PetView.bubbleWidth(for: short, panelWidth: 200) < 96)
+                // The scroll fallback must be a CONCRETE height (a greedy
+                // ScrollView stretched two-line bubbles to 190pt — measured).
+                // Mirrored here so the constant cannot drift silently.
+                expect("pet: bubble viewport is a bounded, non-zero cap",
+                       PetView.bubbleHeightCap(panelHeight: 320) > 0
+                       && PetView.bubbleHeightCap(panelHeight: 320) < 320)
             }
 
             // Bubble persistence: answers must NOT auto-hide (hideAfter 0 =

@@ -19,7 +19,8 @@ struct MoppetApp: App {
         // FULL GUI launch (pet panel + persisted MCP HTTP listener).
         let knownFlags: Set<String> = ["--smoke", "--brain-smoke", "--mcp", "--mcp-http",
                                        "--brain-exec", "--yes", "--probe-floater",
-                                       "--probe-models", "--route-perf", "--win-debug"]
+                                       "--probe-models", "--probe-pet-bubble",
+                                       "--route-perf", "--win-debug"]
         let args = CommandLine.arguments
         // A bare "--" is the conventional separator (`swift run Moppet -- --smoke`)
         // and must not count as an unknown flag.
@@ -34,6 +35,10 @@ struct MoppetApp: App {
         // Headless self-test: `Moppet --smoke` exercises the core engine and exits.
         if args.contains("--smoke") {
             SmokeTest.run()
+        }
+        // Pet bubble sizing probe: measures real laid-out heights.
+        if args.contains("--probe-pet-bubble") {
+            PetBubbleProbe.run()
         }
         // Floater color diagnostics: see Airi.probeFloaterColors.
         if args.contains("--probe-floater") {

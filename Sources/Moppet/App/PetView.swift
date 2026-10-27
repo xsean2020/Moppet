@@ -616,6 +616,106 @@ final class ClosureMenuItem: NSMenuItem {
     @objc private func fire() { handler() }
 }
 
+/// Markdown body of the speech bubble. Extracted so it can be laid out
+/// offscreen by `--probe-pet-bubble` (the bubble has regressed twice on
+/// sizing; the probe measures real laid-out heights).
+struct PetBubbleContent: View {
+    let message: String
+    let width: CGFloat
+
+    var body: some View {
+        Markdown(message)
+            .markdownTheme(.basic)
+            .markdownTextStyle {
+                FontSize(12)
+                ForegroundColor(Airi.neutral900)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .frame(width: width, alignment: .leading)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// The speech-bubble card exactly as the pet renders it: hug short answers,
+/// scroll long ones, never taller than `maxHeight`.
+struct PetBubbleCard: View {
+    let message: String
+    let width: CGFloat
+    let maxHeight: CGFloat
+
+    var body: some View {
+        ViewThatFits(in: .vertical) {
+            content
+            // Concrete height: a greedy ScrollView would make the whole
+            // ViewThatFits flexible and the parent VStack would stretch the
+            // bubble to fill the panel for even two lines of text.
+            ScrollView(.vertical, showsIndicators: true) {
+                content
+            }
+            .frame(height: maxHeight)
+        }
+        .frame(width: width)
+        .background(
+            RoundedRectangle(cornerRadius: Airi.radiusCard, style: .continuous)
+                .fill(Airi.cardBackground)
+                .shadow(color: .black.opacity(0.1), radius: 8, y: 3)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: Airi.radiusCard, style: .continuous)
+                .strokeBorder(Airi.neutral200.opacity(0.6), lineWidth: 1)
+        )
+    }
+
+    private var content: some View {
+        PetBubbleContent(message: message, width: width)
+    }
+}
+
+/// `--probe-pet-bubble`: lay the bubble out inside a pet-panel-sized VStack
+/// (mole replaced by a flexible filler) and print the height it actually
+/// gets. Short text must hug its content; long text must stop at the cap.
+@MainActor
+enum PetBubbleProbe {
+    private final class Store {
+        var heights: [String: CGFloat] = [:]
+    }
+
+    static func run() -> Never {
+        let store = Store()
+        let cases: [(CGFloat, CGFloat)] = [(200, 320), (250, 400)]
+        let texts: [(String, String)] = [
+            ("short", "嗨！我是 Moley 🦫 点我聊天 · 双击开完整窗口"),
+            ("long", String(repeating: "很长的回答内容需要滚动才能看完。", count: 40)),
+        ]
+        for (panelW, panelH) in cases {
+            for (label, text) in texts {
+                let key = "\(label) \(Int(panelW))x\(Int(panelH))"
+                let width = PetView.bubbleWidth(for: text, panelWidth: panelW)
+                let cap = max(96, min(208, panelH * 0.62))
+                let host = NSHostingView(rootView:
+                    VStack(spacing: 4) {
+                        PetBubbleCard(message: text, width: width, maxHeight: cap)
+                            .background(GeometryReader { g in
+                                Color.clear.onAppear {
+                                    store.heights[key] = g.size.height
+                                }
+                            })
+                        Color.clear.frame(maxHeight: .infinity)
+                    }
+                    .frame(width: panelW, height: panelH)
+                )
+                host.frame = NSRect(x: 0, y: 0, width: panelW, height: panelH)
+                host.layoutSubtreeIfNeeded()
+                RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+                print("probe \(key): bubbleH=\(Int(store.heights[key] ?? -1)) cap=\(Int(cap)) "
+                      + "width=\(Int(width)) fits=\((store.heights[key] ?? 999) <= cap)")
+            }
+        }
+        exit(store.heights.count == cases.count * texts.count ? 0 : 2)
+    }
+}
+
 // MARK: - Pet view (3D mole + bubble + quick chat)
 
 struct PetView: View {
@@ -744,25 +844,12 @@ struct PetView: View {
 
     /// Viewport height for a long answer: whatever the panel can spare after
     /// the mole keeps a usable strip, never the hardcoded 208.
-    private var bubbleMaxHeight: CGFloat {
-        max(96, min(208, PetSettings.currentSize.height * 0.62))
+    static func bubbleHeightCap(panelHeight: CGFloat) -> CGFloat {
+        max(96, min(208, panelHeight * 0.62))
     }
 
-    /// Markdown body of the speech bubble (shared by the hug and the
-    /// scrolling variant so both look identical).
-    private var bubbleText: some View {
-        Markdown(bus.message)
-            .markdownTheme(.basic)
-            .markdownTextStyle {
-                FontSize(12)
-                // Adaptive ink on the adaptive cardBackground — readable in
-                // both appearances.
-                ForegroundColor(Airi.neutral900)
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .frame(width: bubbleWidth, alignment: .leading)
-            .fixedSize(horizontal: false, vertical: true)
+    private var bubbleMaxHeight: CGFloat {
+        Self.bubbleHeightCap(panelHeight: PetSettings.currentSize.height)
     }
 
     private var bubble: some View {
@@ -778,25 +865,9 @@ struct PetView: View {
                     // ViewThatFits keeps short messages hugging their content
                     // and only switches to a scrolling viewport when the text
                     // would overflow the panel.
-                    ViewThatFits(in: .vertical) {
-                        bubbleText
-                        ScrollView(.vertical, showsIndicators: true) {
-                            bubbleText
-                        }
-                    }
-                        .frame(width: bubbleWidth)
-                        .frame(maxHeight: bubbleMaxHeight)
-                        // Same card recipe as SettingsCard (cardBackground +
-                        // neutral200 hairline) so the bubble matches the app.
-                        .background(
-                            RoundedRectangle(cornerRadius: Airi.radiusCard, style: .continuous)
-                                .fill(Airi.cardBackground)
-                                .shadow(color: .black.opacity(0.1), radius: 8, y: 3)
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: Airi.radiusCard, style: .continuous)
-                                .strokeBorder(Airi.neutral200.opacity(0.6), lineWidth: 1)
-                        )
+                    PetBubbleCard(message: bus.message,
+                                  width: bubbleWidth,
+                                  maxHeight: bubbleMaxHeight)
                 }
                 // Double-click the bubble → full chat window (which has a
                 // real close button in its header). contentShape keeps the
