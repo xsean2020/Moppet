@@ -100,6 +100,16 @@ enum Airi {
     static let monoCaption2Font = Font.system(size: 10, design: .monospaced)
 }
 
+/// macOS 26 "Tahoe" introduced Liquid Glass: the system now owns window and
+/// sidebar material compositing. The pre-Tahoe workarounds this app relied on
+/// (stacking an extra `ultraThinMaterial` on the sidebar, dialing vibrancy
+/// alpha below 1) actively fight it on 26 and render as muddy / opaque slabs.
+/// Gate those workarounds on this flag so 14–15 keep their tuned look.
+enum OSCompat {
+    static let usesLiquidGlass: Bool =
+        ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26
+}
+
 extension NSColor {
     convenience init(hex: String) {
         var value: UInt64 = 0

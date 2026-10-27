@@ -177,23 +177,27 @@ enum SystemStatus {
     static func topProcesses(limit: Int = 8) -> [ProcessEntry] {
         let proc = Process()
         let pipe = Pipe()
-        proc.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        // `-ArcO %cpu -o pid=%PID%…` mangles the columns on this ps (default
-        // set first, custom columns appended) — every row failed Double parse
-        // on the TT column and the list was ALWAYS empty. `-r` sorts by CPU.
-        proc.arguments = ["-c", "ps -Arcro pid,pcpu,pmem,comm | head -\(limit + 1)"]
+        // Run /bin/ps DIRECTLY (no `zsh -c` + `head`): the shell/pipe
+        // indirection and `-r` sort both changed behaviour on macOS 26, and
+        // `ps -A` output can exceed the 64 KB pipe buffer. We suppress the
+        // header with `pid=,…`, sort by CPU and cap in Swift instead.
+        proc.executableURL = URL(fileURLWithPath: "/bin/ps")
+        proc.arguments = ["-A", "-o", "pid=,pcpu=,pmem=,comm="]
         proc.standardOutput = pipe
         proc.standardError = FileHandle.nullDevice
         guard (try? proc.run()) != nil else { return [] }
-        proc.waitUntilExit()
+        // Drain BEFORE waiting: a full pipe makes waitUntilExit() deadlock.
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        proc.waitUntilExit()
         guard let text = String(data: data, encoding: .utf8) else { return [] }
-        return text.split(separator: "\n").dropFirst().compactMap { line -> ProcessEntry? in
-            let parts = line.split(whereSeparator: { $0 == " " }).map(String.init)
+        let rows = text.split(separator: "\n").compactMap { line -> ProcessEntry? in
+            let parts = line.split(whereSeparator: { $0 == " " })
             guard parts.count >= 4, let pid = Int(parts[0]),
                   let cpu = Double(parts[1]), let mem = Double(parts[2]) else { return nil }
-            return ProcessEntry(pid: pid, cpu: cpu, mem: mem, command: parts[3...].joined(separator: " "))
+            return ProcessEntry(pid: pid, cpu: cpu, mem: mem,
+                                command: parts[3...].joined(separator: " "))
         }
+        return Array(rows.sorted { $0.cpu > $1.cpu }.prefix(limit))
     }
 
     // MARK: - Uptime

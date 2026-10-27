@@ -151,6 +151,23 @@ final class CleanViewModel {
         phase = .configure
     }
 
+    /// Global select-all / clear-all for the configure page. The per-section
+    /// tri-state only covered one section at a time; users asked for one tap
+    /// across every section. `selected`'s didSet persists each change.
+    @MainActor
+    func selectAll() {
+        for section in sections {
+            for i in section.items.indices { section.items[i].selected = true }
+        }
+    }
+
+    @MainActor
+    func deselectAll() {
+        for section in sections {
+            for i in section.items.indices { section.items[i].selected = false }
+        }
+    }
+
     /// UI entry point: runs scan() as a cancellable task. A second tap while
     /// scanning is ignored (the Cancel button is the way out).
     @MainActor

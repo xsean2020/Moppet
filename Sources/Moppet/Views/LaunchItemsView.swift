@@ -198,6 +198,10 @@ private struct LaunchItemRow: View {
         .overlay(
             RoundedRectangle(cornerRadius: Airi.radiusCard)
                 .strokeBorder(Airi.neutral200.opacity(hovering ? 0.9 : 0.6), lineWidth: 1)
+                // Decorative border — on macOS 26 the stroke shape is
+                // hit-tested across its whole bounds and swallowed the row's
+                // toggle/button clicks. Never let it intercept.
+                .allowsHitTesting(false)
         )
         .contentShape(Rectangle())
         .onHover { hovering in

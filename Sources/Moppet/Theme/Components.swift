@@ -22,7 +22,10 @@ struct WindowVibrancy: NSViewRepresentable {
         // Thinner glass: dial the vibrancy layer back so the desktop shows
         // through more (light-mode vibrancy is especially milky at 1.0;
         // 0.7 after the user pushed for even more transparency at 0.8).
-        view.alphaValue = 0.7
+        // EXCEPT on macOS 26 (Liquid Glass): the system already tunes material
+        // opacity, and reducing alpha below 1 makes the glass composite as a
+        // flat/opaque slab — so keep full opacity there.
+        view.alphaValue = OSCompat.usesLiquidGlass ? 1.0 : 0.7
         return view
     }
     func updateNSView(_ view: NSVisualEffectView, context: Context) {
@@ -229,6 +232,11 @@ struct SettingsCard<Content: View>: View {
         .overlay(
             RoundedRectangle(cornerRadius: Airi.radiusCard, style: .continuous)
                 .strokeBorder(Airi.neutral200.opacity(0.6), lineWidth: 1)
+                // Decorative border must not swallow clicks meant for the
+                // controls inside the card — on macOS 26 the stroke shape is
+                // hit-tested across its whole bounds, so buttons under it went
+                // dead / "insensitive" (Intel/older macOS was fine).
+                .allowsHitTesting(false)
         )
         // One-pixel sheen along the top edge — glass cards read lit from
         // above; opacity is low enough to stay subtle in dark mode.
@@ -406,6 +414,7 @@ struct IconItemCard: View {
                     hovering ? Airi.primary.opacity(0.5) : Airi.neutral200.opacity(0.6),
                     lineWidth: hovering ? 2 : 1
                 )
+                .allowsHitTesting(false)
         )
         .shadow(color: Color.black.opacity(hovering ? 0.10 : 0), radius: 4, y: 4)
     }
@@ -514,6 +523,7 @@ struct EmptyStateCard: View {
         .overlay(
             RoundedRectangle(cornerRadius: Airi.radiusCard, style: .continuous)
                 .strokeBorder(Airi.neutral200.opacity(0.6), lineWidth: 1)
+                .allowsHitTesting(false)
         )
         .onAppear { floating = true }
     }

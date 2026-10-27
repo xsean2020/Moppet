@@ -62,6 +62,11 @@ enum CleanSelectionStore {
             .compactMapValues { $0 as? Bool } ?? [:]
         map[id] = selected
         UserDefaults.standard.set(map, forKey: storageKey)
+        // Force the plist to disk NOW. This app runs as a bare SPM binary
+        // launched from a terminal; Ctrl-C / SIGTERM skips the normal
+        // termination flush, so the last ticks (e.g. the 5th browser) were
+        // silently lost on relaunch — "上次选中的选项没保存".
+        UserDefaults.standard.synchronize()
     }
 
     /// Restore the rule-library defaults (Settings "reset" affordance).
@@ -69,5 +74,6 @@ enum CleanSelectionStore {
         lock.lock()
         defer { lock.unlock() }
         UserDefaults.standard.removeObject(forKey: storageKey)
+        UserDefaults.standard.synchronize()
     }
 }

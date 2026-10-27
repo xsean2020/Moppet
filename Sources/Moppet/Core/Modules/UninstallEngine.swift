@@ -208,45 +208,63 @@ enum UninstallEngine {
     /// data is only removed when `withData` is enabled and files are found.
     @MainActor
     static func batchUninstall(apps: [AppEntry], sizes: [String: Int64],
-                               withData: Bool) async -> BatchOutcome {
+                               withData: Bool,
+                               appendRecord: Bool = true) async -> BatchOutcome {
         var outcome = BatchOutcome()
-        let urls = apps.map(\.url)
-        do {
-            _ = try await NSWorkspace.shared.recycle(urls)
-            for app in apps {
-                // Verify per app: recycle not throwing ≠ every URL moved
-                // (a still-present app must not leave the UI as "uninstalled").
+        // Fill in any app the caller hadn't sized yet (AppEntry.bytes is 0 and
+        // the dict can be incomplete mid-sizing) BEFORE recycling — once the
+        // bundle is in the Trash its size can't be measured reliably.
+        var effectiveSizes = sizes
+        for app in apps where (effectiveSizes[app.id] ?? 0) <= 0 {
+            effectiveSizes[app.id] = await ScanEngine.parallelSize(of: app.url).bytes
+        }
+        // Permanent delete (the user opted out of Trash). Per-app so one
+        // failure doesn't abort the rest; verify the path is really gone.
+        for app in apps {
+            do {
+                try await Task.detached { try FileManager.default.removeItem(at: app.url) }.value
                 if !FileManager.default.fileExists(atPath: app.url.path) {
                     outcome.trashed.append((app.id, app.name))
-                    outcome.freedBytes += sizes[app.id] ?? 0
+                    outcome.freedBytes += effectiveSizes[app.id] ?? 0
                 } else {
-                    outcome.failed.append((app.name, "could not move to Trash"))
+                    outcome.failed.append((app.name, "could not delete"))
                 }
+            } catch {
+                outcome.failed.append((app.name, error.localizedDescription))
             }
-        } catch {
-            outcome.failed.append(("batch", error.localizedDescription))
-            return outcome
         }
-        var relatedPaths: [String] = []
+        var relatedItems: [(path: String, bytes: Int64)] = []
         if withData {
             for app in apps {
                 let files = relatedFiles(
                     appName: app.name, bundleID: app.bundleID)
                 for file in files where file.deletable {
                     guard SafetyGuard.checkDeletable(file.url).allowed else { continue }
-                    _ = try? await NSWorkspace.shared.recycle([file.url])
-                    relatedPaths.append(file.url.path)
+                    if (try? await Task.detached { try FileManager.default.removeItem(at: file.url) }.value) != nil {
+                        relatedItems.append((file.url.path, file.bytes))
+                    }
                 }
             }
         }
+        let relatedBytes = relatedItems.reduce(0) { $0 + $1.bytes }
+        // Record ONLY apps that actually trashed, each with its real size, so
+        // History's per-path rows show numbers instead of "—" and failed apps
+        // no longer masquerade as successful removals.
+        let appItems = outcome.trashed.map { (path: $0.id, bytes: effectiveSizes[$0.id] ?? 0) }
         let record = CleanRecord(
             date: Date(), sectionTitles: ["Uninstall (batch)"],
-            requestedBytes: outcome.freedBytes, freedBytes: outcome.freedBytes,
-            itemCount: outcome.trashed.count + relatedPaths.count,
-            items: (apps.map { $0.url.path } + relatedPaths).map {
-                CleanRecordItem(path: $0, bytes: 0, mode: .trash, success: true, error: nil)
+            requestedBytes: outcome.freedBytes + relatedBytes,
+            freedBytes: outcome.freedBytes + relatedBytes,
+            itemCount: appItems.count + relatedItems.count,
+            items: appItems.map {
+                CleanRecordItem(path: $0.path, bytes: $0.bytes, mode: .trash, success: true, error: nil)
+            } + relatedItems.map {
+                CleanRecordItem(path: $0.path, bytes: $0.bytes, mode: .trash, success: true, error: nil)
             })
-        HistoryStore.append(record)
+        // Callers that run several single-app passes (the UI's sequential
+        // progress loop) pass appendRecord:false and write ONE aggregated
+        // record themselves — otherwise History got a row per app.
+        if appendRecord { HistoryStore.append(record) }
         return outcome
     }
 
@@ -267,7 +285,10 @@ enum UninstallEngine {
         // App bundle → Trash (works for user-writable /Applications subfolders and ~/Applications).
         // removed/failed carry full paths so the history audit can show exactly what happened.
         do {
-            _ = try await NSWorkspace.shared.recycle([app.url])
+            // Permanent delete (the user opted out of Trash): removeItem is
+            // synchronous and recursive for bundles — run it off the main
+            // actor so a multi-GB app doesn't freeze the UI.
+            try await Task.detached { try FileManager.default.removeItem(at: app.url) }.value
             appOK = !FileManager.default.fileExists(atPath: app.url.path)
             if appOK { removed.append(app.url.path) }
         } catch {
@@ -291,7 +312,7 @@ enum UninstallEngine {
                     continue
                 }
                 do {
-                    _ = try await NSWorkspace.shared.recycle([file.url])
+                    try await Task.detached { try FileManager.default.removeItem(at: file.url) }.value
                     removed.append(file.url.path)
                 } catch {
                     failed.append((file.url.path, error.localizedDescription))

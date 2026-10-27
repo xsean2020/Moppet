@@ -378,7 +378,12 @@ struct RootView: View {
             .padding(.vertical, 10)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .background(.ultraThinMaterial)
+        // Liquid Glass (macOS 26+) already gives NavigationSplitView a sidebar
+        // material; stacking ultraThinMaterial on top double-blurs it and reads
+        // as a milky band. Keep the explicit material only pre-26.
+        .background(OSCompat.usesLiquidGlass
+                    ? AnyShapeStyle(Color.clear)
+                    : AnyShapeStyle(.ultraThinMaterial))
         // Keep the sidebar a usable width when the window narrows — without
         // a floor, .balanced style crushes it until row titles wrap mid-word.
         .navigationSplitViewColumnWidth(min: 208, ideal: 224, max: 288)
@@ -498,6 +503,11 @@ private struct SidebarRowButton: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        // macOS 26 paints a blue keyboard-focus ring on the first focusable
+        // sidebar row at launch, so the *inactive* Dashboard row looked
+        // "selected" right next to the real active pill. Selection is already
+        // conveyed by the pill + ⌘1–9, so suppress the focus effect here.
+        .focusEffectDisabled()
         .onHover { hovering = $0 }
         .animation(Airi.hoverAnimation, value: hovering)
         .animation(Airi.hoverAnimation, value: isActive)

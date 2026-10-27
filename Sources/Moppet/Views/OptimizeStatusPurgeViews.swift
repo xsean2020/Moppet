@@ -562,7 +562,7 @@ struct PurgeView: View {
         }
         .padding(8)
         .background(RoundedRectangle(cornerRadius: Airi.radiusCard).fill(Airi.cardBackground))
-        .overlay(RoundedRectangle(cornerRadius: Airi.radiusCard).strokeBorder(Airi.neutral200.opacity(0.6)))
+        .overlay(RoundedRectangle(cornerRadius: Airi.radiusCard).strokeBorder(Airi.neutral200.opacity(0.6)).allowsHitTesting(false))
     }
 
     private func scan() async {

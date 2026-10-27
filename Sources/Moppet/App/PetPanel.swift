@@ -403,19 +403,31 @@ enum QuickScan {
         Task {
             // Respect the user's Clean-page selection — this used to scan the
             // rule defaults, i.e. every item they had unchecked.
-            let items = CleanSelectionStore.selectedItems()
+            var items = CleanSelectionStore.selectedItems()
+            // Quick scan also covers the Trash. The rule is default-OFF in the
+            // library (emptying it is destructive), but a quick scan is
+            // READ-ONLY — it only sizes and reports, never deletes. A
+            // deliberate untick of the Trash item is still respected.
+            if CleanSelectionStore.all()["trash"] != false,
+               let trash = RuleLibrary.sections.flatMap(\.items).first(where: { $0.id == "trash" }),
+               !items.contains(where: { $0.id == "trash" }) {
+                items.append(trash)
+            }
             guard !items.isEmpty else {
                 PetBus.shared.say(L("Nothing selected — open Clean and pick what to scan."), state: .idle)
                 return
             }
             let findings = (await ScanEngine.scan(items: items)).flatMap(\.findings)
             let total = findings.reduce(0) { $0 + $1.bytes }
+            let trashBytes = findings.filter { $0.itemID == "trash" }.reduce(0) { $0 + $1.bytes }
             // Report the scope so "only what I ticked" is visible, not assumed.
-            PetBus.shared.say(
-                String(format: L("Scanned %1$lld categories · found %2$lld paths (%3$@)"),
-                       items.count, findings.count, total.bytesFormatted),
-                state: .celebrating
-            )
+            // Trash is called out separately so its share is visible.
+            var message = String(format: L("Scanned %1$lld categories · found %2$lld paths (%3$@)"),
+                                 items.count, findings.count, total.bytesFormatted)
+            if trashBytes > 0 {
+                message += " · " + String(format: L("Trash %@"), trashBytes.bytesFormatted)
+            }
+            PetBus.shared.say(message, state: .celebrating)
         }
     }
 }

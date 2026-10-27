@@ -129,6 +129,10 @@ struct HistoryView: View {
                             .foregroundStyle(Airi.neutral400)
                             .rotationEffect(.degrees(isExpanded ? 90 : 0))
                     }
+                    // Whole-row hit target. The Spacer in the middle is empty
+                    // space (not hit-testable), so previously only the text or
+                    // chevron responded — "you had to click precisely".
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 if isExpanded {

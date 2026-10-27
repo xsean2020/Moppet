@@ -11,6 +11,13 @@ struct CleanView: View {
     /// until expanded — but they stay SELECTED, so the cap must be visibly
     /// disclosed (see the "show N more" row), never silent.
     @State private var expandedItems: Set<String> = []
+    /// Per-item "findings visible" (the row disclosure). Kept separate from
+    /// `expandedItems`, which lifts the 30-path cap once the row is open.
+    @State private var openItems: Set<String> = []
+    /// Running browsers that hold the caches we're about to clean — quitting
+    /// them first is required for the clean to actually take effect.
+    @State private var browsersToQuit: [BrowserProcesses.Browser] = []
+    @State private var showBrowserPrompt = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -30,7 +37,19 @@ struct CleanView: View {
             titleVisibility: .visible
         ) {
             Button(L("Clean"), role: .destructive) {
-                Task { await viewModel.clean() }
+                // A running browser keeps rewriting / locking its cache, so a
+                // clean would be incomplete. Ask before quitting it.
+                let itemIDs = Set(viewModel.selectedFindings.map(\.itemID))
+                let running = BrowserProcesses.running(for: itemIDs)
+                if running.isEmpty {
+                    Task { await viewModel.clean() }
+                } else {
+                    browsersToQuit = running
+                    // Let the confirm dialog dismiss before the alert presents.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                        showBrowserPrompt = true
+                    }
+                }
             }
             Button(L("Cancel"), role: .cancel) {}
         } message: {
@@ -38,6 +57,22 @@ struct CleanView: View {
             // a section that was left selected by default reads as "it cleaned
             // everything I never chose".
             Text(selectionSummary + "\n" + trashNotice)
+        }
+        .alert(
+            Text(String(format: L("Quit %@ first?"),
+                        browsersToQuit.map(\.name).joined(separator: ", "))),
+            isPresented: $showBrowserPrompt
+        ) {
+            Button(L("Quit & Clean"), role: .destructive) {
+                let browsers = browsersToQuit
+                Task {
+                    await BrowserProcesses.quit(browsers)
+                    await viewModel.clean()
+                }
+            }
+            Button(L("Cancel"), role: .cancel) {}
+        } message: {
+            Text(L("Browser caches can only be cleared while the browser is closed — a running browser keeps rewriting them. Unsaved tabs/forms may be lost (most browsers restore tabs on relaunch)."))
         }
         .onChange(of: viewModel.phase) { _, phase in
             if phase == .done { UXFeedback.success() }
@@ -137,6 +172,18 @@ struct CleanView: View {
                     .font(Airi.captionFont)
                     .foregroundStyle(Airi.neutral500)
                     .monospacedDigit()
+                // Global select-all / clear-all — the section tri-state only
+                // acted on one section, so "scan everything" needed N taps.
+                Button(L("Select all")) { viewModel.selectAll() }
+                    .buttonStyle(.plain)
+                    .font(Airi.captionFont.weight(.medium))
+                    .foregroundStyle(Airi.primary)
+                    .accessibilityLabel(Text(L("Select all")))
+                Button(L("Deselect all")) { viewModel.deselectAll() }
+                    .buttonStyle(.plain)
+                    .font(Airi.captionFont)
+                    .foregroundStyle(Airi.neutral500)
+                    .accessibilityLabel(Text(L("Deselect all")))
                 Spacer()
                 AiriButton(title: L("Scan"), icon: "magnifyingglass") {
                     viewModel.startScan()
@@ -163,9 +210,16 @@ struct CleanView: View {
                 Button {
                     withAnimation(Airi.controlAnimation) { section.expanded.toggle() }
                 } label: {
-                    Image(systemName: section.expanded ? "chevron.up" : "chevron.down")
+                    Image(systemName: "chevron.down")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(Airi.neutral500)
+                        // Rotate instead of swapping up/down — the glyph swap
+                        // was abrupt; rotation animates with the same spring.
+                        .rotationEffect(.degrees(section.expanded ? 180 : 0))
+                        // A 10pt glyph was a 10pt hit target — "insensitive"
+                        // on macOS 26. Pad it to a comfortable square.
+                        .frame(width: 30, height: 30)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 // Counts + tristate master check: a partially-ticked section
@@ -208,15 +262,19 @@ struct CleanView: View {
                         }
                     }
                 }
-                .transition(.opacity.combined(with: .move(edge: .top)))
                 .padding(.top, Airi.space1)
+                // Fade + a subtle top-anchored scale. The old
+                // `.move(edge: .top)` slid the body in from ABOVE its slot, so
+                // it overlapped the header while the card height sprang —
+                // that was the "broken" expand animation.
+                .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .top)))
             }
         }
     }
 
     /// macOS-style tristate master check for one section: filled check =
     /// every item ticked, filled minus = SOME ticked, empty square = none.
-    /// Click cycles none→all / partial→all / all→none. A plain Toggle cannot
+    /// Click: empty → select all; partial/full → clear. A plain Toggle cannot
     /// render the mixed state, which misread partially-ticked sections as off.
     private struct SectionTriState: View {
         let section: CleanViewModel.SectionState
@@ -231,12 +289,12 @@ struct CleanView: View {
 
         var body: some View {
             Button {
-                // Partial -> CLEAR, not select-all: in a cleaner app the
-                // dominant intent when a section is partially ticked and you
-                // don't want it is "get it out of my scope". (Selecting all
-                // from partial is one extra click; accidentally WIDENING the
-                // deletion scope with one click is the dangerous direction.)
-                onChange(state != 0)
+                // Empty → select all; partial/full → clear (partial → clear is
+                // the safe direction: don't WIDEN the deletion scope by one
+                // stray click). The condition used to be `state != 0`, which
+                // made empty AND full sections both no-ops — clicking the
+                // checkbox appeared completely dead.
+                onChange(state == 0)
             } label: {
                 Image(systemName: symbol)
                     .font(.system(size: 15, weight: .semibold))
@@ -253,6 +311,7 @@ struct CleanView: View {
                             .strokeBorder(state == 0 ? Airi.neutral200 : Color.clear,
                                           lineWidth: 1.5)
                     )
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .scaleEffect(hovering ? 1.08 : 1)
@@ -339,6 +398,7 @@ struct CleanView: View {
             bottomBar {
                 AiriButton(title: L("Rescan"), icon: "arrow.clockwise", variant: .secondary) {
                     expandedItems = []
+                    openItems = []
                     viewModel.startScan()
                 }
                 AiriButton(title: String(format: L("Clean %@"), viewModel.reviewBytes.bytesFormatted),
@@ -406,38 +466,106 @@ struct CleanView: View {
         }
     }
 
+    /// One item's review subtree. A big, fully-clickable header row toggles
+    /// the findings; a full-width "Show all N paths" lifts the 30-path cap.
+    /// Replaces the old OutlineGroup, where the parent could stay collapsed
+    /// while a tiny 10pt "Show all" did nothing visible and was hard to hit.
     private func itemTree(_ itemState: CleanViewModel.ItemState) -> some View {
-        let nodes = treeNodes(for: itemState)
-        let total = itemState.result?.findings.count ?? 0
+        let findings = itemState.result?.findings ?? []
+        let total = findings.count
         let cap = Self.findingCap
-        let isExpanded = expandedItems.contains(itemState.id)
-        // Cap applied only when collapsed; expanding shows everything.
-        let visibleNodes: [CleanView.TreeNode] = isExpanded || total <= cap
-            ? nodes
-            : nodes.map { node in
-                var copy = node
-                copy.children = node.children.map { Array($0.prefix(cap)) }
-                return copy
-            }
+        let isOpen = openItems.contains(itemState.id)
+        let showAll = expandedItems.contains(itemState.id)
+        let visible = showAll ? findings : Array(findings.prefix(cap))
         return VStack(alignment: .leading, spacing: 2) {
-            OutlineGroup(visibleNodes, children: \.children) { node in
-                treeNodeRow(node, itemState: itemState)
-            }
-            if total > cap {
-                Button {
-                    withAnimation(Airi.controlAnimation) {
-                        if isExpanded { expandedItems.remove(itemState.id) }
-                        else { expandedItems.insert(itemState.id) }
-                    }
-                } label: {
-                    Label(isExpanded ? L("Show less") : String(format: L("Show all %lld paths"), total),
-                          systemImage: isExpanded ? "chevron.up" : "chevron.down")
-                        .font(Airi.caption2Font)
-                        .foregroundStyle(Airi.primary)
+            Button {
+                withAnimation(Airi.controlAnimation) {
+                    if isOpen { openItems.remove(itemState.id) }
+                    else { openItems.insert(itemState.id) }
                 }
-                .buttonStyle(.plain)
-                .padding(.leading, 26)
+            } label: {
+                HStack(spacing: Airi.space2) {
+                    Image(systemName: isOpen ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Airi.neutral500)
+                        .frame(width: 14)
+                    Image(systemName: itemState.item.mode == .trash ? "trash" : "folder")
+                        .font(Airi.footnoteFont)
+                        .foregroundStyle(Airi.primary.opacity(0.7))
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(itemState.item.name)
+                            .font(.system(size: 13))
+                            .foregroundStyle(Airi.neutral900)
+                            .lineLimit(1)
+                        Text(String(format: L("%1$@ · %2$lld of %3$lld paths"),
+                                    itemState.activeBytes.bytesFormatted,
+                                    itemState.activeFindings.count, total))
+                            .font(Airi.caption2Font)
+                            .foregroundStyle(Airi.neutral500)
+                    }
+                    Spacer()
+                    if itemState.item.warning != nil {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(Airi.caption2Font)
+                            .foregroundStyle(Airi.warning)
+                            .help(itemState.item.warning ?? "")
+                    }
+                }
+                .padding(.vertical, 4)
+                .contentShape(Rectangle())   // whole row is the hit target
+            }
+            .buttonStyle(.plain)
+
+            if isOpen {
+                // Bulk include/exclude for THIS item's findings — the last
+                // chance to decide exactly which paths get deleted.
+                HStack(spacing: 12) {
+                    Button(L("Select all")) {
+                        withAnimation(Airi.controlAnimation) {
+                            itemState.excludedFindings.removeAll()
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .font(Airi.caption2Font.weight(.medium))
+                    .foregroundStyle(Airi.primary)
+                    Button(L("Deselect all")) {
+                        withAnimation(Airi.controlAnimation) {
+                            itemState.excludedFindings = Set(findings.map(\.id))
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .font(Airi.caption2Font)
+                    .foregroundStyle(Airi.neutral500)
+                    Spacer()
+                    Text("\(itemState.activeFindings.count)/\(total)")
+                        .font(Airi.caption2Font)
+                        .foregroundStyle(Airi.neutral500)
+                        .monospacedDigit()
+                }
+                .padding(.leading, 22)
                 .padding(.vertical, 3)
+                ForEach(visible) { finding in
+                    findingRow(finding, itemState: itemState)
+                }
+                if total > cap {
+                    Button {
+                        withAnimation(Airi.controlAnimation) {
+                            if showAll { expandedItems.remove(itemState.id) }
+                            else { expandedItems.insert(itemState.id) }
+                        }
+                    } label: {
+                        Label(showAll ? L("Show less") : String(format: L("Show all %lld paths"), total),
+                              systemImage: showAll ? "chevron.up" : "chevron.down")
+                            .font(Airi.caption2Font)
+                            .foregroundStyle(Airi.primary)
+                            // Full-width, padded hit target (was a 10pt label).
+                            .padding(.vertical, 7)
+                            .padding(.leading, 22)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
             }
         }
     }
@@ -445,83 +573,39 @@ struct CleanView: View {
     /// Review-tree page size (see `itemTree` for the disclosure row).
     static let findingCap = 30
 
-    // Tree node: item → findings (two-level OutlineGroup payload).
-    struct TreeNode: Identifiable {
-        let id: String
-        let name: String
-        let detail: String
-        let bytes: Int64
-        let finding: Finding?
-        var children: [TreeNode]? = nil
-    }
-
-    private func treeNodes(for itemState: CleanViewModel.ItemState) -> [TreeNode] {
-        guard let result = itemState.result else { return [] }
-        return [
-            TreeNode(
-                id: "item-\(itemState.id)",
-                name: itemState.item.name,
-                detail: String(format: L("%1$@ · %2$lld of %3$lld paths"),
-                               itemState.activeBytes.bytesFormatted,
-                               itemState.activeFindings.count, result.findings.count),
-                bytes: itemState.activeBytes,
-                finding: nil,
-                children: result.findings.map { finding in
-                    TreeNode(
-                        id: finding.id,
-                        name: finding.lastPathComponent,
-                        detail: String(format: L("%@ · %lld files"),
-                                       finding.bytes.bytesFormatted, finding.fileCount),
-                        bytes: finding.bytes,
-                        finding: finding
-                    )
-                }
-            )
-        ]
-    }
-
-    private func treeNodeRow(_ node: TreeNode, itemState: CleanViewModel.ItemState) -> some View {
+    /// One finding row: include/exclude checkbox + name + size.
+    private func findingRow(_ finding: Finding, itemState: CleanViewModel.ItemState) -> some View {
         HStack(spacing: Airi.space2) {
-            if let finding = node.finding {
-                Toggle("", isOn: Binding(
-                    get: { !itemState.excludedFindings.contains(finding.id) },
-                    set: { include in
-                        if include {
-                            itemState.excludedFindings.remove(finding.id)
-                        } else {
-                            itemState.excludedFindings.insert(finding.id)
-                        }
+            Toggle("", isOn: Binding(
+                get: { !itemState.excludedFindings.contains(finding.id) },
+                set: { include in
+                    if include {
+                        itemState.excludedFindings.remove(finding.id)
+                    } else {
+                        itemState.excludedFindings.insert(finding.id)
                     }
-                ))
-                .toggleStyle(.checkbox)
-                .controlSize(.small)
-                .labelsHidden()
-                Image(systemName: "doc")
-                    .font(Airi.caption2Font)
-                    .foregroundStyle(Airi.neutral400)
-            } else {
-                Image(systemName: itemState.item.mode == .trash ? "trash" : "folder")
-                    .font(Airi.footnoteFont)
-                    .foregroundStyle(Airi.primary.opacity(0.7))
-            }
+                }
+            ))
+            .toggleStyle(.checkbox)
+            .controlSize(.small)
+            .labelsHidden()
+            Image(systemName: "doc")
+                .font(Airi.caption2Font)
+                .foregroundStyle(Airi.neutral400)
             VStack(alignment: .leading, spacing: 1) {
-                Text(node.name)
-                    .font(.system(size: node.finding == nil ? 13 : 12))
+                Text(finding.lastPathComponent)
+                    .font(.system(size: 12))
                     .foregroundStyle(Airi.neutral900)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                Text(node.detail)
+                Text(String(format: L("%@ · %lld files"),
+                            finding.bytes.bytesFormatted, finding.fileCount))
                     .font(Airi.caption2Font)
                     .foregroundStyle(Airi.neutral500)
             }
             Spacer()
-            if node.finding == nil, itemState.item.warning != nil {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(Airi.caption2Font)
-                    .foregroundStyle(Airi.warning)
-                    .help(itemState.item.warning ?? "")
-            }
         }
+        .padding(.leading, 22)
         .padding(.vertical, 1)
     }
 

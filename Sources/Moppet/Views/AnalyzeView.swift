@@ -44,7 +44,7 @@ struct AnalyzeView: View {
     var body: some View {
         VStack(spacing: 0) {
             PageHeader(title: L("Analyze"),
-                       subtitle: L("Expand folders to size them — tick paths to trash"),
+                       subtitle: L("Expand folders to size them — tick paths to delete"),
                        onBack: onClose.map { close in { close() } })
             Divider().overlay(Airi.neutral200.opacity(0.5))
             if scanning && rootChildren.isEmpty {
@@ -195,7 +195,7 @@ struct AnalyzeView: View {
                 .animation(.spring(response: 0.4, dampingFraction: 0.9), value: selected.count)
             Spacer()
             if !selected.isEmpty {
-                AiriButton(title: String(format: L("Move %lld to Trash"), selected.count), icon: "trash.fill",
+                AiriButton(title: String(format: L("Delete %lld"), selected.count), icon: "trash.fill",
                            variant: .destructive) { confirmingTrash = true }
             }
             AiriButton(title: scanning ? L("Scanning…") : L("Rescan"), icon: "arrow.clockwise",
@@ -207,14 +207,14 @@ struct AnalyzeView: View {
         .background(.ultraThinMaterial)
         .overlay(alignment: .top) { Divider().overlay(Airi.neutral200.opacity(0.5)) }
         .confirmationDialog(
-            Text(String(format: L("Move %lld items (%@) to Trash?"), selected.count, selectedBytes.bytesFormatted)),
+            Text(String(format: L("Delete %lld items (%@) permanently?"), selected.count, selectedBytes.bytesFormatted)),
             isPresented: $confirmingTrash,
             titleVisibility: .visible
         ) {
-            Button(L("Move to Trash"), role: .destructive) { trashSelection() }
+            Button(L("Delete"), role: .destructive) { trashSelection() }
             Button(L("Cancel"), role: .cancel) {}
         } message: {
-            Text(L("Items go to the Trash and stay recoverable until it is emptied."))
+            Text(L("Items are deleted permanently. This cannot be undone."))
         }
     }
 
@@ -226,25 +226,27 @@ struct AnalyzeView: View {
         guard node.isDirectory else { return }
         guard !node.loadingChildren else { return }
         if node.loaded {
-            withAnimation(Airi.controlAnimation) { path.append(node) }
-            return
-        }
-        // Fully-cached sub-layers open instantly (all entries valid → no
-        // disk walk); any miss falls through to the real measure. Partial
-        // snapshots would silently HIDE folders, so they are not served here.
-        let (stale, missed) = ScanEngine.cachedTopChildren(of: node.url, limit: 30)
-        if missed == 0, !stale.isEmpty {
-            node.children = stale.map {
-                FileNode(url: $0.url, bytes: $0.bytes, isDirectory: $0.isDirectory, fileCount: $0.fileCount)
-            }
-            node.loaded = true
-            withAnimation(Airi.controlAnimation) { path.append(node) }
+            // Instant switch — animating a whole 100-row list + bubble map
+            // re-layout was a visible stutter on drill-down.
+            path.append(node)
             return
         }
         node.loadingChildren = true
         let pathSnapshot = path.map(\.url.path)
         Task {
-            let children = await ScanEngine.topChildren(of: node.url, limit: 30)
+            // Probe the size cache OFF the main thread. It enumerates the
+            // directory and stats every child (127 entries in ~/Library →
+            // ~254 syscalls); running that synchronously froze the first
+            // click into a folder.
+            let (stale, missed) = await Task.detached {
+                ScanEngine.cachedTopChildren(of: node.url, limit: 30)
+            }.value
+            let children: [ScanEngine.SpaceEntry]
+            if missed == 0, !stale.isEmpty {
+                children = stale
+            } else {
+                children = await ScanEngine.topChildren(of: node.url, limit: 30)
+            }
             node.children = children.map {
                 FileNode(url: $0.url, bytes: $0.bytes, isDirectory: $0.isDirectory, fileCount: $0.fileCount)
             }
@@ -254,7 +256,7 @@ struct AnalyzeView: View {
             // clicked — a slow scan completing after navigation used to
             // yank the view to a layer nobody asked for.
             guard pathSnapshot == path.map(\.url.path) else { return }
-            withAnimation(Airi.controlAnimation) { path.append(node) }
+            path.append(node)   // instant switch (no whole-layer animation)
         }
     }
 
@@ -272,9 +274,10 @@ struct AnalyzeView: View {
         let home = FileManager.default.homeDirectoryForCurrentUser
         // Cache fast-path: SizeCache invalidates on directory mtime, so a
         // full hit means nothing changed under this layer — the snapshot IS
-        // the measurement. Serve it instantly (the fix for "re-entering
-        // Analyze is slow"); any miss falls through to the real pass, because
-        // a partial snapshot would silently HIDE folders.
+        // the measurement. Serve it SYNCHRONOUSLY so the first frame already
+        // has the right state (no "loading flash" then jump); any miss falls
+        // through to the real pass, because a partial snapshot would silently
+        // HIDE folders.
         if !rescan {
             let (stale, missed) = ScanEngine.cachedTopChildren(of: home, limit: 40)
             if missed == 0, stale.count >= 4, rootChildren.isEmpty {
@@ -343,27 +346,35 @@ struct AnalyzeView: View {
         let deletable = nodes.filter { SafetyGuard.checkDeletable($0.url).allowed }
         let blocked = nodes.filter { !SafetyGuard.checkDeletable($0.url).allowed }
         Task {
-            do {
-                _ = try await NSWorkspace.shared.recycle(deletable.map(\.url))
-            } catch {
-                PetBus.shared.say(L("Move to Trash failed:") + " " + error.localizedDescription,
-                                  state: .idle)
-                return
+            // Permanent delete (the user opted out of Trash): per-path so one
+            // failure doesn't abort the rest.
+            var removed: [FileNode] = []
+            var failures: [(node: FileNode, error: String)] = []
+            for node in deletable {
+                do {
+                    try await Task.detached { try FileManager.default.removeItem(at: node.url) }.value
+                    removed.append(node)
+                } catch {
+                    failures.append((node, error.localizedDescription))
+                }
             }
-            let freed = deletable.reduce(0) { $0 + $1.bytes }
+            let freed = removed.reduce(0) { $0 + $1.bytes }
             let record = CleanRecord(
                 date: Date(), sectionTitles: ["Analyze"],
                 requestedBytes: freed, freedBytes: freed, itemCount: nodes.count,
-                items: deletable.map {
-                    CleanRecordItem(path: $0.url.path, bytes: $0.bytes, mode: .trash,
+                items: removed.map {
+                    CleanRecordItem(path: $0.url.path, bytes: $0.bytes, mode: .permanent,
                                     success: true, error: nil)
+                } + failures.map {
+                    CleanRecordItem(path: $0.node.url.path, bytes: $0.node.bytes, mode: .permanent,
+                                    success: false, error: $0.error)
                 } + blocked.map {
-                    CleanRecordItem(path: $0.url.path, bytes: $0.bytes, mode: .trash,
+                    CleanRecordItem(path: $0.url.path, bytes: $0.bytes, mode: .permanent,
                                     success: false, error: "blocked by safety guard")
                 })
             HistoryStore.append(record)
             UXFeedback.success()
-            PetBus.shared.say(String(format: L("Trashed %lld paths 🗑"), deletable.count), state: .celebrating)
+            PetBus.shared.say(String(format: L("Deleted %lld paths 🗑"), removed.count), state: .celebrating)
             selected.removeAll()
             startScan()
         }

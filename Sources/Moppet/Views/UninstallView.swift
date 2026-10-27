@@ -22,9 +22,11 @@ struct UninstallView: View {
     @State private var resultText: String?
     @State private var busy = false
     @State private var adminResultText: String?
-    /// Batch-uninstall confirmation (the flow moved apps straight to the
-    /// Trash on one click — the only page in the app without a confirm).
+    /// Batch-uninstall confirmation (deletion is permanent now, so it must ask).
     @State private var confirmingBatch = false
+    /// Single-app confirmation — permanent deletion needs an explicit confirm.
+    @State private var confirmingSingle = false
+    @State private var singleRemoveData = false
     /// Explicit focus plumbing for the search box (terminal-launched apps
     /// can lack a working click-to-first-responder chain — see HANDOFF §6.24).
     @FocusState private var searchFocused: Bool
@@ -35,7 +37,7 @@ struct UninstallView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            PageHeader(title: L("Uninstall"), subtitle: L("Move apps to the Trash and sweep their leftovers"), onBack: onClose)
+            PageHeader(title: L("Uninstall"), subtitle: L("Delete apps and sweep their leftovers"), onBack: onClose)
             Divider().overlay(Airi.neutral200.opacity(0.5))
             HStack(spacing: 0) {
                 // app list
@@ -90,7 +92,21 @@ struct UninstallView: View {
             }
             Button(L("Cancel"), role: .cancel) {}
         } message: {
-            Text(L("Apps move to the Trash (recoverable). Related files listed in the detail pane are NOT touched by batch uninstall."))
+            Text(L("Apps are deleted permanently (cannot be undone). Related files listed in the detail pane are NOT touched by batch uninstall."))
+        }
+        .confirmationDialog(
+            Text(singleRemoveData
+                 ? String(format: L("Delete %@ and its data permanently?"), selection?.name ?? "")
+                 : String(format: L("Delete %@ permanently?"), selection?.name ?? "")),
+            isPresented: $confirmingSingle,
+            titleVisibility: .visible
+        ) {
+            Button(L("Delete permanently"), role: .destructive) { uninstall(removeData: singleRemoveData) }
+            Button(L("Cancel"), role: .cancel) {}
+        } message: {
+            Text(singleRemoveData
+                 ? L("The app and its selected related files are deleted permanently. This cannot be undone.")
+                 : L("The app is deleted permanently. This cannot be undone."))
         }
         .onAppear { loadingPulse = true }
         .task {
@@ -182,7 +198,7 @@ struct UninstallView: View {
             if let outcome = batchResult {
                 SettingsCard(padding: 10) {
                     VStack(alignment: .leading, spacing: 3) {
-                        Text("✓ \(L("Moved to Trash")): \(outcome.trashed.map(\.name).joined(separator: ", "))")
+                        Text("✓ \(L("Deleted")): \(outcome.trashed.map(\.name).joined(separator: ", "))")
                             .font(Airi.caption2Font)
                             .foregroundStyle(Airi.success)
                         if !outcome.failed.isEmpty {
@@ -206,15 +222,35 @@ struct UninstallView: View {
         batchRunning = true
         batchProgress = (0, picked.count)
         Task {
-            // Sequential so the per-app progress counter means something
-            // (the engine's parallel batch is fast but unordered).
+            // Make sure every app has a real size BEFORE trashing so the one
+            // aggregated record carries correct per-path bytes.
+            var effectiveSizes = currentSizes
+            for app in picked where (effectiveSizes[app.id] ?? 0) <= 0 {
+                effectiveSizes[app.id] = await ScanEngine.parallelSize(of: app.url).bytes
+            }
+            // Sequential so the per-app progress counter means something; each
+            // call is told NOT to append its own record.
             var outcome = UninstallEngine.BatchOutcome()
             for (index, app) in picked.enumerated() {
-                let single = await UninstallEngine.batchUninstall(apps: [app], sizes: currentSizes, withData: false)
+                let single = await UninstallEngine.batchUninstall(
+                    apps: [app], sizes: effectiveSizes, withData: false, appendRecord: false)
                 outcome.trashed += single.trashed
                 outcome.freedBytes += single.freedBytes
                 outcome.failed += single.failed
                 batchProgress = (index + 1, picked.count)
+            }
+            // ONE audit record for the whole batch — previously every app
+            // produced its own row, so a 5-app uninstall spammed History with
+            // five 1-path entries at the same timestamp.
+            if !outcome.trashed.isEmpty {
+                let items = outcome.trashed.map {
+                    CleanRecordItem(path: $0.id, bytes: effectiveSizes[$0.id] ?? 0,
+                                    mode: .permanent, success: true, error: nil)
+                }
+                HistoryStore.append(CleanRecord(
+                    date: Date(), sectionTitles: ["Uninstall (batch)"],
+                    requestedBytes: outcome.freedBytes, freedBytes: outcome.freedBytes,
+                    itemCount: items.count, items: items))
             }
             // Ghost rows: only apps that actually trashed leave the list —
             // a failed recycle used to make a still-installed app vanish.
@@ -251,7 +287,7 @@ struct UninstallView: View {
         }
         .padding(8)
         .background(RoundedRectangle(cornerRadius: Airi.radiusControl).fill(Airi.neutral50))
-        .overlay(RoundedRectangle(cornerRadius: Airi.radiusControl).strokeBorder(Airi.neutral200, lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: Airi.radiusControl).strokeBorder(Airi.neutral200, lineWidth: 1).allowsHitTesting(false))
         .padding(Airi.space2)
     }
 
@@ -381,11 +417,13 @@ struct UninstallView: View {
 
                     HStack {
                         AiriButton(title: L("Uninstall (app only)"), icon: "trash",
-                                   variant: .secondary, disabled: busy) { uninstall(removeData: false) }
+                                   variant: .secondary, disabled: busy) {
+                            singleRemoveData = false; confirmingSingle = true
+                        }
                         AiriButton(title: String(format: L("Uninstall + data (%@)"),
                                                 relatedSelectedBytes.bytesFormatted),
                                    icon: "trash.fill", disabled: busy || selectedRelated.isEmpty) {
-                            uninstall(removeData: true)
+                            singleRemoveData = true; confirmingSingle = true
                         }
                     }
                 } else {
@@ -481,14 +519,26 @@ struct UninstallView: View {
         let files = related.filter { selectedRelated.contains($0.id) }
         let appCopy = app
         Task {
+            // Capture the real size BEFORE trashing: AppEntry.bytes is always
+            // 0 (sizes live in the `sizes` dict) and that dict can still be
+            // empty mid-sizing — either way the history row recorded 0.
+            let measured = sizes[appCopy.id] ?? 0
+            let appBytes: Int64
+            if measured > 0 { appBytes = measured }
+            else { appBytes = await ScanEngine.parallelSize(of: appCopy.url).bytes }
+            var sizeByPath: [String: Int64] = [appCopy.url.path: appBytes]
+            for file in files { sizeByPath[file.url.path] = file.bytes }
+
             let result = await UninstallEngine.uninstall(app: appCopy, files: files, removeData: removeData)
-            let freed = (sizes[appCopy.id] ?? appCopy.bytes) + (removeData ? files.reduce(0) { $0 + $1.bytes } : 0)
+            // Only what actually left the disk counts; per-item bytes are real
+            // now so the History detail shows sizes instead of "—".
+            let freed = result.removedFiles.reduce(0) { $0 + (sizeByPath[$1] ?? 0) }
             var text = result.appTrashed
-                ? "✓ \(String(format: L("%@ moved to Trash"), appCopy.name))"
+                ? "✓ \(String(format: L("%@ deleted"), appCopy.name))"
                 : "✗ \(L("app removal failed"))"
             let relatedCount = result.removedFiles.count - (result.appTrashed ? 1 : 0)
             if relatedCount > 0 {
-                text += "\n✓ \(String(format: L("%lld related files trashed"), relatedCount))"
+                text += "\n✓ \(String(format: L("%lld related files deleted"), relatedCount))"
             }
             if !result.failed.isEmpty {
                 text += "\n✗ \(result.failed.count) failures: " +
@@ -500,9 +550,9 @@ struct UninstallView: View {
                 requestedBytes: freed, freedBytes: freed,
                 itemCount: result.removedFiles.count + result.failed.count,
                 items: result.removedFiles.map {
-                    CleanRecordItem(path: $0, bytes: 0, mode: .trash, success: true, error: nil)
+                    CleanRecordItem(path: $0, bytes: sizeByPath[$0] ?? 0, mode: .permanent, success: true, error: nil)
                 } + result.failed.map {
-                    CleanRecordItem(path: $0.0, bytes: 0, mode: .trash, success: false, error: $0.1)
+                    CleanRecordItem(path: $0.0, bytes: sizeByPath[$0.0] ?? 0, mode: .permanent, success: false, error: $0.1)
                 })
             HistoryStore.append(record)
             if result.appTrashed {
