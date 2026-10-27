@@ -146,8 +146,12 @@ enum SmokeTest {
 
         let allItems = RuleLibrary.sections.flatMap(\.items)
         expect("rule library non-empty", allItems.count >= 20, "\(allItems.count) items")
-        expect("all patterns are home-relative or tmp",
-               allItems.allSatisfy { $0.pattern.hasPrefix("~/") })
+        expect("all patterns are home-relative (deep items use ~ + extensions)",
+               allItems.allSatisfy { item in
+                   item.pattern.hasPrefix("~/") || item.pattern == "~"
+                       ? (item.deepExtensions != nil || item.pattern.hasPrefix("~/"))
+                       : false
+               })
         expect("trash-mode items exist (installers/archives)",
                allItems.contains { $0.mode == .trash })
 
@@ -699,6 +703,38 @@ enum SmokeTest {
                         CleanSelectionStore.setSelected(id: id, on)
                     }
                 }
+            }
+
+            // Deep clean items (installers over the WHOLE home): the walk
+            // must prune protected prefixes and match extensions
+            // case-insensitively — verified on a synthetic tree, never the
+            // real home.
+            do {
+                let root = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("moppet-deep-\(UUID().uuidString)", isDirectory: true)
+                let mk = { (rel: String) -> URL in
+                    let url = root.appendingPathComponent(rel)
+                    try? FileManager.default.createDirectory(
+                        at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    FileManager.default.createFile(atPath: url.path, contents: Data("x".utf8))
+                    return url
+                }
+                let hit = mk("projects/old/setup.DMG")           // case-insensitive hit
+                let hit2 = mk("deep/nested/pkg.PKG")
+                let miss = mk("projects/old/readme.txt")          // wrong extension
+                let blocked = mk("Library/Mail/evil.pkg")         // pruned prefix
+                defer { try? FileManager.default.removeItem(at: root) }
+                let found = ScanEngine.deepScan(
+                    root: root, extensions: ["dmg", "pkg"],
+                    prunePrefixes: [root.resolvingSymlinksInPath().path + "/Library"])
+                let foundPaths = found.map { $0.resolvingSymlinksInPath().path }
+                expect("deep scan: finds nested matches case-insensitively",
+                       foundPaths.contains(hit.resolvingSymlinksInPath().path)
+                       && foundPaths.contains(hit2.resolvingSymlinksInPath().path))
+                expect("deep scan: wrong extension skipped",
+                       !foundPaths.contains(miss.resolvingSymlinksInPath().path))
+                expect("deep scan: pruned prefix never yields a candidate",
+                       !foundPaths.contains(blocked.resolvingSymlinksInPath().path))
             }
 
             // Pet states: every PetState must map to a bundled sticker

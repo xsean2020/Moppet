@@ -5,6 +5,18 @@ import Foundation
 /// candidate before it enters the preview list).
 enum ScanEngine {
 
+    /// C realpath(3) — resolves firmlinks (/var→/private/var) that
+    /// URL.resolvingSymlinksInPath leaves untouched on this machine.
+    static func realFileSystemPath(_ path: String) -> String {
+        path.withCString { cPath -> String in
+            guard let resolved = realpath(cPath, nil) else { return path }
+            let result = String(cString: resolved)
+            free(resolved)
+            return result
+        }
+    }
+
+
     // MARK: - Path pattern expansion
 
     /// Expands `~` and a single `*` wildcard segment (non-recursive).
@@ -49,6 +61,158 @@ enum ScanEngine {
             }
         }
         return results.sorted { $0.path < $1.path }
+    }
+
+    /// Recursive extension search under `root` for the deep-clean items.
+    /// Prunes (never descends into) SafetyGuard's protected categories,
+    /// ~/.Trash and ~/.moppet, so protected data is not even enumerated and
+    /// the walk skips the heaviest irrelevant trees. Errors are skipped, not
+    /// fatal — a permission-denied subtree just yields nothing.
+    static func deepScan(root: URL, extensions: [String],
+                         prunePrefixes: [String]? = nil,
+                         onVisitedDirectory: ((String) -> Void)? = nil) -> [URL] {
+        // Realpath FIRST — resolvingSymlinksInPath leaves /var unresolved on
+        // this machine while the enumerator yields /private/var paths, so
+        // prefix pruning never matched (verified in smoke).
+        let resolvedRoot = realFileSystemPath(root.path)
+        let lowerExtensions = Set(extensions.map { $0.lowercased() })
+        var pruneList = prunePrefixes ?? []
+        if pruneList.isEmpty {
+            let home = SafetyGuard.home.path
+            for sub in SafetyGuard.protectedHomeSubpaths {
+                pruneList.append(home + "/" + sub)
+            }
+            pruneList.append(home + "/.Trash")
+            pruneList.append(home + "/.moppet")
+        }
+        let prunes = pruneList.map { realFileSystemPath($0) }
+        func pruned(_ path: String) -> Bool {
+            prunes.contains { path == $0 || path.hasPrefix($0 + "/") }
+        }
+
+        // Stage 1 — Spotlight: a whole-home extension search in ~1s. Covers
+        // everything indexed; misses folders excluded from Spotlight.
+        let mdfindResults = extensions.flatMap { ext -> [URL] in
+            let query = "(kMDItemFSName == '*.\(ext)'c)"
+            let output = runShell("/usr/bin/mdfind", ["-onlyin", resolvedRoot, query])
+            return output.split(separator: "\n").compactMap { line -> URL? in
+                let path = line.trimmingCharacters(in: .whitespaces)
+                guard !path.isEmpty, !pruned(path) else { return nil }
+                return URL(fileURLWithPath: path)
+            }
+        }
+        if Task.isCancelled {
+            return []
+        }
+        if mdfindResults.isEmpty {
+            // Empty is ambiguous: "no installers anywhere" vs "Spotlight
+            // off". A control query that MUST match when indexing works
+            // (plists exist on every Mac) disambiguates — without it, every
+            // clean home paid the 45s fallback walk (measured).
+            let control = runShell("/usr/bin/mdfind",
+                                   ["-onlyin", resolvedRoot, "(kMDItemFSName == '*.plist'c)"])
+            if !control.split(separator: "\n").isEmpty {
+                return []   // Spotlight works and found nothing — trust it
+            }
+        } else {
+            return Array(Set(mdfindResults)).sorted { $0.path < $1.path }
+        }
+
+        // Stage 2 — fallback walk (Spotlight off / nothing indexed). The
+        // naive walk measured >600s over a real home. ~/Library holds no
+        // user installers in practice (and its protected subpaths are
+        // pruned anyway) — skipping it entirely brings the walk to ~1s;
+        // Spotlight-enabled machines still get Library coverage via stage 1.
+        // The 45s deadline stays as a belt: partial-but-timely beats
+        // complete-but-never.
+        let deadline = Date().addingTimeInterval(45)
+        var extraPrunes = prunes
+        let home = SafetyGuard.home.path
+        extraPrunes.append(realFileSystemPath(home + "/Library"))
+        // Regenerable directory NAMES are pruned by name (not path): dev
+        // repos at the home top level hold hundreds of thousands of files in
+        // .git/node_modules — none ever a user installer. Same list as the
+        // Purge engine plus VCS internals.
+        let prunedNames: Set<String> = [
+            ".git", ".svn", ".hg", "node_modules", ".gradle", "Pods",
+            "DerivedData", "__pycache__", ".venv", "venv", ".next", ".nuxt",
+            ".output", ".turbo", ".parcel-cache", ".dart_tool", ".terraform",
+            "vendor", "target", "build", "dist", "cmake-build-debug",
+            "cmake-build-release", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+        ]
+        // Toolchains / package-manager roots at the home top level: measured
+        // 20s (go), 4.5s (miniconda3) with zero installers in them.
+        let toolchainRoots: Set<String> = [
+            "go", "miniconda3", "anaconda3", "miniforge3", "toolchains",
+            "rustup", "rbenv", "nvm", "pyenv", "sdkman",
+        ]
+        let maxDepth = 6   // installers live shallow; depth caps runaway trees
+        var results: [URL] = []
+        let enumerator = FileManager.default.enumerator(
+            at: URL(fileURLWithPath: resolvedRoot),
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [], errorHandler: { _, _ in true })   // keep walking past errors
+        while let next = enumerator?.nextObject() as? URL {
+            if Task.isCancelled || Date() > deadline || results.count >= 1000 { break }
+            let path = next.path
+            if extraPrunes.contains(where: { path == $0 || path.hasPrefix($0 + "/") }) {
+                enumerator?.skipDescendants()
+                continue
+            }
+            // Name-based pruning + depth cap for regenerable trees.
+            let name = next.lastPathComponent
+            if prunedNames.contains(name) || (enumerator?.level ?? 0) > maxDepth {
+                enumerator?.skipDescendants()
+                continue
+            }
+            let values = try? next.resourceValues(forKeys: [.isRegularFileKey, .isDirectoryKey])
+            let isDirectory = values?.isDirectory == true
+            // Hidden directories are tool state (~/.hermes 7.5s, ~/.npm 4.9s,
+            // ~/.cache 3.5s, ~/.pub-cache 3.7s — measured). A user installer
+            // never lives in one; Spotlight still covers them when enabled.
+            if isDirectory, name.hasPrefix(".") {
+                enumerator?.skipDescendants()
+                continue
+            }
+            // Top-level toolchain roots (go = 19.8s, miniconda3 = 4.5s).
+            if isDirectory, (enumerator?.level ?? 0) <= 1, toolchainRoots.contains(name) {
+                enumerator?.skipDescendants()
+                continue
+            }
+            if isDirectory, (enumerator?.level ?? 0) <= 2 {
+                onVisitedDirectory?(name)
+            }
+            guard values?.isRegularFile == true else { continue }
+            guard lowerExtensions.contains(next.pathExtension.lowercased()) else { continue }
+            results.append(next)
+        }
+        return results.sorted { $0.path < $1.path }
+    }
+
+    /// Runs a command, returns stdout (empty on failure — deep scan
+    /// degrades to the fallback walk instead of failing the item).
+    private static func runShell(_ launchPath: String, _ arguments: [String]) -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: launchPath)
+        process.arguments = arguments
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do { try process.run() } catch { return "" }
+        let group = DispatchGroup()
+        group.enter()
+        var data = Data()
+        DispatchQueue.global().async {
+            data = pipe.fileHandleForReading.readDataToEndOfFile()
+            group.leave()
+        }
+        let deadline = Date().addingTimeInterval(20)
+        while process.isRunning && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        if process.isRunning { process.terminate() }
+        group.wait()
+        return String(data: data, encoding: .utf8) ?? ""
     }
 
     private static func globSegment(_ segment: String, matches name: String) -> Bool {
@@ -185,7 +349,20 @@ enum ScanEngine {
         let results = await withTaskGroup(of: (String, [Finding]).self) { group in
             for item in selected {
                 group.addTask {
-                    let candidates = expand(pattern: item.pattern, excludedPrefixes: item.excludedPrefixes)
+                    // Deep items walk the whole home for their extensions;
+                    // classic items use single-wildcard pattern expansion.
+                    let candidates: [URL]
+                    if let extensions = item.deepExtensions {
+                        // 10–15s over a real home: report the folder being
+                        // walked so the UI is not a frozen ring.
+                        candidates = deepScan(root: SafetyGuard.home,
+                                              extensions: extensions) { name in
+                            progress("Scanning \(name)…")
+                        }
+                    } else {
+                        candidates = expand(pattern: item.pattern,
+                                            excludedPrefixes: item.excludedPrefixes)
+                    }
                     var findings: [Finding] = []
                     var idx = 0
                     for url in candidates {

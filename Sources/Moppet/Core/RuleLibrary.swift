@@ -200,23 +200,30 @@ enum RuleLibrary {
                 CleanItem(
                     id: "dmg",
                     name: "DMG Images",
-                    detail: "~/Downloads/*.dmg",
-                    pattern: "~/Downloads/*.dmg",
-                    mode: .trash
+                    detail: "~/**/*.dmg (whole home, protected dirs skipped)",
+                    pattern: "~",
+                    mode: .trash,
+                    warning: "Deep-scans the whole home folder — the first scan may take a while.",
+                    defaultSelected: false,
+                    deepExtensions: ["dmg"]
                 ),
                 CleanItem(
                     id: "pkg",
                     name: "Packages",
-                    detail: "~/Downloads/*.pkg",
-                    pattern: "~/Downloads/*.pkg",
-                    mode: .trash
+                    detail: "~/**/*.pkg (whole home, protected dirs skipped)",
+                    pattern: "~",
+                    mode: .trash,
+                    defaultSelected: false,
+                    deepExtensions: ["pkg"]
                 ),
                 CleanItem(
                     id: "iso",
                     name: "ISO Images",
-                    detail: "~/Downloads/*.iso",
-                    pattern: "~/Downloads/*.iso",
-                    mode: .trash
+                    detail: "~/**/*.iso (whole home, protected dirs skipped)",
+                    pattern: "~",
+                    mode: .trash,
+                    defaultSelected: false,
+                    deepExtensions: ["iso"]
                 ),
             ]
         ),

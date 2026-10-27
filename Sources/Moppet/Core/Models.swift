@@ -27,6 +27,11 @@ struct CleanItem: Identifiable, Hashable {
     /// (used by the generic user-cache rule to avoid double counting items
     /// owned by more specific rules).
     var excludedPrefixes: [String] = []
+    /// When set, the item ignores `pattern` and DEEP-scans the whole home
+    /// directory for files with these extensions (case-insensitive). The
+    /// walk prunes SafetyGuard's protected categories, ~/.Trash and
+    /// ~/.moppet, so protected data is never even enumerated.
+    var deepExtensions: [String]? = nil
 }
 
 struct CleanSection: Identifiable, Hashable {
