@@ -655,7 +655,8 @@ struct PetView: View {
                     buildMenu: petMenu
                 )
             }
-            .frame(maxWidth: 230, maxHeight: 270)
+            .frame(maxWidth: max(120, PetSettings.currentSize.width - 20),
+                   maxHeight: max(120, PetSettings.currentSize.height - 130))
             // The bubble/approval card win the vertical budget first; the
             // mole flexes shorter while a long answer is up (fixed 270 +
             // a tall bubble overflowed the 400pt panel).
@@ -680,7 +681,7 @@ struct PetView: View {
             PetSceneBridge.shared.applyState(newState)
         }
         .onAppear {
-            bus.say(String(format: L("Hi! I'm %@ 🦫 Click me to chat — double-click opens the full window."),
+            bus.say(String(format: L("Hi! I'm %@ 🦫  Click to chat · double-click for the full window"),
                            PetIdentity.name),
                     state: .talking)
         }
@@ -715,17 +716,36 @@ struct PetView: View {
     /// width is unreliable for this, so the width is estimated per character
     /// (CJK/emoji/fullwidth ≈ 13pt at font 12, ASCII ≈ 7.2pt) over the
     /// longest line.
-    private var bubbleWidth: CGFloat {
+    /// Bubble width for `message`, clamped to the PANEL that hosts it.
+    ///
+    /// The old version capped at a hardcoded 232pt. The pet panel is
+    /// 250×sizeScale wide (200pt at the 0.8 scale), so a 232pt card overflowed
+    /// the window: the card edge and the right end of every line were clipped
+    /// away (the reported "bubble content is not complete").
+    static func bubbleWidth(for message: String, panelWidth: CGFloat) -> CGFloat {
         func lineWidth(_ line: Substring) -> CGFloat {
             line.reduce(CGFloat(0)) { acc, ch in
                 acc + (ch.unicodeScalars.first.map { $0.value > 0x2E80 ? 13 : 7.2 } ?? 7.2)
             }
         }
-        let longest = bus.message
+        let longest = message
             .split(separator: "\n", omittingEmptySubsequences: false)
             .map(lineWidth)
             .max() ?? 0
-        return min(232, max(80, longest + 20))   // + h/v padding, floor for one-word bubbles
+        // 12pt breathing room on each side of the panel, and the text padding
+        // (10pt × 2) plus the card border stay inside it.
+        let cap = max(96, panelWidth - 24)
+        return min(cap, max(80, longest + 20))
+    }
+
+    private var bubbleWidth: CGFloat {
+        Self.bubbleWidth(for: bus.message, panelWidth: PetSettings.currentSize.width)
+    }
+
+    /// Viewport height for a long answer: whatever the panel can spare after
+    /// the mole keeps a usable strip, never the hardcoded 208.
+    private var bubbleMaxHeight: CGFloat {
+        max(96, min(208, PetSettings.currentSize.height * 0.62))
     }
 
     /// Markdown body of the speech bubble (shared by the hug and the
@@ -765,7 +785,7 @@ struct PetView: View {
                         }
                     }
                         .frame(width: bubbleWidth)
-                        .frame(maxHeight: 208)
+                        .frame(maxHeight: bubbleMaxHeight)
                         // Same card recipe as SettingsCard (cardBackground +
                         // neutral200 hairline) so the bubble matches the app.
                         .background(

@@ -368,8 +368,8 @@ private let zh: [String: String] = [
     // pet
     "Awake! ✨": "醒啦！✨",
     "Wake": "唤醒",
-    "Hi! I'm %@ 🦫 Click me to chat — double-click opens the full window.":
-        "嗨！我是 %@ 🦫 点我聊天——双击打开完整窗口。",
+    "Hi! I'm %@ 🦫  Click to chat · double-click for the full window":
+        "嗨！我是 %@ 🦫 点我聊天 · 双击开完整窗口",
     "Auto-dismisses after 5 minutes": "5 分钟后自动关闭",
     // quick chat
     "No AI provider configured yet — open Settings to add an API key or sign in.":

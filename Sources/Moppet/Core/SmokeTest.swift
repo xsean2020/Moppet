@@ -867,6 +867,21 @@ enum SmokeTest {
                 HistoryStore.save(backup)
             }
 
+            // Bubble geometry: the card must fit the panel it lives in at
+            // every size scale (a hardcoded 232pt cap overflowed the 200pt
+            // panel and clipped the text — the reported truncation).
+            do {
+                let longLine = String(repeating: "汉", count: 80)   // far wider than any panel
+                for panelWidth in [200.0, 250.0, 312.0] as [CGFloat] {
+                    let width = PetView.bubbleWidth(for: longLine, panelWidth: panelWidth)
+                    expect("pet: bubble fits a \(Int(panelWidth))pt panel",
+                           width <= panelWidth - 24 + 0.5)
+                }
+                let short = "OK"
+                expect("pet: short messages keep a compact bubble",
+                       PetView.bubbleWidth(for: short, panelWidth: 200) < 96)
+            }
+
             // Bubble persistence: answers must NOT auto-hide (hideAfter 0 =
             // keep until the next say replaces it). This is the contract the
             // quick bar and the chat turn rely on.
