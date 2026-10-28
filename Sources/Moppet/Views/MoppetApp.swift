@@ -117,10 +117,24 @@ struct MoppetApp: App {
         MenuBarExtra {
             MenuBarContent()
         } label: {
-            Image(systemName: "sparkles")
+            Image(nsImage: MoppetMenuBarIcon.image)
         }
         .menuBarExtraStyle(.menu)
     }
+}
+
+/// Menu-bar icon — the Moppet app icon at 18pt. The generic `sparkles`
+/// SF Symbol was a placeholder; falls back to it only if the bundled
+/// resource is missing.
+enum MoppetMenuBarIcon {
+    static let image: NSImage = {
+        if let img = Bundle.module.image(forResource: "menubar") {
+            img.size = NSSize(width: 18, height: 18)
+            img.isTemplate = false
+            return img
+        }
+        return NSImage(systemSymbolName: "sparkles", accessibilityDescription: "Moppet") ?? NSImage()
+    }()
 }
 
 /// Menu-bar quick actions (replaces the hand-rolled NSStatusItem).

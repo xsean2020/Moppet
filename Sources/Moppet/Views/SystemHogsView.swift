@@ -10,6 +10,7 @@ struct SystemHogsView: View {
 
     @State private var scanning = false
     @State private var snapshots: [SnapshotEngine.Snapshot] = []
+    @State private var purgeable: Int64 = 0
     @State private var selectedSnapshots: Set<String> = []
     @State private var docker: DockerEngine.Usage?
     @State private var dockerAvailable = false
@@ -50,6 +51,7 @@ struct SystemHogsView: View {
                             .foregroundStyle(Airi.success)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
+                    summaryCard
                     snapshotsCard
                     dockerCard
                     brewCard
@@ -84,6 +86,7 @@ struct SystemHogsView: View {
         async let brew = HomebrewEngine.preview()
         let measured = SystemHogs.reports()
         snapshots = await snaps
+        purgeable = SnapshotEngine.purgeableBytes()
         docker = await dockerTask
         dockerAvailable = DockerEngine.installed
         brewPreview = await brew
@@ -119,6 +122,30 @@ struct SystemHogsView: View {
 
     // MARK: - Snapshots
 
+    /// Headline: what the actionable engines can free right now. Snapshots
+    /// are excluded — macOS does not expose their size (see snapshotsCard).
+    private var summaryCard: some View {
+        let dockerFree = docker?.totalReclaimable ?? 0
+        let brewFree = brewPreview?.totalBytes ?? 0
+        let total = dockerFree + brewFree
+        return SettingsCard(padding: Airi.space4) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(String(format: L("%@ reclaimable now"), total.bytesFormatted))
+                        .font(.system(size: 17, weight: .medium))
+                        .foregroundStyle(Airi.neutral950)
+                    Text(L("Docker prune + Homebrew cleanup — snapshots are managed by macOS"))
+                        .font(Airi.captionFont)
+                        .foregroundStyle(Airi.neutral500)
+                }
+                Spacer()
+                Image(systemName: "internaldrive")
+                    .font(.system(size: 24, weight: .light))
+                    .foregroundStyle(Airi.primary.opacity(0.7))
+            }
+        }
+    }
+
     private var snapshotsCard: some View {
         SettingsCard {
             HStack(spacing: Airi.space3) {
@@ -127,8 +154,10 @@ struct SystemHogsView: View {
                     Text(L("APFS Local Snapshots"))
                         .font(Airi.cardTitleFont)
                         .foregroundStyle(Airi.neutral950)
-                    Text(String(format: L("%lld snapshots — Time Machine hourly backups holding purgeable disk space"),
-                                snapshots.count))
+                    Text(snapshots.isEmpty
+                         ? String(format: L("%lld snapshots — Time Machine hourly backups holding purgeable disk space"), snapshots.count)
+                         : String(format: L("%1$lld snapshots · about %2$@ purgeable"),
+                                  snapshots.count, purgeable.bytesFormatted))
                         .font(Airi.captionFont)
                         .foregroundStyle(Airi.neutral500)
                 }
@@ -139,6 +168,12 @@ struct SystemHogsView: View {
                     .font(Airi.captionFont)
                     .foregroundStyle(Airi.neutral500)
             } else {
+                // macOS exposes snapshot dates but not per-snapshot sizes
+                // (they share blocks); the purgeable figure above is the
+                // whole group's honest footprint.
+                Text(L("Snapshots share data blocks, so macOS can't size them individually — the figure above is the whole group's purgeable space."))
+                    .font(Airi.caption2Font)
+                    .foregroundStyle(Airi.neutral400)
                 let newest = snapshots.prefix(6)
                 VStack(alignment: .leading, spacing: 4) {
                     ForEach(Array(newest)) { snapshot in
@@ -198,20 +233,32 @@ struct SystemHogsView: View {
                 Spacer()
             }
             if let docker {
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(spacing: 0) {
+                    HStack(spacing: 0) {
+                        Text(L("Type")).frame(maxWidth: .infinity, alignment: .leading)
+                        Text(L("Count")).frame(width: 56, alignment: .trailing)
+                        Text(L("Size")).frame(width: 88, alignment: .trailing)
+                    }
+                    .font(Airi.caption2Font.weight(.medium))
+                    .foregroundStyle(Airi.neutral400)
+                    .padding(.bottom, 4)
+                    Divider().overlay(Airi.neutral200.opacity(0.4))
                     usageRow(L("Images"), docker.imagesCount, docker.imagesBytes)
                     usageRow(L("Containers"), docker.containersCount, docker.containersBytes)
                     usageRow(L("Volumes"), docker.volumesCount, docker.volumesBytes)
                     usageRow(L("Build cache"), docker.cacheCount, docker.cacheBytes)
                 }
-                HStack {
+                VStack(alignment: .leading, spacing: Airi.space2) {
                     Text(L("Prune removes STOPPED containers, unused networks, dangling images and build cache. Running containers and volume data are never touched."))
                         .font(Airi.caption2Font)
                         .foregroundStyle(Airi.neutral500)
-                    Spacer()
-                    AiriButton(title: L("Prune Unused"), icon: "wind",
-                               busy: busyAction == "docker") {
-                        confirmAction = .dockerPrune
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack {
+                        Spacer()
+                        AiriButton(title: L("Prune Unused"), icon: "wind",
+                                   busy: busyAction == "docker") {
+                            confirmAction = .dockerPrune
+                        }
                     }
                 }
             } else if !dockerAvailable {
@@ -227,18 +274,23 @@ struct SystemHogsView: View {
     }
 
     private func usageRow(_ label: String, _ count: Int, _ bytes: Int64) -> some View {
-        HStack {
-            Text(label).font(.system(size: 12)).foregroundStyle(Airi.neutral700)
-            Spacer()
-            Text("\(count)").font(.system(size: 12, design: .rounded))
-                .foregroundStyle(Airi.neutral500).monospacedDigit()
-                .frame(minWidth: 30, alignment: .trailing)
+        HStack(spacing: 0) {
+            Text(label)
+                .font(Airi.bodyFont)
+                .foregroundStyle(Airi.neutral700)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text("\(count)")
+                .font(.system(size: 12, design: .rounded))
+                .foregroundStyle(Airi.neutral500)
+                .monospacedDigit()
+                .frame(width: 56, alignment: .trailing)
             Text(bytes.bytesFormatted)
                 .font(.system(size: 12, weight: .medium, design: .rounded))
                 .foregroundStyle(Airi.neutral900)
                 .monospacedDigit()
-                .frame(minWidth: 72, alignment: .trailing)
+                .frame(width: 88, alignment: .trailing)
         }
+        .padding(.vertical, 5)
     }
 
     // MARK: - Homebrew
@@ -260,12 +312,20 @@ struct SystemHogsView: View {
             if let brewPreview, !brewPreview.isEmpty {
                 VStack(alignment: .leading, spacing: 2) {
                     ForEach(Array(brewPreview.lines.prefix(5).enumerated()), id: \.offset) { _, line in
-                        Text((line as NSString).lastPathComponent)
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(Airi.neutral700)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .help(line)
+                        HStack(spacing: Airi.space2) {
+                            Text(HomebrewEngine.displayName(for: line))
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(Airi.neutral700)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Spacer()
+                            Text(HomebrewEngine.sizeText(for: line))
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(Airi.neutral500)
+                                .monospacedDigit()
+                                .lineLimit(1)
+                        }
+                        .help(line)
                     }
                     if brewPreview.lines.count > 5 {
                         Text(String(format: L("…and %lld more"), brewPreview.lines.count - 5))
@@ -273,14 +333,17 @@ struct SystemHogsView: View {
                             .foregroundStyle(Airi.neutral400)
                     }
                 }
-                HStack {
+                VStack(alignment: .leading, spacing: Airi.space2) {
                     Text(L("Removes old Cellar versions and expired downloads — rollback means reinstalling."))
                         .font(Airi.caption2Font)
                         .foregroundStyle(Airi.warning)
-                    Spacer()
-                    AiriButton(title: L("Run brew cleanup"), icon: "sparkles",
-                               busy: busyAction == "brew") {
-                        confirmAction = .brewCleanup
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack {
+                        Spacer()
+                        AiriButton(title: L("Run brew cleanup"), icon: "sparkles",
+                                   busy: busyAction == "brew") {
+                            confirmAction = .brewCleanup
+                        }
                     }
                 }
             }
@@ -363,14 +426,16 @@ struct SystemHogsView: View {
     private var dockerSubtitle: String {
         if !dockerAvailable { return L("Not installed") }
         guard let docker else { return scanning ? L("Checking…") : L("Daemon not running") }
-        return String(format: L("%@ across images, containers, volumes and build cache"),
-                      docker.totalBytes.bytesFormatted)
+        if docker.totalBytes == 0 && docker.imagesCount == 0 { return L("Nothing stored") }
+        return String(format: L("%1$@ used · %2$@ reclaimable"),
+                      docker.totalBytes.bytesFormatted,
+                      docker.totalReclaimable.bytesFormatted)
     }
 
     private var brewSubtitle: String {
         guard brewAvailable else { return L("Not installed") }
-        guard let brewPreview else { return scanning ? L("Checking…") : L("No old versions to clean") }
-        if brewPreview.isEmpty { return L("No old versions to clean") }
+        guard let brewPreview else { return scanning ? L("Checking…") : L("Homebrew is installed — no old versions to clean") }
+        if brewPreview.isEmpty { return L("Homebrew is installed — no old versions to clean") }
         return String(format: L("%1$@ in %2$lld items would be removed"),
                       brewPreview.totalBytes.bytesFormatted, Int64(brewPreview.lines.count))
     }

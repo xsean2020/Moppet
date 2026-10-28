@@ -65,6 +65,21 @@ enum SnapshotEngine {
 
     // MARK: - Commands
 
+    /// Whole-volume purgeable estimate. APFS snapshots share data blocks and
+    /// macOS exposes NO per-snapshot size (`tmutil` and `diskutil` both omit
+    /// it), so this group figure is the only honest "how much could I free"
+    /// number. It includes snapshots plus other purgeable space.
+    static func purgeableBytes() -> Int64 {
+        let url = URL(fileURLWithPath: NSHomeDirectory())
+        guard let v = try? url.resourceValues(forKeys: [
+            .volumeAvailableCapacityKey,
+            .volumeAvailableCapacityForImportantUsageKey,
+        ]) else { return 0 }
+        let available = Int64(v.volumeAvailableCapacity ?? 0)
+        let important = v.volumeAvailableCapacityForImportantUsage ?? 0
+        return max(0, important - available)
+    }
+
     static func list() async -> [Snapshot] {
         // 15s cap: tmutil was observed hanging forever in TCC-restricted
         // contexts — the UI degrades to "no snapshots" instead of wedging.

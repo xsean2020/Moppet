@@ -14,14 +14,24 @@ enum DockerEngine {
     struct Usage: Equatable {
         var imagesCount = 0
         var imagesBytes: Int64 = 0
+        var imagesReclaimable: Int64 = 0
         var containersCount = 0
         var containersBytes: Int64 = 0
+        var containersReclaimable: Int64 = 0
         var volumesCount = 0
         var volumesBytes: Int64 = 0
+        var volumesReclaimable: Int64 = 0
         var cacheCount = 0
         var cacheBytes: Int64 = 0
+        var cacheReclaimable: Int64 = 0
 
         var totalBytes: Int64 { imagesBytes + containersBytes + volumesBytes + cacheBytes }
+        /// What `docker system prune` can actually free — dangling images,
+        /// stopped containers and build cache. Volumes need `--volumes`
+        /// (user data), so they are NOT counted here.
+        var totalReclaimable: Int64 {
+            imagesReclaimable + containersReclaimable + cacheReclaimable
+        }
     }
 
     static var installed: Bool {
@@ -84,11 +94,20 @@ enum DockerEngine {
             let count = intValue(obj, ["TotalCount", "Count", "Images", "Containers",
                                        "Volumes", "BuildCache"])
             let bytes = bytesValue(obj["Size"])
+            let reclaimable = bytesValue(obj["Reclaimable"])
             switch type {
-            case "images": usage.imagesCount = count; usage.imagesBytes = bytes
-            case "containers": usage.containersCount = count; usage.containersBytes = bytes
-            case "local volumes", "volumes": usage.volumesCount = count; usage.volumesBytes = bytes
-            case "build cache", "build-cache": usage.cacheCount = count; usage.cacheBytes = bytes
+            case "images":
+                usage.imagesCount = count; usage.imagesBytes = bytes
+                usage.imagesReclaimable = reclaimable
+            case "containers":
+                usage.containersCount = count; usage.containersBytes = bytes
+                usage.containersReclaimable = reclaimable
+            case "local volumes", "volumes":
+                usage.volumesCount = count; usage.volumesBytes = bytes
+                usage.volumesReclaimable = reclaimable
+            case "build cache", "build-cache":
+                usage.cacheCount = count; usage.cacheBytes = bytes
+                usage.cacheReclaimable = reclaimable
             default: break
             }
         }
@@ -146,8 +165,12 @@ enum DockerEngine {
         guard installed else { return nil }
         // `docker system df --format json` needs the daemon; a dead daemon
         // returns a non-zero exit — report "installed but not running".
+        // `--format json` is NOT JSON mode — `--format` takes a Go template, so
+        // the literal word "json" was printed once per row and the parser saw
+        // no `Type` field ("docker 数据为空"). `{{json .}}` emits the real
+        // NDJSON shape parseDFJSONL expects.
         guard let output = try? await OptimizeEngine.shell(
-            "\(shellQuote(dockerBin())) system df --format json", timeout: 30) else { return nil }
+            "\(shellQuote(dockerBin())) system df --format '{{json .}}'", timeout: 30) else { return nil }
         let usage = parseDFJSONL(output)
         return usage.totalBytes > 0 || usage.imagesCount > 0 ? usage : Usage()
     }

@@ -1058,6 +1058,21 @@ enum SmokeTest {
                    && HomebrewEngine.parseHumanSize(in: "(512B)") == 512
                    && HomebrewEngine.parseHumanSize(in: "no size here") == 0)
 
+            // Modern Homebrew (4+/7+) prints "Would remove: <path> (<size>)"
+            // on ONE line — the old parser only understood the legacy
+            // header-then-paths layout and returned empty for this.
+            let modern = """
+            Warning: Skipping foo: most recent version not installed
+            Would remove: /opt/homebrew/Cellar/pcre2/10.47_1 (244 files, 7.3MB)
+            Would remove (empty directory): /opt/homebrew/share/Library/Caches/Yarn
+            Would remove: /Users/x/Library/Caches/Homebrew/opencode--2.1.2 (88.5MB)
+            """
+            let modernPreview = HomebrewEngine.parseCleanupPreview(modern)
+            expect("homebrew: modern one-line format parses",
+                   modernPreview.lines.count == 3
+                   && modernPreview.totalBytes == 7_300_000 + 88_500_000,
+                   "\(modernPreview.lines.count) lines / \(modernPreview.totalBytes) B")
+
             // Orphan residue classification (pure rules — no disk walk).
             expect("orphans: bundle id extraction",
                    OrphanResidueEngine.bundleID(fromEntryName: "com.example.app") == "com.example.app"

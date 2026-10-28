@@ -32,30 +32,35 @@ enum HomebrewEngine {
 
     // MARK: - Parsing (pure, smoke-tested)
 
-    /// Parses `brew cleanup -n` output. Layout:
+    /// Parses `brew cleanup -n` output. Modern Homebrew (4+/7+) prints the
+    /// path and size on ONE line:
     /// ```
-    /// Would remove:
-    /// /opt/homebrew/Cellar/foo/1.0 (12 files, 3.5MB)
-    /// /opt/homebrew/Cellar/bar/2.0 (1,004 files, 120MB)
+    /// Would remove: /opt/homebrew/Cellar/pcre2/10.47_1 (244 files, 7.3MB)
+    /// Would remove (empty directory): /opt/homebrew/share/.../.tmp
     /// ```
-    /// Sizes are human units — parsed with a multiplier table rather than
-    /// re-measuring the paths (the preview lists paths brew WILL delete;
-    /// measuring them again races the cleanup).
+    /// Older builds printed a bare `Would remove:` header followed by
+    /// path-only lines. Both shapes are accepted — the previous parser only
+    /// understood the legacy one, so a modern brew returned an EMPTY preview
+    /// and the card said "nothing to clean" even with 20+ removals pending.
     static func parseCleanupPreview(_ output: String) -> Preview {
         var preview = Preview()
-        var inRemoveBlock = false
         for line in output.split(separator: "\n") {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed == "Would remove:" {
-                inRemoveBlock = true
+            guard !trimmed.isEmpty else { continue }
+            let path: String
+            if let r = trimmed.range(of: "Would remove (empty directory): ") {
+                path = String(trimmed[r.upperBound...])
+            } else if let r = trimmed.range(of: "Would remove: ") {
+                path = String(trimmed[r.upperBound...])
+            } else if trimmed == "Would remove:" {
+                continue            // legacy header; bare paths follow
+            } else if trimmed.hasPrefix("/") {
+                path = trimmed      // legacy bare-path line
+            } else {
                 continue
             }
-            guard inRemoveBlock, trimmed.hasPrefix("/") else {
-                if !trimmed.isEmpty { inRemoveBlock = false }
-                continue
-            }
-            preview.lines.append(trimmed)
-            preview.totalBytes += parseHumanSize(in: trimmed)
+            preview.lines.append(path)
+            preview.totalBytes += parseHumanSize(in: path)
         }
         return preview
     }
@@ -81,6 +86,21 @@ enum HomebrewEngine {
             }
         }
         return 0
+    }
+
+    /// Readable name for one preview line: "/opt/homebrew/Cellar/node/18.0.0
+    /// (12 files, 75.5MB)" → "node/18.0.0" (formula + version, not just "18.0.0").
+    static func displayName(for line: String) -> String {
+        let pathPart = line.split(separator: " (").first.map(String.init) ?? line
+        return pathPart.split(separator: "/").suffix(2).joined(separator: "/")
+    }
+
+    /// The footprint text of one preview line: "(12 files, 75.5MB)" →
+    /// "12 files, 75.5MB" (empty when the line carries none).
+    static func sizeText(for line: String) -> String {
+        guard let open = line.lastIndex(of: "("),
+              let close = line.lastIndex(of: ")"), open < close else { return "" }
+        return String(line[line.index(after: open)..<close])
     }
 
     // MARK: - Commands

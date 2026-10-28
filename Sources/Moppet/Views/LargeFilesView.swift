@@ -55,6 +55,9 @@ struct LargeFilesView: View {
             ScrollView {
                 VStack(spacing: Airi.space3) {
                     filterCard
+                    if files.contains(where: { !Self.deletable($0.url) }) {
+                        protectionNote
+                    }
                     if let lastMessage {
                         Text(lastMessage)
                             .font(Airi.captionFont)
@@ -106,6 +109,21 @@ struct LargeFilesView: View {
     }
 
     // MARK: - Filter + scan
+
+    /// Explains the lock rule once, so "why can't I tick this?" is answered
+    /// without hovering every row.
+    private var protectionNote: some View {
+        SettingsCard(padding: Airi.space3) {
+            HStack(spacing: Airi.space2) {
+                Image(systemName: "lock.shield")
+                    .foregroundStyle(Airi.warning)
+                Text(L("Locked rows live inside protected user-data folders (Documents, Desktop, Pictures, Music, Movies) — Moppet never deletes those. Use Show in Finder to manage them."))
+                    .font(Airi.captionFont)
+                    .foregroundStyle(Airi.neutral700)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
 
     private var filterCard: some View {
         SettingsCard(padding: Airi.space3) {
@@ -220,7 +238,7 @@ struct LargeFilesView: View {
                     Image(systemName: "lock.fill")
                         .font(.system(size: 11))
                         .foregroundStyle(Airi.neutral400)
-                        .help(L("Protected by the safety layer — user data is never deleted"))
+                        .help(Self.lockReason(file.url))
                 }
                 VStack(alignment: .leading, spacing: 1) {
                     Text(file.url.lastPathComponent)
@@ -235,6 +253,12 @@ struct LargeFilesView: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                         .help(file.url.path)
+                    if !deletable {
+                        Text(Self.lockReason(file.url))
+                            .font(Airi.caption2Font)
+                            .foregroundStyle(Airi.warning)
+                            .lineLimit(1)
+                    }
                 }
                 Spacer()
                 Text(file.bytes.bytesFormatted)
@@ -308,5 +332,26 @@ struct LargeFilesView: View {
 
     private static func deletable(_ url: URL) -> Bool {
         SafetyGuard.checkDeletable(url).allowed
+    }
+
+    /// Human reason a row is locked, straight from the safety layer.
+    private static func lockReason(_ url: URL) -> String {
+        guard let reason = SafetyGuard.checkDeletable(url).reason else {
+            return L("Locked")
+        }
+        if reason.hasPrefix("protected category: ") {
+            let category = String(reason.dropFirst("protected category: ".count))
+            return String(format: L("Locked: inside ~/%@ (protected user data)"), category)
+        }
+        if reason.hasPrefix("whitelisted by user") {
+            return L("Locked: on your whitelist")
+        }
+        if reason.hasPrefix("protected system location") {
+            return L("Locked: protected system location")
+        }
+        if reason == "outside user home directory" {
+            return L("Locked: outside your home folder")
+        }
+        return String(format: L("Locked: %@"), reason)
     }
 }

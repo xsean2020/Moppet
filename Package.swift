@@ -38,6 +38,8 @@ let package = Package(
                 .copy("Resources/pet"),
                 // airi's emotion stickers (MIT) — chat avatar reacts to pet state.
                 .copy("Resources/stickers"),
+                // Menu-bar icon (the Moppet app icon at 18pt).
+                .process("Resources/menubar.png"),
             ],
             // Pin OUR target to Swift 5 language mode explicitly. The code is
             // written for Swift 5 semantics (lock-guarded static state, no

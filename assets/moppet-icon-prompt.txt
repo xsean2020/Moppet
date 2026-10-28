@@ -1,0 +1,11 @@
+Generated with the built-in image_gen tool using the user's attached image as a visual reference.
+Transparent background requested; PNGs resized with macOS sips; ICNS packed with iconutil.
+
+Use case: stylized-concept
+Asset type: production macOS application icon for Moppet, a friendly cleaning utility.
+Input image 1 is a visual reference for the character, materials and palette. Generate a polished square icon derived closely from it.
+Subject: one adorable seated powder-blue fluffy kitten/wolf cub with rounded triangular ears, large glossy friendly eyes, pale muzzle and belly, rosy cheeks, tiny smiling open mouth, visible soft paw pads, holding a small wooden-handled straw broom on the viewer's right. Small subtle golden and white cleaning sparkles beside the broom.
+Composition: straight-on frontal view, centered inside a translucent aqua glass rounded-square tile with a thick softly beveled teal rim. Preserve the reference's plush fur and cozy expression. Complete uncut icon silhouette. Fill roughly 88 percent of the square canvas, even margins on all sides, strong readable silhouette at small sizes. Keep the face large.
+Style: premium soft 3D tactile rendering, fine plush fur, frosted translucent pale aqua glass interior, gentle studio illumination, controlled highlights, harmonious cyan/teal palette, warm straw broom accent.
+Background: actual transparent alpha outside the rounded-square tile, including corners. The tile interior remains softly frosted pale blue. Keep only a delicate short shadow, within the safe canvas margins.
+Constraints: square 1024x1024 master suitable for macOS icon export. No text, no letters, no watermark, no badges, no UI, no screenshot borders, no extra characters, no scenery outside the icon. Do not copy the opaque rectangular background of the reference.
