@@ -54,9 +54,10 @@ struct AiriTitleBar: View {
         HStack(spacing: Airi.space2) {
             Color.clear.frame(width: 68) // room for traffic lights
             HStack(spacing: 6) {
-                Image(systemName: "sparkles")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(Airi.primary)
+                Image(nsImage: MoppetBrandIcon.image)
+                    .resizable()
+                    .interpolation(.high)
+                    .frame(width: 14, height: 14)
                 Text("Moppet")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(Airi.neutral700)

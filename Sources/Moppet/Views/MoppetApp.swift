@@ -117,23 +117,23 @@ struct MoppetApp: App {
         MenuBarExtra {
             MenuBarContent()
         } label: {
-            Image(nsImage: MoppetMenuBarIcon.image)
+            // Monochrome template glyph: a colored app icon next to the other
+            // white menu-bar symbols looked pasted-on. `cat.fill` matches the
+            // system style and still reads as the Moppet mascot.
+            Image(systemName: "cat.fill")
         }
         .menuBarExtraStyle(.menu)
     }
 }
 
-/// Menu-bar icon — the Moppet app icon at 18pt. The generic `sparkles`
-/// SF Symbol was a placeholder; falls back to it only if the bundled
-/// resource is missing.
-enum MoppetMenuBarIcon {
+/// Brand mark for the sidebar / title bar — the FULL app icon (rounded
+/// background included). The transparent menu-bar crop reads as a muddy
+/// smudge at 14–20pt; the app icon stays clean at those sizes.
+enum MoppetBrandIcon {
     static let image: NSImage = {
-        if let img = Bundle.module.image(forResource: "menubar") {
-            img.size = NSSize(width: 18, height: 18)
-            img.isTemplate = false
-            return img
-        }
-        return NSImage(systemSymbolName: "sparkles", accessibilityDescription: "Moppet") ?? NSImage()
+        Bundle.module.image(forResource: "brand")
+            ?? NSImage(systemSymbolName: "cat.fill", accessibilityDescription: "Moppet")
+            ?? NSImage()
     }()
 }
 
@@ -357,9 +357,10 @@ struct RootView: View {
         VStack(spacing: 0) {
             // brand header
             HStack(spacing: 8) {
-                Image(systemName: "sparkles")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(Airi.primary)
+                Image(nsImage: MoppetBrandIcon.image)
+                    .resizable()
+                    .interpolation(.high)
+                    .frame(width: 20, height: 20)
                 Text("Moppet")
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(Airi.neutral950)
