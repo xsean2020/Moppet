@@ -25,7 +25,6 @@ enum DockerEngine {
     }
 
     static var installed: Bool {
-        guard let path = ProcessInfo.processInfo.environment["PATH"] else { return false }
         // `which docker` through the shell every scan is slow; probe the
         // standard install points first (Docker Desktop, Homebrew, path).
         for candidate in ["/usr/local/bin/docker", "/opt/homebrew/bin/docker",
@@ -63,30 +62,84 @@ enum DockerEngine {
 
     // MARK: - df parsing (pure, smoke-tested)
 
-    /// Parses `docker system df --format json` — one JSON object per line
-    /// with type-specific keys (older Docker emits this NDJSON shape).
+    /// Parses `docker system df --format json` — NDJSON, one object per line.
+    ///
+    /// REAL shape (verified against Docker Desktop's output — the parser must
+    /// handle exactly this):
+    /// ```
+    /// {"Active":"2","Reclaimable":"2.323GB (59%)","Size":"3.918GB",
+    ///  "TotalCount":"3","Type":"Images"}
+    /// {"Type":"Local Volumes", …} {"Type":"Build Cache", …}
+    /// ```
+    /// Types are Capitalized (with spaces in "Local Volumes"/"Build Cache"),
+    /// counts are STRING numbers, sizes are human strings. Older builds emit
+    /// lowercase types / numeric values / different count keys — all accepted.
     static func parseDFJSONL(_ output: String) -> Usage {
         var usage = Usage()
         for line in output.split(separator: "\n") {
             guard let data = line.data(using: .utf8),
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let type = obj["Type"] as? String else { continue }
-            let count = (obj["Containers"] as? Int)
-                ?? (obj["Images"] as? Int)
-                ?? (obj["Volumes"] as? Int)
-                ?? (obj["BuildCache"] as? Int)
-                ?? (Int(obj["Containers"] as? String ?? "") ?? 0)
-            let bytes = (obj["Size"] as? Int64)
-                ?? (Double(obj["Size"] as? String ?? "") ?? 0).roundedInt64
+                  let rawType = obj["Type"] as? String else { continue }
+            let type = rawType.lowercased()
+            let count = intValue(obj, ["TotalCount", "Count", "Images", "Containers",
+                                       "Volumes", "BuildCache"])
+            let bytes = bytesValue(obj["Size"])
             switch type {
             case "images": usage.imagesCount = count; usage.imagesBytes = bytes
             case "containers": usage.containersCount = count; usage.containersBytes = bytes
-            case "local Volumes", "volumes": usage.volumesCount = count; usage.volumesBytes = bytes
-            case "build-cache", "build cache": usage.cacheCount = count; usage.cacheBytes = bytes
+            case "local volumes", "volumes": usage.volumesCount = count; usage.volumesBytes = bytes
+            case "build cache", "build-cache": usage.cacheCount = count; usage.cacheBytes = bytes
             default: break
             }
         }
         return usage
+    }
+
+    /// First key that carries a usable integer — string numbers included.
+    private static func intValue(_ obj: [String: Any], _ keys: [String]) -> Int {
+        for key in keys {
+            guard let raw = obj[key] else { continue }
+            if let n = raw as? Int { return n }
+            if let n = raw as? NSNumber { return n.intValue }
+            if let s = raw as? String, let n = Int(s.replacingOccurrences(of: ",", with: "")) {
+                return n
+            }
+        }
+        return 0
+    }
+
+    /// Size arrives as a human string ("3.918GB", "0B") or a raw number.
+    private static func bytesValue(_ raw: Any?) -> Int64 {
+        if let n = raw as? NSNumber { return n.int64Value }
+        guard let s = raw as? String else { return 0 }
+        return parseHumanBytes(s)
+    }
+
+    /// Docker human sizes: decimal units, lowercase kB possible ("131.1kB"),
+    /// optional " (59%)" suffixes and thousand separators. Case-insensitive.
+    static func parseHumanBytes(_ input: String) -> Int64 {
+        var token = input.trimmingCharacters(in: .whitespaces)
+        if let paren = token.firstIndex(of: "(") { token = String(token[..<paren]) }
+        token = token.trimmingCharacters(in: .whitespaces)
+            .replacingOccurrences(of: ",", with: "")
+        let units: [(suffixes: [String], multiplier: Int64)] = [
+            (["tb"], 1_000_000_000_000),
+            (["gb"], 1_000_000_000),
+            (["mb"], 1_000_000),
+            (["kb", "kib"], 1_000),
+            (["b"], 1),
+        ]
+        let lower = token.lowercased()
+        for (suffixes, multiplier) in units {
+            for suffix in suffixes where lower.hasSuffix(suffix) {
+                let numberPart = lower.dropLast(suffix.count)
+                    .trimmingCharacters(in: .whitespaces)
+                guard let value = Double(numberPart) else { return 0 }
+                return Int64((value * Double(multiplier)).rounded())
+            }
+        }
+        // Bare number → bytes (legacy API shapes emit raw integers).
+        return Int64(Double(token) ?? 0)
     }
 
     static func usage() async -> Usage? {
@@ -94,7 +147,7 @@ enum DockerEngine {
         // `docker system df --format json` needs the daemon; a dead daemon
         // returns a non-zero exit — report "installed but not running".
         guard let output = try? await OptimizeEngine.shell(
-            "\(shellQuote(dockerBin())) system df --format json") else { return nil }
+            "\(shellQuote(dockerBin())) system df --format json", timeout: 30) else { return nil }
         let usage = parseDFJSONL(output)
         return usage.totalBytes > 0 || usage.imagesCount > 0 ? usage : Usage()
     }
@@ -107,14 +160,11 @@ enum DockerEngine {
             throw NSError(domain: "docker", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "docker is not installed"])
         }
-        return try await OptimizeEngine.shell("\(shellQuote(dockerBin())) system prune -f")
+        return try await OptimizeEngine.shell("\(shellQuote(dockerBin())) system prune -f",
+                                              timeout: 300)
     }
 
     static func shellQuote(_ s: String) -> String {
         "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
-}
-
-extension Double {
-    var roundedInt64: Int64 { Int64(self) }
 }

@@ -18,20 +18,53 @@ enum OptimizeEngine {
     /// Runs a shell command and requires exit 0 — a failing killall/defaults
     /// used to be reported as "✓ success" anyway. (The admin variant is
     /// shellWithAdmin; there is no admin parameter here.)
+    ///
+    /// `timeout` bounds the whole command: `tmutil listlocalsnapshots` was
+    /// observed hanging FOREVER (TCC context) with no child exit and an
+    /// open stdout pipe, which wedged the Space Hogs page and its MCP tool
+    /// indefinitely. On timeout the child is terminated and an error thrown
+    /// — callers degrade to "unavailable" instead of waiting forever. The
+    /// pipe reader may stay blocked if a grandchild inherited stdout; that
+    /// bounded leak is preferable to a wedged caller, so the throw path
+    /// deliberately does NOT await it.
     @discardableResult
-    static func shell(_ command: String) async throws -> String {
+    static func shell(_ command: String, timeout: TimeInterval = 60) async throws -> String {
         let proc = Process()
         let pipe = Pipe()
         proc.executableURL = URL(fileURLWithPath: "/bin/zsh")
         proc.arguments = ["-c", command]
         proc.standardOutput = pipe
         proc.standardError = pipe
+        // Install the handler BEFORE run(): an instant child (echo) can be
+        // reaped before a post-run installation lands, which used to hang
+        // the fast path until the timeout fired.
+        let exited = DispatchSemaphore(value: 0)
+        proc.terminationHandler = { _ in exited.signal() }
         try proc.run()
         // Drain concurrently: reading only after exit deadlocks once the
         // child fills the ~64KB pipe buffer.
         let reader = Task.detached { pipe.fileHandleForReading.readDataToEndOfFile() }
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            proc.terminationHandler = { _ in continuation.resume() }
+
+        // Bounded wait on a GCD thread — DispatchSemaphore.wait is
+        // unavailable in async contexts (Swift 6 hard error).
+        let exitedInTime: Bool = await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
+            DispatchQueue.global().async {
+                let inTime = exited.wait(timeout: .now() + timeout) == .success
+                if !inTime {
+                    if proc.isRunning { proc.terminate() }
+                    if exited.wait(timeout: .now() + 3) == .timedOut,
+                       let pid = proc.processIdentifier as Int32?,
+                       pid > 0 {
+                        kill(pid, SIGKILL)
+                    }
+                }
+                cont.resume(returning: inTime)
+            }
+        }
+        guard exitedInTime else {
+            throw NSError(domain: "shell", code: Int(Int32.max - 1),
+                          userInfo: [NSLocalizedDescriptionKey:
+                            "command timed out after \(Int(timeout))s: \(command.prefix(80))"])
         }
         let output = String(data: await reader.value, encoding: .utf8) ?? ""
         guard proc.terminationStatus == 0 else {

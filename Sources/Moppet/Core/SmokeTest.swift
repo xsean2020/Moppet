@@ -1001,20 +1001,42 @@ enum SmokeTest {
                    // is the same extractSnapshotToken check — assert its verdict.
                    SnapshotEngine.extractSnapshotToken("2026-13-99-999999") == nil)
 
-            // Docker df NDJSON: Int and String number shapes both parse.
+            // Docker df NDJSON: the REAL Docker Desktop shape (Capitalized
+            // types, string counts, human-size strings) plus legacy numeric
+            // and lowercase variants — captured verbatim from the machine.
             let dockerJSON = """
+            {"Active":"2","Reclaimable":"2.323GB (59%)","Size":"3.918GB","TotalCount":"3","Type":"Images"}
+            {"Active":"0","Reclaimable":"131.1kB (100%)","Size":"131.1kB","TotalCount":"2","Type":"Containers"}
+            {"Active":"1","Reclaimable":"0B (0%)","Size":"830.8kB","TotalCount":"1","Type":"Local Volumes"}
+            {"Active":"0","Reclaimable":"408.4MB","Size":"1.018GB","TotalCount":"34","Type":"Build Cache"}
+            """
+            let usage = DockerEngine.parseDFJSONL(dockerJSON)
+            expect("docker: real df shape parses (Capitalized types, string counts, human sizes)",
+                   usage.imagesCount == 3 && usage.imagesBytes == 3_918_000_000
+                   && usage.containersCount == 2 && usage.containersBytes == 131_100
+                   && usage.volumesCount == 1 && usage.volumesBytes == 830_800
+                   && usage.cacheCount == 34 && usage.cacheBytes == 1_018_000_000,
+                   "\(usage.totalBytes)")
+            expect("docker: totals sum",
+                   usage.totalBytes == 3_918_000_000 + 131_100 + 830_800 + 1_018_000_000)
+            // Legacy/variant shapes must keep parsing.
+            let legacyDockerJSON = """
             {"Type":"images","Images":4,"Size":3200000000}
             {"Type":"containers","Containers":7,"Size":"1024000000"}
             {"Type":"local Volumes","Volumes":2,"Size":512000000}
             {"Type":"build-cache","BuildCache":11,"Size":"2048000000"}
             """
-            let usage = DockerEngine.parseDFJSONL(dockerJSON)
-            expect("docker: df NDJSON parses all four types",
-                   usage.imagesCount == 4 && usage.imagesBytes == 3_200_000_000
-                   && usage.containersCount == 7 && usage.containersBytes == 1_024_000_000
-                   && usage.volumesCount == 2 && usage.volumesBytes == 512_000_000
-                   && usage.cacheCount == 11 && usage.cacheBytes == 2_048_000_000)
-            expect("docker: totals sum", usage.totalBytes == 6_784_000_000)
+            let legacyUsage = DockerEngine.parseDFJSONL(legacyDockerJSON)
+            expect("docker: legacy lowercase/numeric variant parses",
+                   legacyUsage.imagesCount == 4 && legacyUsage.imagesBytes == 3_200_000_000
+                   && legacyUsage.cacheCount == 11 && legacyUsage.cacheBytes == 2_048_000_000)
+            expect("docker: human-size parser handles units and suffixes",
+                   DockerEngine.parseHumanBytes("0B") == 0
+                   && DockerEngine.parseHumanBytes("131.1kB") == 131_100
+                   && DockerEngine.parseHumanBytes("2.243GB") == 2_243_000_000
+                   && DockerEngine.parseHumanBytes("1,024 MB") == 1_024_000_000
+                   && DockerEngine.parseHumanBytes("990.2MB (44%)") == 990_200_000
+                   && DockerEngine.parseHumanBytes("garbage") == 0)
 
             // Homebrew preview: "Would remove:" block + human-size parser.
             let brewOutput = """
@@ -1152,6 +1174,30 @@ enum SmokeTest {
                 expect("history: source badge for \(source.rawValue)",
                        !source.icon.isEmpty && !source.title.isEmpty)
             }
+
+            // Shell timeout guard: a hung child (tmutil did, for real) must
+            // throw instead of wedging the caller forever.
+            do {
+                let slowStart = Date()
+                let timedOut: String? = awaitSync {
+                    try? await OptimizeEngine.shell("sleep 30", timeout: 1)
+                }
+                let elapsed = Date().timeIntervalSince(slowStart)
+                expect("shell: timeout fires around 1s",
+                       timedOut == nil && elapsed < 6 && elapsed >= 0.9,
+                       String(format: "%.1fs", elapsed))
+            }
+            let fast: String = awaitSync {
+                do {
+                    let out = try await OptimizeEngine.shell("echo ok", timeout: 10)
+                    return "OK: \(out.trimmingCharacters(in: .whitespacesAndNewlines))"
+                } catch {
+                    return "ERR: \((error as NSError).code) \(error.localizedDescription)"
+                }
+            }
+            expect("shell: fast command unaffected", fast == "OK: ok", fast)
+            let failing: String? = awaitSync { try? await OptimizeEngine.shell("exit 3", timeout: 10) }
+            expect("shell: non-zero exit still throws", failing == nil)
 
             // Permissions probe runs and answers a Bool (the TCC read may
             // succeed or fail on this machine — both are valid).

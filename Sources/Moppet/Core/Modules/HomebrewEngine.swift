@@ -88,9 +88,11 @@ enum HomebrewEngine {
     static func preview() async -> Preview? {
         guard installed else { return nil }
         // `brew cleanup -n` exits non-zero with warnings on some taps —
-        // tolerate the exit code and parse whatever came out.
+        // tolerate the exit code and parse whatever came out. Long cap:
+        // the dry run stats every Cellar file and is genuinely slow on
+        // big installs.
         guard let output = try? await OptimizeEngine.shell(
-            "\(shellQuote(brewBin())) cleanup -n 2>/dev/null || true") else { return nil }
+            "\(shellQuote(brewBin())) cleanup -n 2>/dev/null || true", timeout: 300) else { return nil }
         return parseCleanupPreview(output)
     }
 
@@ -99,7 +101,7 @@ enum HomebrewEngine {
             throw NSError(domain: "homebrew", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "Homebrew is not installed"])
         }
-        return try await OptimizeEngine.shell("\(shellQuote(brewBin())) cleanup")
+        return try await OptimizeEngine.shell("\(shellQuote(brewBin())) cleanup", timeout: 900)
     }
 
     static func shellQuote(_ s: String) -> String {

@@ -225,7 +225,7 @@ enum Route: String, Hashable, CaseIterable, Identifiable {
         case .purge: "shippingbox"
         case .slim: "scissors"
         case .hogs: "internaldrive"
-        case .largeFiles: "doc.magnifyingglass"
+        case .largeFiles: "doc.text.magnifyingglass"
         case .orphans: "tray.full"
         case .history: "clock.arrow.circlepath"
         case .settings: "gearshape"

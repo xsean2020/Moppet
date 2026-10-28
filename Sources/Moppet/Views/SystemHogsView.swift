@@ -186,7 +186,7 @@ struct SystemHogsView: View {
     private var dockerCard: some View {
         SettingsCard {
             HStack(spacing: Airi.space3) {
-                hogIcon("hardware.macbook", tint: .blue)
+                hogIcon("cube", tint: .blue)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(L("Docker"))
                         .font(Airi.cardTitleFont)

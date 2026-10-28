@@ -66,8 +66,10 @@ enum SnapshotEngine {
     // MARK: - Commands
 
     static func list() async -> [Snapshot] {
+        // 15s cap: tmutil was observed hanging forever in TCC-restricted
+        // contexts — the UI degrades to "no snapshots" instead of wedging.
         guard let output = try? await OptimizeEngine.shell(
-            "/usr/bin/tmutil listlocalsnapshots /") else { return [] }
+            "/usr/bin/tmutil listlocalsnapshots /", timeout: 15) else { return [] }
         return parseListOutput(output)
     }
 

@@ -29,6 +29,9 @@ struct LargeFilesView: View {
     @State private var minSize: MinSize = .mb500
     @State private var scope: LargeFilesEngine.Scope = .userFolders
     @State private var scanning = false
+    /// (steps done, steps total) streamed by the engine's progress callback —
+    /// one step per mdfind root plus the find fallback when it runs.
+    @State private var scanProgress: (done: Int, total: Int)? = nil
     @State private var files: [LargeFilesEngine.LargeFile] = []
     @State private var selected: Set<URL> = []
     @State private var showTrashConfirm = false
@@ -70,7 +73,7 @@ struct LargeFilesView: View {
                         }
                     }
                     if files.isEmpty && !scanning {
-                        EmptyStateCard(icon: "doc.magnifyingglass",
+                        EmptyStateCard(icon: "doc.text.magnifyingglass",
                                        title: L("No large files found"),
                                        hint: L("Try a smaller size filter or another scope."),
                                        actionTitle: nil)
@@ -139,6 +142,27 @@ struct LargeFilesView: View {
                     .font(Airi.captionFont)
                     .foregroundStyle(Airi.neutral500)
                 Spacer()
+                if scanning {
+                    HStack(spacing: 8) {
+                        if let p = scanProgress, p.total > 0 {
+                            ProgressRing(progress: Double(p.done) / Double(max(p.total, 1)),
+                                         lineWidth: 4, showValue: false)
+                                .frame(width: 22, height: 22)
+                            TickingNumber(value: p.done)
+                            Text("/\(p.total)")
+                        } else {
+                            // Before the first root reports, the ring sits at
+                            // zero — still honest feedback that scanning began.
+                            ProgressRing(progress: 0, lineWidth: 4, showValue: false)
+                                .frame(width: 22, height: 22)
+                        }
+                        Text(L("Scanning…"))
+                    }
+                    .font(Airi.caption2Font)
+                    .foregroundStyle(Airi.neutral500)
+                    .monospacedDigit()
+                    .animation(.spring(response: 0.4, dampingFraction: 0.9), value: scanProgress?.done ?? 0)
+                }
                 Text(String(format: L("%1$@ selected of %2$@ total"),
                             selectedFiles.reduce(0) { $0 + $1.bytes }.bytesFormatted,
                             files.reduce(0) { $0 + $1.bytes }.bytesFormatted))
@@ -153,7 +177,13 @@ struct LargeFilesView: View {
         scanning = true
         lastMessage = nil
         spotlightWarning = false
-        let found = await LargeFilesEngine.find(minBytes: minSize.bytes, scope: scope)
+        scanProgress = nil
+        let found = await LargeFilesEngine.find(minBytes: minSize.bytes, scope: scope) { done, total in
+            // Sequential engine loop — callbacks arrive in order; hop to the
+            // main actor before touching @State (background executor).
+            Task { @MainActor in scanProgress = (done, total) }
+        }
+        scanProgress = nil
         files = found
         // Only deletable rows start selected — a protected row ticked by
         // default would produce a clean run that silently skips it.

@@ -101,7 +101,7 @@ enum RecordSource: String, Codable, CaseIterable {
         case .slim: "scissors"
         case .startup: "power"
         case .optimize: "wrench.and.screwdriver"
-        case .largeFiles: "doc.magnifyingglass"
+        case .largeFiles: "doc.text.magnifyingglass"
         case .orphans: "tray.full"
         case .hogs: "internaldrive"
         case .scheduled: "clock.badge.checkmark"

@@ -156,17 +156,21 @@ enum LargeFilesEngine {
 
     /// Scope-aware search for the Large Files page. Whole-home scans trust
     /// Spotlight (control-query disambiguated) and never fall back to the
-    /// slow walk.
-    static func find(minBytes: Int64, limit: Int = 200, scope: Scope) async -> [LargeFile] {
+    /// slow walk. `progress` reports (steps done, steps total): one step per
+    /// mdfind root, plus a final step for the find fallback when it runs.
+    static func find(minBytes: Int64, limit: Int = 200, scope: Scope,
+                     progress: (@Sendable (Int, Int) -> Void)? = nil) async -> [LargeFile] {
         let expanded = scope.roots.map {
             $0.hasPrefix("~") ? FileManager.default.homeDirectoryForCurrentUser.path + $0.dropFirst() : $0
         }
         var files: [LargeFile] = []
-        for dir in expanded {
+        let totalSteps = expanded.count + (scope == .wholeHome ? 0 : 1)
+        for (index, dir) in expanded.enumerated() {
             let script = """
             mdfind -onlyin \(shellQuote(dir)) 'kMDItemFSSize > \(minBytes * 1_000_000)' 2>/dev/null | head -\(limit * 2)
             """
             files += parseAndStat(await runShell(script), minBytes: minBytes, limit: limit)
+            progress?(index + 1, totalSteps)
         }
         if files.isEmpty && scope != .wholeHome {
             let minMB = max(1, minBytes / 1_000_000)
@@ -174,6 +178,7 @@ enum LargeFilesEngine {
                 "find \(shellQuote(dir)) -type f -size +\(minMB)M -not -path '*/Library/Caches/*' 2>/dev/null | head -\(limit)"
             }.joined(separator: "; ")
             files = parseAndStat(await runShell(findScript), minBytes: minBytes, limit: limit)
+            progress?(totalSteps, totalSteps)
         }
         // Dedupe (nested scopes can report the same file twice) + sort.
         var seen = Set<String>()
