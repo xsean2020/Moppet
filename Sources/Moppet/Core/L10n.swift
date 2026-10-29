@@ -56,6 +56,15 @@ private let zh: [String: String] = [
     "+%lld more": "另 %lld 个",
     "%1$@ apps · %2$@ data": "App %1$@ · 数据 %2$@",
     " · %lld leftover files": " · %lld 个残留文件",
+    // App Management (macOS 15+ TCC) — FDA is read-only, bundle deletes need this
+    "Permission denied — macOS 15+ needs the App Management permission (Full Disk Access is not enough). System Settings → Privacy & Security → App Management":
+        "没有权限——macOS 15+ 删除其他 App 需要「App 管理」权限（「完全磁盘访问权限」只提供读取权限，并不够）。系统设置 → 隐私与安全性 → App 管理",
+    "App Management permission required": "需要「App 管理」权限",
+    "On macOS 15+, deleting other apps requires the App Management permission. Full Disk Access only grants read access and is not enough.":
+        "macOS 15+ 删除其他 App 需要「App 管理」权限。「完全磁盘访问权限」只提供读取权限，不覆盖删除操作。",
+    "If you previously clicked Don't Allow, macOS will not show the prompt again — turn it on in System Settings.":
+        "如果之前点过「不允许」，系统不会再弹窗——请在系统设置中手动打开。",
+    "Grant App Management…": "去授权「App 管理」…",
     // dashboard lifetime stats
     "Cleaned so far": "累计清理",
     "Open the cleanup history": "打开清理历史",

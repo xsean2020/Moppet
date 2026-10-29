@@ -171,6 +171,31 @@ enum UninstallEngine {
         return results
     }
 
+    // MARK: - Permission error classification
+
+    /// The raw localizedDescription for a refused bundle delete is a generic
+    /// Cocoa "you don't have permission" — users reasonably answer "but I
+    /// granted Full Disk Access!". FDA is read-only; on macOS 15+ the missing
+    /// grant is App Management. Translate the errno into the actionable hint,
+    /// but ONLY for /Applications paths (a home-scope EPERM has nothing to do
+    /// with App Management and would send the user to the wrong settings pane).
+    static func friendlyRemoveReason(_ url: URL, _ error: Error) -> String {
+        let ns = error as NSError
+        let denied = (ns.domain == NSCocoaErrorDomain && ns.code == 513)          // NSFileWriteNoPermissionError
+            || (ns.domain == NSPOSIXErrorDomain && (ns.code == 1 || ns.code == 13)) // EPERM / EACCES
+            || ns.localizedDescription.lowercased().contains("permission")
+        if denied, url.path.hasPrefix("/Applications") {
+            return L("Permission denied — macOS 15+ needs the App Management permission (Full Disk Access is not enough). System Settings → Privacy & Security → App Management")
+        }
+        return ns.localizedDescription
+    }
+
+    /// True when a failure reason came from `friendlyRemoveReason`'s
+    /// App Management path — the view uses it to surface the grant card.
+    static func isAppManagementHint(_ reason: String) -> Bool {
+        reason.hasPrefix("Permission denied — macOS 15+ needs the App Management permission")
+    }
+
     /// Removes SYSTEM-level leftovers with an administrator prompt
     /// (AppleScript privileges — the GUI counterpart of mole's sudo).
     @MainActor
@@ -257,7 +282,7 @@ enum UninstallEngine {
                     outcome.failed.append((app.name, "could not delete"))
                 }
             } catch {
-                outcome.failed.append((app.name, error.localizedDescription))
+                outcome.failed.append((app.name, friendlyRemoveReason(app.url, error)))
             }
         }
         var relatedItems: [(path: String, bytes: Int64)] = []
@@ -335,7 +360,7 @@ enum UninstallEngine {
             appOK = !FileManager.default.fileExists(atPath: app.url.path)
             if appOK { removed.append(app.url.path) }
         } catch {
-            failed.append((app.url.path, error.localizedDescription))
+            failed.append((app.url.path, friendlyRemoveReason(app.url, error)))
         }
         done += 1
         progress?(done, total, app.name)
