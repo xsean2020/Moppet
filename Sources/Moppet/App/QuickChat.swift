@@ -271,7 +271,16 @@ struct QuickChatInputView: View {
         )
         .onExitCommand { quick.hideInput() }
         .onChange(of: quick.panelVisible) { _, visible in
-            if visible { focused = true }
+            guard visible else { return }
+            // Same rule as the chat composer: the field may only take focus
+            // after the app is active and THIS panel is key, otherwise the
+            // IME session starts in a background context (IMK/TSM log noise,
+            // dropped first keystroke).
+            TextFocus.whenReady({
+                NSApp.isActive && NSApp.keyWindow is QuickChatPanel
+            }) {
+                focused = true
+            }
         }
         // No onAppear focus: the panel is built BEFORE show() activates the
         // app — focusing here hits IMK from a background app (see showInput).

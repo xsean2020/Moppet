@@ -37,6 +37,8 @@ struct LargeFilesView: View {
     @State private var showTrashConfirm = false
     @State private var lastMessage: String?
     @State private var spotlightWarning = false
+    /// Progress of the running trash batch — drives the center overlay.
+    @State private var batch: BatchProgress?
 
     private func scopeTitle(_ scope: LargeFilesEngine.Scope) -> String {
         switch scope {
@@ -92,6 +94,10 @@ struct LargeFilesView: View {
             bottomBar
         }
         .background(Airi.pageBackground.opacity(0.001))
+        .overlay {
+            if let batch { BatchProgressOverlay(progress: batch) }
+        }
+        .animation(Airi.controlAnimation, value: batch == nil)
         .confirmationDialog(
             Text(String(format: L("Move %lld files to the Trash?"), selectedFiles.count)),
             isPresented: $showTrashConfirm,
@@ -281,9 +287,14 @@ struct LargeFilesView: View {
     private func trashSelected() async {
         let picked = selectedFiles.filter { Self.deletable($0.url) }
         guard !picked.isEmpty else { return }
+        // Multi-GB files take real time to move to the Trash; without a
+        // counter the page just sat there and read as frozen.
+        batch = BatchProgress(title: L("Moving to the Trash…"), done: 0, total: picked.count)
+        let startedAt = Date()
         var removed: [(String, Int64)] = []
         var failed: [(String, String)] = []
-        for file in picked {
+        for (index, file) in picked.enumerated() {
+            batch?.detail = file.url.lastPathComponent
             do {
                 try await Task.detached {
                     try FileManager.default.trashItem(at: file.url, resultingItemURL: nil)
@@ -292,6 +303,7 @@ struct LargeFilesView: View {
             } catch {
                 failed.append((file.url.path, error.localizedDescription))
             }
+            batch?.done = index + 1
         }
         let freed = removed.reduce(0) { $0 + $1.1 }
         HistoryStore.append(CleanRecord(
@@ -308,6 +320,8 @@ struct LargeFilesView: View {
             : String(format: L("Moved %1$lld files — %2$lld failed"), Int64(removed.count), Int64(failed.count))
         files.removeAll { file in removed.contains { $0.0 == file.url.path } }
         selected = []
+        await BatchProgressHold.until(startedAt)
+        batch = nil
         UXFeedback.success()
     }
 

@@ -19,6 +19,12 @@ struct AnalyzeView: View {
     @State private var scanTask: Task<Void, Never>?
     /// (completed, total) entries measured — drives the progress bar.
     @State private var progress: (done: Int, total: Int)? = nil
+    /// Progress of the running delete batch — drives the center overlay ring.
+    /// Seeded at init by the debug probe so an offscreen render can capture the
+    /// ring without deleting anything or waiting for `.task`.
+    @State private var deleteProgress: BatchProgress? = AnalyzeView.debugSeed.map {
+        BatchProgress(title: L("Deleting…"), done: $0.done, total: $0.total)
+    }
     /// Drill-down path; empty = the home root. The visible layer is the
     /// last node's loaded children (or the root list).
     @State private var path: [FileNode] = []
@@ -47,7 +53,9 @@ struct AnalyzeView: View {
                        subtitle: L("Expand folders to size them — tick paths to delete"),
                        onBack: onClose.map { close in { close() } })
             Divider().overlay(Airi.neutral200.opacity(0.5))
-            if scanning && rootChildren.isEmpty {
+            // Never stack two rings: the first-scan ring and the delete ring
+            // would sit on top of each other.
+            if scanning && rootChildren.isEmpty && deleteProgress == nil {
                 initialScanPane
             } else {
                 explorerPane
@@ -55,8 +63,19 @@ struct AnalyzeView: View {
             bottomBar
         }
         .background(Airi.pageBackground.opacity(0.001))
+        .overlay {
+            if let deleteProgress {
+                BatchProgressOverlay(progress: deleteProgress)
+            }
+        }
+        .animation(Airi.controlAnimation, value: deleteProgress == nil)
         .task { startScan() }
     }
+
+    /// Debug hook (`--probe-analyze`): a synthetic in-flight batch so the
+    /// delete ring can be rendered and inspected without touching real files.
+    nonisolated(unsafe) static var debugSeed: (done: Int, total: Int)? =
+        CommandLine.arguments.contains("--probe-analyze") ? (7, 12) : nil
 
     // MARK: - Explorer (breadcrumb + list + bubble map)
 
@@ -194,12 +213,12 @@ struct AnalyzeView: View {
                 .monospacedDigit()
                 .animation(.spring(response: 0.4, dampingFraction: 0.9), value: selected.count)
             Spacer()
-            if !selected.isEmpty {
+            if !selected.isEmpty, deleteProgress == nil {
                 AiriButton(title: String(format: L("Delete %lld"), selected.count), icon: "trash.fill",
                            variant: .destructive) { confirmingTrash = true }
             }
             AiriButton(title: scanning ? L("Scanning…") : L("Rescan"), icon: "arrow.clockwise",
-                       variant: .secondary, disabled: scanning) {
+                       variant: .secondary, disabled: scanning || deleteProgress != nil) {
                 startScan()
             }
         }
@@ -345,18 +364,28 @@ struct AnalyzeView: View {
         guard !nodes.isEmpty else { return }
         let deletable = nodes.filter { SafetyGuard.checkDeletable($0.url).allowed }
         let blocked = nodes.filter { !SafetyGuard.checkDeletable($0.url).allowed }
+        guard !deletable.isEmpty else {
+            PetBus.shared.say(L("Those paths are protected — nothing was deleted."), state: .sad)
+            return
+        }
+        // Ring in the middle of the page: per-path delete of a big tree can
+        // take seconds, and without it the window looked frozen.
+        deleteProgress = BatchProgress(title: L("Deleting…"), done: 0, total: deletable.count)
+        let startedAt = Date()
         Task {
             // Permanent delete (the user opted out of Trash): per-path so one
             // failure doesn't abort the rest.
             var removed: [FileNode] = []
             var failures: [(node: FileNode, error: String)] = []
-            for node in deletable {
+            for (index, node) in deletable.enumerated() {
+                deleteProgress?.detail = node.url.lastPathComponent
                 do {
                     try await Task.detached { try FileManager.default.removeItem(at: node.url) }.value
                     removed.append(node)
                 } catch {
                     failures.append((node, error.localizedDescription))
                 }
+                deleteProgress?.done = index + 1
             }
             let freed = removed.reduce(0) { $0 + $1.bytes }
             let record = CleanRecord(
@@ -375,11 +404,35 @@ struct AnalyzeView: View {
                                     success: false, error: "blocked by safety guard")
                 }, source: .analyze)
             HistoryStore.append(record)
-            UXFeedback.success()
-            PetBus.shared.say(String(format: L("Deleted %lld paths 🗑"), removed.count), state: .celebrating)
+            if removed.isEmpty {
+                // All paths failed: the old code still celebrated "Deleted 0
+                // paths", which reads as success for a no-op.
+                PetBus.shared.say(L("Nothing was deleted — those paths are protected or in use."),
+                                  state: .sad)
+            } else {
+                UXFeedback.success()
+                PetBus.shared.say(String(format: L("Deleted %lld paths 🗑"), removed.count),
+                                  state: .celebrating)
+            }
             selected.removeAll()
-            startScan()
+            // Shrink the tree in place instead of re-measuring the whole home
+            // folder (seconds of work that also threw the user back to the
+            // root layer). Every parent row, the breadcrumb total and the
+            // bubble map read these values.
+            for node in removed { applyRemoval(of: node) }
+            // A handful of small files deletes in a few milliseconds — the
+            // ring would appear and vanish inside one frame, which reads as a
+            // glitch. Hold it long enough to register, then fade out onto the
+            // already-updated list.
+            await BatchProgressHold.until(startedAt)
+            deleteProgress = nil
         }
+    }
+
+    /// Drop a deleted node from the in-memory tree and subtract its bytes from
+    /// every ancestor (see `FileNode.applyDeletion`).
+    private func applyRemoval(of node: FileNode) {
+        FileNode.applyDeletion(id: node.id, in: &rootChildren)
     }
 }
 
@@ -389,10 +442,13 @@ struct AnalyzeView: View {
 final class FileNode: Identifiable {
     let id = UUID().uuidString
     let url: URL
-    let bytes: Int64
+    /// Mutable: deleting a child subtracts its bytes from every ancestor so
+    /// the list, breadcrumb total and bubble map stay correct without a full
+    /// re-measure of the home folder.
+    var bytes: Int64
     let isDirectory: Bool
     /// Entries inside (from the sizing pass) — "34 items" sub-label.
-    let fileCount: Int
+    var fileCount: Int
     var children: [FileNode] = []
     var loadingChildren = false
     var loaded = false
@@ -402,6 +458,43 @@ final class FileNode: Identifiable {
         self.bytes = bytes
         self.isDirectory = isDirectory
         self.fileCount = fileCount
+    }
+
+    /// Drop the node `id` from the tree and subtract its size from every
+    /// ancestor, so the list rows, the breadcrumb total and the bubble map all
+    /// reflect the deletion immediately — no full re-measure of the home
+    /// folder (seconds of work, and it used to throw the user back to root).
+    ///
+    /// Also drops the on-disk size cache for the whole ancestor chain: a
+    /// nested delete only bumps the DIRECT parent's mtime, so directories
+    /// further up kept serving their pre-delete size until the 3-day TTL.
+    @discardableResult
+    static func applyDeletion(id: String, in list: inout [FileNode]) -> Bool {
+        var ancestors: [FileNode] = []
+        guard let node = detach(id: id, from: &list, ancestors: &ancestors) else { return false }
+        SizeCache.shared.invalidate(node.url)
+        for ancestor in ancestors {
+            ancestor.bytes = max(0, ancestor.bytes - node.bytes)
+            ancestor.fileCount = max(0, ancestor.fileCount - max(1, node.fileCount))
+        }
+        return true
+    }
+
+    /// Depth-first removal; `ancestors` collects the chain from the root down
+    /// to (but excluding) the removed node.
+    private static func detach(id: String, from list: inout [FileNode],
+                               ancestors: inout [FileNode]) -> FileNode? {
+        if let index = list.firstIndex(where: { $0.id == id }) {
+            return list.remove(at: index)
+        }
+        for index in list.indices where !list[index].children.isEmpty {
+            ancestors.append(list[index])
+            if let node = detach(id: id, from: &list[index].children, ancestors: &ancestors) {
+                return node
+            }
+            ancestors.removeLast()
+        }
+        return nil
     }
 }
 

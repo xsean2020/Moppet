@@ -20,6 +20,8 @@ struct MoppetApp: App {
         let knownFlags: Set<String> = ["--smoke", "--brain-smoke", "--mcp", "--mcp-http",
                                        "--brain-exec", "--yes", "--probe-floater",
                                        "--probe-models", "--probe-pet-bubble",
+                                       "--probe-pet-panel", "--probe-imk", "--probe-analyze",
+                                       "--probe-analyze-render",
                                        "--route-perf", "--win-debug", "--scheduled-clean"]
         let args = CommandLine.arguments
         // A bare "--" is the conventional separator (`swift run Moppet -- --smoke`)
@@ -36,14 +38,59 @@ struct MoppetApp: App {
         if args.contains("--smoke") {
             SmokeTest.run()
         }
+        // Analyze ring render: writes a PNG of the page with a synthetic
+        // in-flight delete, so the overlay can be checked without screen
+        // recording permission and without deleting real files.
+        if let index = args.firstIndex(of: "--probe-analyze-render") {
+            let output = args.count > index + 1 ? args[index + 1] : "/tmp/moppet-analyze.png"
+            let appearance = args.count > index + 2 ? args[index + 2] : "light"
+            Task { @MainActor in AnalyzeRenderProbe.run(outputPath: output, appearance: appearance) }
+        }
         // LaunchAgent entry: the scheduled safe clean. Runs headless, records
         // to history with source .scheduled, exits.
         if args.contains("--scheduled-clean") {
             Scheduler.runScheduledClean()
         }
+        // IMK focus probe: opens the chat window while the app is inactive,
+        // the exact situation that logs the IMKCFRunLoopWakeUpReliable /
+        // TSM caps-lock diagnostics.
+        if args.contains("--probe-imk") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                NSApp.hide(nil)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    WindowRouter.shared.showChat()
+                }
+            }
+        }
         // Pet bubble sizing probe: measures real laid-out heights.
         if args.contains("--probe-pet-bubble") {
             PetBubbleProbe.run()
+        }
+        // Pet PANEL probe: posts a long answer and checks the window actually
+        // widens AND grows upward while staying under the screen's top edge —
+        // the "wide answer swallowed the pet" regression, at runtime.
+        if args.contains("--probe-pet-panel") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                let long = String(repeating: "这是一段很长的回答内容，用来验证气泡变宽变高时宠物依然完整显示。",
+                                  count: 10)
+                PetBus.shared.say(long, state: .talking, hideAfter: 0)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                    guard let panel = NSApp.windows.first(where: { $0 is PetPanel }) else {
+                        print("probe-pet-panel: no pet panel")
+                        exit(3)
+                    }
+                    let frame = panel.frame
+                    let base = PetSettings.currentSize
+                    let visible = (panel.screen ?? NSScreen.main)?.visibleFrame
+                    // Growth is relative to the user's pet scale (base can be
+                    // 200×320 at 0.8): the panel must widen and rise, and
+                    // stay under the screen's top edge.
+                    let grew = frame.width > base.width + 40 && frame.height > base.height + 20
+                    let inside = visible.map { frame.maxY <= $0.maxY + 0.5 } ?? true
+                    print("probe-pet-panel: frame=\(frame) base=\(base) grew=\(grew) insideScreen=\(inside)")
+                    exit(grew && inside ? 0 : 2)
+                }
+            }
         }
         // Floater color diagnostics: see Airi.probeFloaterColors.
         if args.contains("--probe-floater") {
@@ -326,7 +373,19 @@ struct RootView: View {
         .onReceive(NotificationCenter.default.publisher(for: .moppetNavigateSettings)) { _ in
             route = .settings
         }
-        .task { await routePerfProbe() }
+        .task {
+            await routePerfProbe()
+            await analyzeRingProbe()
+        }
+    }
+
+    /// `--probe-analyze`: jump straight to the Analyze page so the centered
+    /// delete ring (seeded by `AnalyzeView` under the same flag) can be
+    /// inspected without deleting anything real.
+    private func analyzeRingProbe() async {
+        guard CommandLine.arguments.contains("--probe-analyze") else { return }
+        try? await Task.sleep(nanoseconds: 1_200_000_000)
+        route = .analyze
     }
 
     /// `--route-perf`: cycle through every route and log commit/render cost

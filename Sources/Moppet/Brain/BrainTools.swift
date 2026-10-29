@@ -264,12 +264,52 @@ enum BrainTools {
         [listMcpResourcesSpec, listMcpResourceTemplatesSpec, readMcpResourceSpec]
     }
 
+    // MARK: - Harness-backed tools (P1: skills + memory)
+
+    static let useSkillSpec = Spec(
+        name: "use_skill",
+        description: """
+        Loads a reusable workflow by name and returns its full text. Call this \
+        when the situation matches one of the skills advertised in the tool \
+        guidance — the body is not in your context until you ask for it. \
+        Unknown names return the list of available skills.
+        """,
+        parametersJSONSchema: [
+            "type": "object",
+            "properties": [
+                "name": ["type": "string", "description": "Skill directory name, e.g. cleanup-scope."],
+            ],
+            "required": ["name"],
+        ],
+        risk: .readOnly
+    )
+
+    static let recallSpec = Spec(
+        name: "recall",
+        description: """
+        Looks up durable facts remembered about this user or this machine \
+        (preferences, exclusions, paths). Use it before asking the user to \
+        repeat something they may have already told you.
+        """,
+        parametersJSONSchema: [
+            "type": "object",
+            "properties": [
+                "query": ["type": "string", "description": "What you are trying to remember, in the user's words."],
+            ],
+            "required": ["query"],
+        ],
+        risk: .readOnly
+    )
+
+    static var harnessSpecs: [Spec] { [useSkillSpec, recallSpec] }
+
     /// All specs: codex tools + cleaning tools + MCP tools/resources.
     /// MCP resources are only offered when at least one server is connected
     /// (codex registers them per configured server, spec_plan.rs:1276).
     static func allSpecs(mcpTools: [(server: String, name: String, description: String, schema: [String: Any])],
                          mcpConnected: Bool = false) -> [Spec] {
         var specs = codexSpecs
+        specs.append(contentsOf: harnessSpecs)
         if mcpConnected {
             specs.append(contentsOf: mcpResourceSpecs)
         }
@@ -302,6 +342,10 @@ enum BrainTools {
         var execSessions: BrainExecSessionRegistry?
         var networkAccess: Bool = false
         var writableRoots: [String] = []
+        /// Growth accounting (§5.12 G2): every user decision on an approval is
+        /// reported here so `TurnOutcome.approvalDenied` has a source. Nil in
+        /// headless/test contexts — recording is optional, never load-bearing.
+        var recordApproval: (@Sendable (ApprovalEvent) -> Void)? = nil
     }
 
     /// Executes one tool call. Returns output text for the model. A return
@@ -328,6 +372,18 @@ enum BrainTools {
                 return try await runWriteStdin(call, context: context)
             case "request_user_input":
                 return try await runRequestUserInput(call, context: context)
+            case "use_skill":
+                guard let args = BrainAgent.parseArgs(call.argumentsJSON),
+                      let name = args["name"] as? String, !name.isEmpty else {
+                    throw BrainError("use_skill: missing 'name'")
+                }
+                return SkillCatalog.load(name: name)
+            case "recall":
+                guard let args = BrainAgent.parseArgs(call.argumentsJSON),
+                      let query = args["query"] as? String, !query.isEmpty else {
+                    throw BrainError("recall: missing 'query'")
+                }
+                return MemoryBank.recall(query: query)
             case "list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource":
                 return try await runMCPResource(call, context: context)
             default:
@@ -372,7 +428,7 @@ enum BrainTools {
 
         if shouldAskFirst() {
             let approved = await requestApproval(
-                "shell (untrusted project)", command, emit: emit)
+                "shell (untrusted project)", command, call: call, context: context, emit: emit)
             guard approved else { return "error: user declined to run command" }
             let result = await BrainSandbox.runUnsandboxed(command: command, cwd: cwd,
                                                            timeout: timeoutMS / 1000)
@@ -386,7 +442,8 @@ enum BrainTools {
         if context.turn.approvalPolicy != .never,
            BrainSandbox.involvesDeletion(command) {
             let approved = await requestApproval(
-                "shell — this command deletes files", command, emit: emit)
+                "shell — this command deletes files", command,
+                call: call, context: context, emit: emit)
             guard approved else { return "error: user declined the delete command" }
             deleteApproved = true
         }
@@ -418,6 +475,7 @@ enum BrainTools {
     }
 
     private static func requestApproval(_ title: String, _ detail: String,
+                                        call: BrainToolCall, context: Context,
                                         emit: @escaping (BrainEvent) -> Void) async -> Bool {
         emit(.approvalRequested(name: title, detail: detail))
         // Headless --yes: approve without touching the UI layer (the MainActor
@@ -432,6 +490,13 @@ enum BrainTools {
         }
         let approved = await ApprovalCenter.shared.request(title: "Brain · \(title)", detail: detail)
         emit(.approvalResolved(approved: approved))
+        // Single adjudication point: button, Esc-dismiss and the 15-minute
+        // timeout all resolve through the line above, so the growth ledger
+        // sees one event per request and never a duplicate (§5.12 G2).
+        context.recordApproval?(ApprovalEvent(
+            callID: call.callID, name: call.name,
+            detail: String(detail.prefix(200)),
+            approved: approved, at: Date()))
         return approved
     }
 
@@ -508,7 +573,8 @@ enum BrainTools {
         if !deletionTargets.isEmpty {
             let approved = await requestApproval(
                 "apply_patch deletes \(deletionTargets.count) file\(deletionTargets.count == 1 ? "" : "s")",
-                deletionTargets.prefix(20).joined(separator: "\n"), emit: emit)
+                deletionTargets.prefix(20).joined(separator: "\n"),
+                call: call, context: context, emit: emit)
             guard approved else { return "error: user declined apply_patch (deletion)" }
         }
         let result = try ApplyPatch.apply(patch, workspaceRoot: context.workspaceRoot)
@@ -557,7 +623,7 @@ enum BrainTools {
         if spec.destructive {
             let approved = await requestApproval(
                 "cleaning tool \(call.name)",
-                prettyArgs(args), emit: emit)
+                prettyArgs(args), call: call, context: context, emit: emit)
             guard approved else { return "error: user declined \(call.name)" }
             // Approval already granted natively — clear ToolRegistry's gate.
             args["confirmed"] = true
@@ -643,7 +709,8 @@ enum BrainTools {
         // then runs unsandboxed; delete commands ask up front; other policies
         // start sandboxed.
         if context.turn.approvalPolicy == .untrusted {
-            let approved = await requestApproval("exec_command (untrusted project)", command, emit: emit)
+            let approved = await requestApproval("exec_command (untrusted project)", command,
+                                                 call: call, context: context, emit: emit)
             guard approved else { return "error: user declined to run command" }
             guard let session = registry.start(
                 command: command, cwd: cwd, mode: .dangerFullAccess,
@@ -661,7 +728,8 @@ enum BrainTools {
         if context.turn.approvalPolicy != .never,
            BrainSandbox.involvesDeletion(command) {
             let approved = await requestApproval(
-                "exec_command — this command deletes files", command, emit: emit)
+                "exec_command — this command deletes files", command,
+                call: call, context: context, emit: emit)
             guard approved else { return "error: user declined the delete command" }
             deleteApproved = true
         }
@@ -825,7 +893,8 @@ enum BrainTools {
         // the interactive approval policies they pass the same gate shell
         // does (they used to run with NO prompt under every policy).
         if context.turn.approvalPolicy == .untrusted || context.turn.approvalPolicy == .onRequest {
-            let approved = await requestApproval("MCP tool \(call.name)", prettyArgs(args), emit: emit)
+            let approved = await requestApproval("MCP tool \(call.name)", prettyArgs(args),
+                                                 call: call, context: context, emit: emit)
             guard approved else { return "error: user declined \(call.name)" }
         }
         return try await client.callTool(name: tool, arguments: args)

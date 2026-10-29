@@ -174,12 +174,17 @@ enum UninstallEngine {
     /// Removes SYSTEM-level leftovers with an administrator prompt
     /// (AppleScript privileges — the GUI counterpart of mole's sudo).
     @MainActor
-    static func removeSystemLeftovers(_ files: [RelatedFile]) async -> [(String, String?)] {
+    static func removeSystemLeftovers(_ files: [RelatedFile],
+                                      progress: ((_ done: Int, _ total: Int, _ name: String) -> Void)? = nil)
+        async -> [(String, String?)] {
         var results: [(String, String?)] = []
-        for file in files {
+        let total = files.count
+        for (index, file) in files.enumerated() {
             let path = file.url.path
+            progress?(index, total, file.url.lastPathComponent)
             guard path.hasPrefix("/Library/") || path.hasPrefix("/private/var/db/receipts/") else {
                 results.append((path, "not a system path"))
+                progress?(index + 1, total, file.url.lastPathComponent)
                 continue
             }
             do {
@@ -189,6 +194,7 @@ enum UninstallEngine {
             } catch {
                 results.append((path, error.localizedDescription))
             }
+            progress?(index + 1, total, file.url.lastPathComponent)
         }
         return results
     }
@@ -302,11 +308,22 @@ enum UninstallEngine {
         let failed: [(String, String)]
     }
 
+    /// Uninstalls one app plus its related files.
+    ///
+    /// `progress` reports (done, total, current name) over the app bundle and
+    /// every related file: an app with hundreds of leftovers takes long enough
+    /// that a static page reads as a hang.
     @MainActor
-    static func uninstall(app: AppEntry, files: [RelatedFile], removeData: Bool) async -> UninstallResult {
+    static func uninstall(app: AppEntry, files: [RelatedFile], removeData: Bool,
+                          progress: ((_ done: Int, _ total: Int, _ name: String) -> Void)? = nil)
+        async -> UninstallResult {
         var removed: [String] = []
         var failed: [(String, String)] = []
         var appOK = false
+        let dataFiles = removeData ? files.filter(\.deletable) : []
+        let total = 1 + dataFiles.count
+        var done = 0
+        progress?(done, total, app.name)
 
         // App bundle removal (works for user-writable /Applications subfolders and ~/Applications).
         // removed/failed carry full paths so the history audit can show exactly what happened.
@@ -320,30 +337,35 @@ enum UninstallEngine {
         } catch {
             failed.append((app.url.path, error.localizedDescription))
         }
+        done += 1
+        progress?(done, total, app.name)
 
-        if removeData {
-            for file in files where file.deletable {
-                // Same bundle-scoped-preferences exemption as relatedFiles —
-                // otherwise the row is deletable in the UI but blocked here.
-                let prefExempt: Bool
-                if let bid = app.bundleID {
-                    prefExempt = file.url.path.hasSuffix("/\(bid).plist")
-                        || (file.url.path.contains("/Library/Preferences/")
-                            && file.url.lastPathComponent.hasPrefix(bid + "."))
-                } else {
-                    prefExempt = false
-                }
-                guard SafetyGuard.checkDeletable(file.url).allowed || prefExempt else {
-                    failed.append((file.url.path, "blocked by safety guard"))
-                    continue
-                }
-                do {
-                    try await Task.detached { try FileManager.default.removeItem(at: file.url) }.value
-                    removed.append(file.url.path)
-                } catch {
-                    failed.append((file.url.path, error.localizedDescription))
-                }
+        for file in dataFiles {
+            progress?(done, total, file.url.lastPathComponent)
+            // Same bundle-scoped-preferences exemption as relatedFiles —
+            // otherwise the row is deletable in the UI but blocked here.
+            let prefExempt: Bool
+            if let bid = app.bundleID {
+                prefExempt = file.url.path.hasSuffix("/\(bid).plist")
+                    || (file.url.path.contains("/Library/Preferences/")
+                        && file.url.lastPathComponent.hasPrefix(bid + "."))
+            } else {
+                prefExempt = false
             }
+            guard SafetyGuard.checkDeletable(file.url).allowed || prefExempt else {
+                failed.append((file.url.path, "blocked by safety guard"))
+                done += 1
+                progress?(done, total, file.url.lastPathComponent)
+                continue
+            }
+            do {
+                try await Task.detached { try FileManager.default.removeItem(at: file.url) }.value
+                removed.append(file.url.path)
+            } catch {
+                failed.append((file.url.path, error.localizedDescription))
+            }
+            done += 1
+            progress?(done, total, file.url.lastPathComponent)
         }
         return UninstallResult(appTrashed: appOK, removedFiles: removed, failed: failed)
     }

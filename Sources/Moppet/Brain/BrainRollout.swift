@@ -13,6 +13,9 @@ enum BrainRollout {
         let originator: String
         let cliVersion: String
         let instructions: String?
+        /// Which harness produced this session (`HarnessStore.fingerprint`).
+        /// Optional so pre-P2 rollouts still decode.
+        var harnessFingerprint: String?
     }
 
     enum Record: Codable {
@@ -22,6 +25,10 @@ enum BrainRollout {
         /// codex CompactedItem — written by /compact; on resume the summary
         /// re-enters the transcript as a user-context message.
         case compacted(summary: String)
+        /// One turn's signals + verdict inputs (design doc §5.6 / §5.12).
+        case turnOutcome(TurnOutcome)
+        /// A user decision on an approval request (§5.12, G2).
+        case approvalEvent(ApprovalEvent)
 
         private enum CodingKeys: String, CodingKey { case type, payload, summary }
 
@@ -36,6 +43,10 @@ enum BrainRollout {
                 self = .responseItem(try c.decode(BrainResponseItem.self, forKey: .payload))
             case "compacted":
                 self = .compacted(summary: try c.decode(String.self, forKey: .summary))
+            case "turn_outcome":
+                self = .turnOutcome(try c.decode(TurnOutcome.self, forKey: .payload))
+            case "approval_event":
+                self = .approvalEvent(try c.decode(ApprovalEvent.self, forKey: .payload))
             default:
                 throw DecodingError.dataCorruptedError(forKey: .type, in: c, debugDescription: "unknown record")
             }
@@ -56,11 +67,26 @@ enum BrainRollout {
             case .compacted(let summary):
                 try c.encode("compacted", forKey: .type)
                 try c.encode(summary, forKey: .summary)
+            case .turnOutcome(let outcome):
+                try c.encode("turn_outcome", forKey: .type)
+                try c.encode(outcome, forKey: .payload)
+            case .approvalEvent(let event):
+                try c.encode("approval_event", forKey: .type)
+                try c.encode(event, forKey: .payload)
             }
         }
     }
 
+    /// Test seam: point rollouts at a temp directory so smoke runs can build
+    /// synthetic sessions (divergence detection and the shadow prober both
+    /// read real transcripts) without touching the user's history.
+    static var rootOverride: URL?
+
     static var directory: URL {
+        if let rootOverride {
+            try? FileManager.default.createDirectory(at: rootOverride, withIntermediateDirectories: true)
+            return rootOverride
+        }
         let url = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".moppet/brain/sessions")
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
@@ -132,6 +158,7 @@ enum BrainRollout {
                 case .turnContext(let c): context = c
                 case .responseItem(let item): items.append(item)
                 case .sessionMeta: break
+                case .turnOutcome, .approvalEvent: break   // signals, not transcript
                 case .compacted(let summary):
                     // Everything compressible BEFORE this record is gone by
                     // definition — resuming must not resurrect it (the old
@@ -196,6 +223,23 @@ enum BrainRollout {
         return nil
     }
 
+    /// Every record with its 1-based line number. **The line number is the
+    /// canonical coordinate for evidence citations** (design doc §5.12, I2):
+    /// `compacted` rewrites the in-memory item list, but lines never move.
+    static func records(sessionID: String) -> [(line: Int, record: Record)] {
+        guard let text = try? String(contentsOf: fileURL(for: sessionID), encoding: .utf8) else {
+            return []
+        }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        var out: [(Int, Record)] = []
+        for (index, line) in text.split(separator: "\n", omittingEmptySubsequences: true).enumerated() {
+            guard let record = try? decoder.decode(Record.self, from: Data(line.utf8)) else { continue }
+            out.append((index + 1, record))
+        }
+        return out
+    }
+
     private static func readRecords(at url: URL) -> [Record]? {
         guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
         let decoder = JSONDecoder()
@@ -222,10 +266,25 @@ enum BrainInstructions {
     static let brainHome = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".moppet")
 
-    /// System prompt = user persona (soul) first, then codex-style operating rules.
+    /// System prompt = user persona (soul) first, then the harness tree
+    /// (`~/.moppet/brain/harness/`), with the environment block injected at
+    /// runtime. P0: the tree is seeded from `legacySystemPrompt`, so this is a
+    /// no-op until the user edits a file — the acceptance test asserts exactly
+    /// that (design doc §9, P0).
     static func systemPrompt(cwd: String, sandboxMode: BrainSandboxMode,
                              approvalPolicy: BrainApprovalPolicy,
                              networkAccess: Bool = false) -> String {
+        HarnessStore.composeSystemPrompt(
+            cwd: cwd, sandboxMode: sandboxMode,
+            approvalPolicy: approvalPolicy, networkAccess: networkAccess)
+    }
+
+    /// The pre-harness implementation, kept verbatim as the last fallback in the
+    /// degradation chain and as the reference the P0 byte-diff test compares to.
+    /// Do not edit: `PetHarness.seed` is the editable copy now.
+    static func legacySystemPrompt(cwd: String, sandboxMode: BrainSandboxMode,
+                                   approvalPolicy: BrainApprovalPolicy,
+                                   networkAccess: Bool = false) -> String {
         let name = PetIdentity.name
         var prompt = ""
         if let persona = PetIdentity.persona {

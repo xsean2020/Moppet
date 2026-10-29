@@ -119,7 +119,17 @@ struct ChatView: View {
             // Next runloop: openWindow creates the window asynchronously —
             // focusing synchronously during onAppear can reach IMK while the
             // window isn't key yet (IMKCFRunLoopWakeUpReliable log noise).
-            DispatchQueue.main.async { inputFocused = true }
+            // Focus only once Moppet is active AND this window is key.
+            // Focusing from a background context starts an IME session the
+            // app doesn't own yet — macOS logs the IMK/TSM diagnostics and
+            // the first Chinese keystroke can be dropped (see TextFocus).
+            TextFocus.whenReady({
+                NSApp.isActive
+                    && NSApp.keyWindow?.identifier?.rawValue == WindowRouter.chatWindowID
+                    && NSApp.keyWindow?.isKeyWindow == true
+            }) {
+                inputFocused = true
+            }
             aiSettings = AISettings.load()
             UserInputCenter.chatSurfaceVisible = true
             // While the chat window lives, it can also reopen both windows

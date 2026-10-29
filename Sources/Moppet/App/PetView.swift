@@ -139,9 +139,15 @@ final class MolePuppet {
         // camera & lights
         let camera = SCNNode()
         camera.camera = SCNCamera()
-        camera.camera?.fieldOfView = 34
-        camera.position = SCNVector3(0, 0.28, 1.55)
-        camera.look(at: SCNVector3(0, 0.02, 0))
+        // Framing so the WHOLE puppet fits: the claws reach forward (z≈0.2)
+        // toward the viewer, and the old 34° camera at z=1.55 clipped their
+        // tips (and the ground shadow) at the viewport's bottom edge — the
+        // reported "pet's feet are cut off". A wider field of view with a
+        // slightly lower, farther camera leaves margin below the feet and
+        // above the ear tips (incl. the celebrating hop).
+        camera.camera?.fieldOfView = 39
+        camera.position = SCNVector3(0, 0.32, 1.6)
+        camera.look(at: SCNVector3(0, -0.04, 0))
         scene.rootNode.addChildNode(camera)
 
         let key = SCNNode()
@@ -483,6 +489,41 @@ struct MoleSceneView: NSViewRepresentable {
 
 // MARK: - Pet interaction (AppKit layer)
 
+/// Invisible marker view: "this rectangle is real, clickable content".
+/// Attached as a background to the bubble / question / approval cards; the
+/// mole's PetInteractionNSView doubles as its own marker.
+final class HitRegionView: NSView {}
+
+struct HitRegion: NSViewRepresentable {
+    func makeNSView(context: Context) -> HitRegionView { HitRegionView() }
+    func updateNSView(_ view: HitRegionView, context: Context) {}
+}
+
+/// Hosting view for the pet panel. The panel can be MUCH wider than the mole
+/// while a wide answer is showing (adaptive bubble width) — the empty
+/// transparent space must fall through to the apps underneath instead of
+/// swallowing clicks. A click only belongs to Moppet when it lands on real
+/// content (a hit-region marker or the mole interaction layer).
+final class PetPanelHostingView<Content: View>: NSHostingView<Content> {
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard let superview else { return super.hitTest(point) }
+        // `point` arrives in the superview's coordinate space.
+        let local = convert(point, from: superview)
+        return containsHitRegion(local) ? super.hitTest(point) : nil
+    }
+
+    private func containsHitRegion(_ point: NSPoint) -> Bool {
+        func walk(_ view: NSView) -> Bool {
+            if view is HitRegionView || view is PetInteractionNSView,
+               view.bounds.contains(view.convert(point, from: self)) {
+                return true
+            }
+            return view.subviews.contains(where: walk)
+        }
+        return walk(self)
+    }
+}
+
 /// Click/double-click/drag/cursor/right-click layer that sits ON TOP of the
 /// 3D scene.
 ///
@@ -637,6 +678,89 @@ struct PetBubbleContent: View {
     }
 }
 
+/// Scroll metrics reported by the bubble's scrolling viewport.
+private struct BubbleContentMetrics: Equatable {
+    var contentHeight: CGFloat = 0
+    var offset: CGFloat = 0
+}
+
+private struct BubbleContentMetricsKey: PreferenceKey {
+    static var defaultValue = BubbleContentMetrics()
+    static func reduce(value: inout BubbleContentMetrics, nextValue: () -> BubbleContentMetrics) {
+        value = nextValue()
+    }
+}
+
+private struct BubbleViewportHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
+/// Coordinate space shared by SlimScrollView's offset reader (statics are not
+/// allowed on generic types).
+private enum BubbleScrollSpace {
+    static let name = "petBubbleScroll"
+}
+
+/// Vertical ScrollView with a SLIM custom indicator. The system overlay thumb
+/// (wide capsule + groove) read as a heavy bar inside the small speech card —
+/// this one is a 3pt rounded sliver that only appears while the content
+/// actually overflows, and tracks the scroll position smoothly.
+struct SlimScrollView<Content: View>: View {
+    @ViewBuilder var content: () -> Content
+
+    @State private var metrics = BubbleContentMetrics()
+    @State private var viewportHeight: CGFloat = 0
+
+    var body: some View {
+        ScrollView(.vertical, showsIndicators: false) {
+            content()
+                .background(
+                    GeometryReader { geo in
+                        Color.clear.preference(
+                            key: BubbleContentMetricsKey.self,
+                            value: BubbleContentMetrics(
+                                contentHeight: geo.size.height,
+                                offset: -geo.frame(in: .named(BubbleScrollSpace.name)).minY))
+                    }
+                )
+        }
+        .coordinateSpace(name: BubbleScrollSpace.name)
+        .background(
+            GeometryReader { geo in
+                Color.clear.preference(key: BubbleViewportHeightKey.self, value: geo.size.height)
+            }
+        )
+        .onPreferenceChange(BubbleContentMetricsKey.self) { metrics = $0 }
+        .onPreferenceChange(BubbleViewportHeightKey.self) { viewportHeight = $0 }
+        .overlay(alignment: .trailing) { indicator }
+        // Scrolling content must not paint past the card's rounded corners.
+        .clipShape(RoundedRectangle(cornerRadius: Airi.radiusCard, style: .continuous))
+    }
+
+    private var overflow: CGFloat { metrics.contentHeight - viewportHeight }
+
+    @ViewBuilder
+    private var indicator: some View {
+        if overflow > 1, viewportHeight > 0, metrics.contentHeight > 0 {
+            let track = viewportHeight - 12
+            let length = max(28, track * viewportHeight / metrics.contentHeight)
+            let fraction = overflow > 0
+                ? min(1, max(0, metrics.offset / overflow))
+                : 0
+            Capsule()
+                .fill(Airi.neutral400.opacity(0.5))
+                .frame(width: 3, height: length)
+                .frame(maxHeight: .infinity, alignment: .top)
+                .padding(.vertical, 6)
+                .padding(.trailing, 3)
+                .offset(y: fraction * max(0, track - length))
+                .animation(.easeOut(duration: 0.12), value: fraction)
+                .allowsHitTesting(false)
+        }
+    }
+}
+
 /// The speech-bubble card exactly as the pet renders it: hug short answers,
 /// scroll long ones, never taller than `maxHeight`.
 struct PetBubbleCard: View {
@@ -650,12 +774,13 @@ struct PetBubbleCard: View {
             // Concrete height: a greedy ScrollView would make the whole
             // ViewThatFits flexible and the parent VStack would stretch the
             // bubble to fill the panel for even two lines of text.
-            ScrollView(.vertical, showsIndicators: true) {
-                content
-            }
-            .frame(height: maxHeight)
+            SlimScrollView { content }
+                .frame(height: maxHeight)
         }
         .frame(width: width)
+        // Marks the card as clickable content for PetPanelHostingView's
+        // pass-through hit-testing (the panel is wider than the mole).
+        .background(HitRegion())
         .background(
             RoundedRectangle(cornerRadius: Airi.radiusCard, style: .continuous)
                 .fill(Airi.cardBackground)
@@ -675,10 +800,15 @@ struct PetBubbleCard: View {
 /// `--probe-pet-bubble`: lay the bubble out inside a pet-panel-sized VStack
 /// (mole replaced by a flexible filler) and print the height it actually
 /// gets. Short text must hug its content; long text must stop at the cap.
+/// The second pass mirrors the REAL layout chain (card + reserved mole strip)
+/// and asserts the mole keeps its height — the "pet disappeared behind a wide
+/// answer" regression.
 @MainActor
 enum PetBubbleProbe {
     private final class Store {
         var heights: [String: CGFloat] = [:]
+        var moleHeights: [String: CGFloat] = [:]
+        var natural: [String: CGFloat] = [:]
     }
 
     static func run() -> Never {
@@ -691,7 +821,7 @@ enum PetBubbleProbe {
         for (panelW, panelH) in cases {
             for (label, text) in texts {
                 let key = "\(label) \(Int(panelW))x\(Int(panelH))"
-                let width = PetView.bubbleWidth(for: text, panelWidth: panelW)
+                let width = PetView.bubbleWidth(for: text, maxWidth: panelW - 24)
                 let cap = max(96, min(208, panelH * 0.62))
                 let host = NSHostingView(rootView:
                     VStack(spacing: 4) {
@@ -710,9 +840,51 @@ enum PetBubbleProbe {
                 RunLoop.main.run(until: Date().addingTimeInterval(0.15))
                 print("probe \(key): bubbleH=\(Int(store.heights[key] ?? -1)) cap=\(Int(cap)) "
                       + "width=\(Int(width)) fits=\((store.heights[key] ?? 999) <= cap)")
+
+                // --- Full chain: does the mole survive a long answer? ---
+                let moleH = max(120, panelH - 130)
+                let naturalHost = NSHostingView(rootView:
+                    PetBubbleContent(message: text, width: width)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .background(GeometryReader { g in
+                            Color.clear.onAppear { store.natural[key] = g.size.height }
+                        })
+                )
+                naturalHost.frame = NSRect(x: 0, y: 0, width: width, height: 2000)
+                naturalHost.layoutSubtreeIfNeeded()
+                RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+                let natural = store.natural[key] ?? 60
+                let cardH = min(max(natural + 2, 48), max(80, panelH - moleH - 10))
+                let targetH = max(panelH, cardH + 4 + moleH + 6)
+                let fullHost = NSHostingView(rootView:
+                    VStack(spacing: 4) {
+                        PetBubbleCard(message: text, width: width, maxHeight: cardH)
+                        Color.clear
+                            .aspectRatio(230.0 / 270.0, contentMode: .fit)
+                            .frame(maxWidth: max(120, panelW - 20),
+                                   maxHeight: max(120, panelH - 130))
+                            .frame(maxWidth: .infinity, alignment: .trailing)
+                            .padding(.trailing, 10)
+                            .layoutPriority(-1)
+                            .background(GeometryReader { g in
+                                Color.clear.onAppear { store.moleHeights[key] = g.size.height }
+                            })
+                    }
+                    .frame(width: panelW, height: targetH)
+                )
+                fullHost.frame = NSRect(x: 0, y: 0, width: panelW, height: targetH)
+                fullHost.layoutSubtreeIfNeeded()
+                RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+                let mole = store.moleHeights[key] ?? -1
+                let estimate = PetView.bubbleHeight(for: text, width: width)
+                print("probe \(key): cardH=\(Int(cardH)) panelH=\(Int(targetH)) "
+                      + "moleH=\(Int(mole)) moleKept=\(mole >= moleH - 2) "
+                      + "natural=\(Int(natural)) estimate=\(Int(estimate))")
             }
         }
-        exit(store.heights.count == cases.count * texts.count ? 0 : 2)
+        let ok = store.heights.count == cases.count * texts.count
+            && store.moleHeights.values.allSatisfy { $0 >= 118 }
+        exit(ok ? 0 : 2)
     }
 }
 
@@ -755,15 +927,30 @@ struct PetView: View {
                     buildMenu: petMenu
                 )
             }
+            // Keep the scene's canonical 230×270 aspect: when a tall answer
+            // squishes the vertical space the scene shrinks UNIFORMLY. A
+            // plain resize goes landscape, and the camera's field of view
+            // follows the larger viewport axis — that squeezed the frustum
+            // vertically and cut the feet off.
+            .aspectRatio(230.0 / 270.0, contentMode: .fit)
             .frame(maxWidth: max(120, PetSettings.currentSize.width - 20),
                    maxHeight: max(120, PetSettings.currentSize.height - 130))
+            // The panel widens LEFTWARD while a wide answer is showing; the
+            // mole must stay pinned at the panel's trailing edge (10pt margin,
+            // matching the old centered 230-in-250 layout) so the pet itself
+            // never moves on screen.
+            .frame(maxWidth: .infinity, alignment: .trailing)
+            .padding(.trailing, 10)
             // The bubble/approval card win the vertical budget first; the
             // mole flexes shorter while a long answer is up (fixed 270 +
             // a tall bubble overflowed the 400pt panel).
             .layoutPriority(-1)
         }
-        .frame(width: PetSettings.currentSize.width,
-               height: PetSettings.currentSize.height)
+        .frame(width: targetPanelWidth,
+               height: targetPanelHeight)
+        .onChange(of: targetPanelSize) { _, size in
+            syncPanelSize(size)
+        }
         .onChange(of: bus.messageID) { _, _ in
             bubbleHideTask?.cancel()
             withAnimation(Airi.controlAnimation) { bubbleVisible = true }
@@ -811,18 +998,17 @@ struct PetView: View {
 
     // MARK: Speech bubble
 
-    /// Content-hugging bubble width: a short message sits compactly on one
-    /// line, a long one wraps at the panel-wide cap. MarkdownUI's own ideal
-    /// width is unreliable for this, so the width is estimated per character
-    /// (CJK/emoji/fullwidth ≈ 13pt at font 12, ASCII ≈ 7.2pt) over the
-    /// longest line.
-    /// Bubble width for `message`, clamped to the PANEL that hosts it.
+    /// Measured bubble TEXT width for `message`, clamped to `maxWidth`:
+    /// a short message sits compactly on one line, a long one wraps at the
+    /// available width. MarkdownUI's own ideal width is unreliable for this,
+    /// so the width is estimated per character (CJK/emoji/fullwidth ≈ 13pt
+    /// at font 12, ASCII ≈ 7.2pt) over the longest line.
     ///
-    /// The old version capped at a hardcoded 232pt. The pet panel is
-    /// 250×sizeScale wide (200pt at the 0.8 scale), so a 232pt card overflowed
-    /// the window: the card edge and the right end of every line were clipped
-    /// away (the reported "bubble content is not complete").
-    static func bubbleWidth(for message: String, panelWidth: CGFloat) -> CGFloat {
+    /// The old version capped the card at the 250pt pet panel; a long answer
+    /// wrapped into a skinny strip that was hard to read. `maxWidth` now
+    /// derives from the room between the pet's right edge and the screen's
+    /// left edge, so the bubble can stretch toward the screen edge.
+    static func bubbleWidth(for message: String, maxWidth: CGFloat) -> CGFloat {
         func lineWidth(_ line: Substring) -> CGFloat {
             line.reduce(CGFloat(0)) { acc, ch in
                 acc + (ch.unicodeScalars.first.map { $0.value > 0x2E80 ? 13 : 7.2 } ?? 7.2)
@@ -832,24 +1018,130 @@ struct PetView: View {
             .split(separator: "\n", omittingEmptySubsequences: false)
             .map(lineWidth)
             .max() ?? 0
-        // 12pt breathing room on each side of the panel, and the text padding
-        // (10pt × 2) plus the card border stay inside it.
-        let cap = max(96, panelWidth - 24)
-        return min(cap, max(80, longest + 20))
+        let cap = max(96, maxWidth)
+        return min(cap, max(80, longest + 22))
+    }
+
+    /// Widest the bubble TEXT may get: the room from the panel's right edge
+    /// to 16pt from the screen's left edge — mirroring the pet's own 16pt
+    /// right margin, so both sides stay consistent — with a readability
+    /// ceiling of 560pt (≈ 40 CJK characters per line at font 12). Falls
+    /// back to the base panel width when no screen can be resolved.
+    private var maxBubbleTextWidth: CGFloat {
+        let base = PetSettings.currentSize.width - 24
+        guard let panel else { return base }
+        let visible = panel.screen?.visibleFrame ?? panel.frame
+        let room = panel.frame.maxX - visible.minX - 16 - 24
+        return max(base, min(560, room))
     }
 
     private var bubbleWidth: CGFloat {
-        Self.bubbleWidth(for: bus.message, panelWidth: PetSettings.currentSize.width)
+        Self.bubbleWidth(for: bus.message, maxWidth: maxBubbleTextWidth)
     }
 
-    /// Viewport height for a long answer: whatever the panel can spare after
-    /// the mole keeps a usable strip, never the hardcoded 208.
+    /// Panel width the layout wants: the base pet size while the bubble is
+    /// hidden, wide enough for the whole bubble card while it shows.
+    private var targetPanelWidth: CGFloat {
+        guard bubbleVisible else { return PetSettings.currentSize.width }
+        return max(PetSettings.currentSize.width, bubbleWidth + 24)
+    }
+
+    // MARK: Vertical budget
+    //
+    // The mole's strip is RESERVED, never negotiable: a wide card made long
+    // answers fit without scrolling, ViewThatFits then handed the whole panel
+    // height to the card and squeezed the mole into a 50pt sliver (the "pet
+    // disappeared" report). Instead the panel GROWS UPWARD — bottom edge
+    // pinned so the pet stays put — and only when the screen runs out does the
+    // card start scrolling.
+
+    /// Height kept for the mole (its canonical 270pt at the default scale).
+    private var moleHeight: CGFloat {
+        max(120, PetSettings.currentSize.height - 130)
+    }
+
+    /// Room left for the card: everything between the mole's strip and 8pt
+    /// below the screen's top edge, with a design ceiling so a giant answer
+    /// can't turn the pet into a full-screen reader (it scrolls instead).
+    private var bubbleHardCap: CGFloat {
+        let designCeiling = max(300, PetSettings.currentSize.height * 1.3)
+        guard let panel else { return designCeiling }
+        let visible = panel.screen?.visibleFrame ?? panel.frame
+        let room = visible.maxY - 8 - panel.frame.minY - moleHeight - 10
+        return max(120, min(designCeiling, room))
+    }
+
+    /// Card height: the ESTIMATED content height (hugs short answers, shows
+    /// whole long ones) capped by the room above the mole's strip. The card
+    /// itself never exceeds this (ViewThatFits switches to scrolling), so a
+    /// sloppy estimate can only cost a little extra scrolling — it can never
+    /// squeeze the mole out of the panel again.
+    private var bubbleCardHeight: CGFloat {
+        guard bubbleVisible else { return 1 }
+        let estimate = Self.bubbleHeight(for: bus.message, width: bubbleWidth)
+        return min(max(estimate, 48), bubbleHardCap)
+    }
+
+    /// Estimated laid-out height of `message` in the bubble (font 12
+    /// MarkdownUI basic theme): wraps every line at the card's text width,
+    /// charges 17.5pt per wrapped line, 3pt between blocks and the card's
+    /// 14pt vertical padding, then a 6% safety margin.
+    ///
+    /// A deterministic estimate is used on purpose: the panel resizes itself
+    /// while SwiftUI lays it out, and preference-based measurement never
+    /// updated past the first layout pass in that setup (verified with
+    /// `--probe-pet-panel`), which left the card eating the mole's height.
+    static func bubbleHeight(for message: String, width: CGFloat) -> CGFloat {
+        let textWidth = max(60, width - 20)
+        let lineHeight: CGFloat = 17.5
+        var height: CGFloat = 14          // card vertical padding (7 × 2)
+        var blocks = 0
+        for line in message.split(separator: "\n", omittingEmptySubsequences: false) {
+            let trimmed = line.drop(while: { $0 == " " || $0 == "\t" })
+            // List items are indented by the marker gutter (~16pt) and get
+            // their own block spacing.
+            let isListItem = trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ")
+                || trimmed.hasPrefix("+ ") || trimmed.first?.isNumber == true && trimmed.contains(". ")
+            let indent: CGFloat = isListItem ? 16 : 0
+            let usable = max(40, textWidth - indent)
+            let lineWidth = line.reduce(CGFloat(0)) { acc, ch in
+                acc + (ch.unicodeScalars.first.map { $0.value > 0x2E80 ? 12.2 : 6.9 } ?? 6.9)
+            }
+            let wrapped = max(1, ceil(lineWidth / usable))
+            height += wrapped * lineHeight
+            if !trimmed.isEmpty {
+                blocks += 1
+                if blocks > 1 { height += 3 }
+            }
+        }
+        return height * 1.06 + 4
+    }
+
+    private var targetPanelHeight: CGFloat {
+        guard bubbleVisible else { return PetSettings.currentSize.height }
+        return max(PetSettings.currentSize.height, bubbleCardHeight + 4 + moleHeight + 6)
+    }
+
+    private var targetPanelSize: CGSize {
+        CGSize(width: targetPanelWidth, height: targetPanelHeight)
+    }
+
+    /// Resize the hosting panel so the layout's target size becomes real. The
+    /// RIGHT edge and BOTTOM stay pinned — the pet never moves; the bubble
+    /// grows leftward and upward, into the empty desktop area.
+    private func syncPanelSize(_ size: CGSize) {
+        guard let panel else { return }
+        let frame = panel.frame
+        guard abs(frame.width - size.width) > 0.5 || abs(frame.height - size.height) > 0.5 else { return }
+        panel.setFrame(NSRect(x: frame.maxX - size.width, y: frame.minY,
+                              width: size.width, height: size.height),
+                       display: true)
+    }
+
+    /// Viewport height for a long answer when the screen itself is the limit
+    /// (kept for the bubble probe / smoke test).
     static func bubbleHeightCap(panelHeight: CGFloat) -> CGFloat {
         max(96, min(208, panelHeight * 0.62))
-    }
-
-    private var bubbleMaxHeight: CGFloat {
-        Self.bubbleHeightCap(panelHeight: PetSettings.currentSize.height)
     }
 
     private var bubble: some View {
@@ -864,10 +1156,10 @@ struct PetView: View {
                     // answers mid-sentence (read as "the bubble is broken").
                     // ViewThatFits keeps short messages hugging their content
                     // and only switches to a scrolling viewport when the text
-                    // would overflow the panel.
+                    // would overflow the height budget.
                     PetBubbleCard(message: bus.message,
                                   width: bubbleWidth,
-                                  maxHeight: bubbleMaxHeight)
+                                  maxHeight: bubbleCardHeight)
                 }
                 // Double-click the bubble → full chat window (which has a
                 // real close button in its header). contentShape keeps the
@@ -938,6 +1230,7 @@ struct PetView: View {
                 }
                 .padding(8)
                 .frame(width: 236, alignment: .leading)
+                .background(HitRegion())
                 .background(
                     RoundedRectangle(cornerRadius: Airi.radiusCard, style: .continuous)
                         .fill(Airi.cardBackground)
@@ -995,6 +1288,7 @@ struct PetView: View {
                 }
                 .padding(8)
                 .frame(width: 236, alignment: .leading)
+                .background(HitRegion())
                 .background(
                     RoundedRectangle(cornerRadius: Airi.radiusCard, style: .continuous)
                         .fill(Airi.cardBackground)

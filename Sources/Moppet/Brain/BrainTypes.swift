@@ -68,22 +68,27 @@ struct BrainTurnContext: Codable {
     var model: String
     var networkAccess: Bool?
     var writableRoots: [String]?
+    /// When this turn began — the anchor `wallSeconds` and the
+    /// "re-asked within 120s" signal need (design doc §5.12, G3).
+    var startedAt: Date?
 
     init(cwd: String, sandboxMode: BrainSandboxMode,
          approvalPolicy: BrainApprovalPolicy, model: String,
-         networkAccess: Bool? = nil, writableRoots: [String]? = nil) {
+         networkAccess: Bool? = nil, writableRoots: [String]? = nil,
+         startedAt: Date? = nil) {
         self.cwd = cwd
         self.sandboxMode = sandboxMode
         self.approvalPolicy = approvalPolicy
         self.model = model
         self.networkAccess = networkAccess
         self.writableRoots = writableRoots
+        self.startedAt = startedAt
     }
 
     // Keys stay camelCase (the pre-synthesized encoding) so existing rollout
-    // files keep decoding; only the two new fields are optional additions.
+    // files keep decoding; only the new fields are optional additions.
     private enum CodingKeys: String, CodingKey {
-        case cwd, sandboxMode, approvalPolicy, model, networkAccess, writableRoots
+        case cwd, sandboxMode, approvalPolicy, model, networkAccess, writableRoots, startedAt
     }
 
     init(from decoder: Decoder) throws {
@@ -94,6 +99,7 @@ struct BrainTurnContext: Codable {
         model = try c.decode(String.self, forKey: .model)
         networkAccess = try c.decodeIfPresent(Bool.self, forKey: .networkAccess)
         writableRoots = try c.decodeIfPresent([String].self, forKey: .writableRoots)
+        startedAt = try c.decodeIfPresent(Date.self, forKey: .startedAt)
     }
 }
 

@@ -15,7 +15,10 @@ struct UninstallView: View {
     @State private var selectedApps: Set<String> = []
     @State private var loading = true
     @State private var batchRunning = false
-    @State private var batchProgress: (done: Int, total: Int)? = nil
+    /// Progress of whatever destructive batch is running (batch uninstall,
+    /// single uninstall, or the admin leftover sweep) — one source of truth
+    /// for both the inline pill and the center overlay.
+    @State private var batch: BatchProgress?
     @State private var batchResult: UninstallEngine.BatchOutcome?
     @State private var searchText = ""
     @State private var selection: UninstallEngine.AppEntry?
@@ -85,6 +88,10 @@ struct UninstallView: View {
             }
         }
         .background(Airi.pageBackground.opacity(0.001))
+        .overlay {
+            if let batch { BatchProgressOverlay(progress: batch) }
+        }
+        .animation(Airi.controlAnimation, value: batch == nil)
         .confirmationDialog(
             Text(String(format: L("Uninstall %lld apps + data (%@)?"), pickedApps.count, pickedBytes.bytesFormatted)),
             isPresented: $confirmingBatch,
@@ -205,10 +212,10 @@ struct UninstallView: View {
                     .foregroundStyle(Airi.neutral500)
                     .animation(.spring(response: 0.4, dampingFraction: 0.9), value: progress.done)
                 }
-                if batchRunning, let progress = batchProgress {
+                if batchRunning, let progress = batch, let count = progress.countText {
                     HStack(spacing: 4) {
                         ProgressView().controlSize(.small)
-                        Text("\(progress.done)/\(progress.total)")
+                        Text(count)
                             .font(Airi.caption2Font)
                             .foregroundStyle(Airi.neutral500)
                             .monospacedDigit()
@@ -255,7 +262,8 @@ struct UninstallView: View {
         let picked = pickedApps
         let currentSizes = sizes
         batchRunning = true
-        batchProgress = (0, picked.count)
+        batch = BatchProgress(title: L("Uninstalling…"), done: 0, total: picked.count)
+        let startedAt = Date()
         Task {
             // Make sure every app has a real size BEFORE trashing so the one
             // aggregated record carries correct per-path bytes.
@@ -292,8 +300,7 @@ struct UninstallView: View {
                     }
                 }
                 batchProgress = (index + 1, picked.count)
-            }
-            // ONE audit record for the whole batch — previously every app
+            }            // ONE audit record for the whole batch — previously every app
             // produced its own row, so a 5-app uninstall spammed History with
             // five 1-path entries at the same timestamp.
             if !outcome.trashed.isEmpty {

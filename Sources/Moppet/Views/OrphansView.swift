@@ -14,6 +14,8 @@ struct OrphansView: View {
     @State private var selected: Set<String> = []
     @State private var showTrashConfirm = false
     @State private var lastMessage: String?
+    /// Progress of the running trash batch — drives the center overlay.
+    @State private var batch: BatchProgress?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -60,6 +62,10 @@ struct OrphansView: View {
             bottomBar
         }
         .background(Airi.pageBackground.opacity(0.001))
+        .overlay {
+            if let batch { BatchProgressOverlay(progress: batch) }
+        }
+        .animation(Airi.controlAnimation, value: batch == nil)
         .confirmationDialog(
             Text(String(format: L("Move %lld orphan items to the Trash?"),
                         selectedItems.count)),
@@ -96,7 +102,17 @@ struct OrphansView: View {
     private func trashSelected() async {
         let picked = selectedItems
         guard !picked.isEmpty else { return }
-        let outcomes = await OrphanResidueEngine.trash(picked)
+        // Each residue item is an independent Trash move; a Library folder can
+        // take a second or two, so the batch needs a visible counter.
+        batch = BatchProgress(title: L("Moving to the Trash…"), done: 0, total: picked.count)
+        let startedAt = Date()
+        let outcomes = await OrphanResidueEngine.trash(picked) { done, total, name in
+            Task { @MainActor in
+                batch?.done = done
+                batch?.total = total
+                batch?.detail = name
+            }
+        }
         let ok = outcomes.filter(\.success)
         let failed = outcomes.filter { !$0.success }
         let freed = picked.filter { candidate in
@@ -119,6 +135,8 @@ struct OrphansView: View {
         cleaned = true
         candidates = []
         selected = []
+        await BatchProgressHold.until(startedAt)
+        batch = nil
         UXFeedback.success()
     }
 

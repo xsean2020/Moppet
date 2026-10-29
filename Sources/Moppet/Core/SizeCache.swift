@@ -116,6 +116,29 @@ final class SizeCache {
         persist()
     }
 
+    /// Drop the cached summary for `url` AND every ancestor up to the home
+    /// folder.
+    ///
+    /// Deleting a file bumps the mtime of its own parent directory only —
+    /// directories further up keep their old mtime (verified: same value
+    /// before and after a nested delete). Their cached `bytes` therefore
+    /// looked "still valid" and the Analyze view kept showing the pre-delete
+    /// size for every parent until the 3-day TTL. Callers that mutate a tree
+    /// must drop the whole chain.
+    func invalidate(_ url: URL) {
+        lock.lock(); defer { lock.unlock() }
+        var current = url.resolvingSymlinksInPath()
+        let home = FileManager.default.homeDirectoryForCurrentUser.resolvingSymlinksInPath()
+        while true {
+            store.removeValue(forKey: current.path)
+            if current.path == home.path || current.path == "/" { break }
+            let parent = current.deletingLastPathComponent()
+            if parent.path == current.path { break }
+            current = parent
+        }
+        persist()
+    }
+
     var count: Int {
         lock.lock(); defer { lock.unlock() }
         return store.count

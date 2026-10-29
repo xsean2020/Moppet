@@ -164,14 +164,26 @@ final class PetPanelController {
         panel.hidesOnDeactivate = false
         panel.ignoresMouseEvents = false
 
-        let view = NSHostingView(rootView: PetView(panel: panel))
+        // PetPanelHostingView (not plain NSHostingView): the panel can be
+        // much wider than the mole while a wide answer is showing, and its
+        // hitTest falls through everywhere except real content (mole,
+        // bubble, cards) — see PetPanelHostingView.
+        let view = PetPanelHostingView(rootView: PetView(panel: panel))
         panel.contentView = view
 
         // Restore the last dragged position when it still overlaps a real
-        // display; otherwise park bottom-right of the anchor screen.
+        // display; otherwise park bottom-right of the anchor screen. The
+        // saved frame can be WIDE/TALL (a big answer was showing at quit) —
+        // bubble size is re-derived at runtime, so restore only the position
+        // and the base size (right edge + bottom pinned, pet doesn't move).
         if let frame = PetSettings.savedFrame,
            NSScreen.screens.contains(where: { $0.visibleFrame.intersects(frame) }) {
-            panel.setFrame(frame, display: false)
+            var restored = frame
+            let size = PetSettings.currentSize
+            restored.size = size
+            restored.origin.x = frame.maxX - size.width
+            restored.origin.y = frame.minY
+            panel.setFrame(restored, display: false)
         } else if let screen = anchorScreen() {
             Self.placeAtBottomRight(panel: panel, of: screen)
         }
@@ -459,6 +471,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         PetPanelController.shared.show()
         MCPAppService.shared.restoreAtLaunch()
+        // First launch: materialise the harness tree from the compiled-in seed
+        // so the prompt is a file the user can read, diff and (later) edit.
+        // Idempotent — an existing tree is never overwritten (design doc §9, P0).
+        HarnessStore.ensureSeeded()
+        // P3: the only timer that ever calls Evolver.tick. Both growth
+        // switches default to off, so this is a no-op until the user opts in
+        // (design doc §9.4 question 1).
+        BrainGrowthScheduler.start()
         // Terminal-launched GUI apps start WITHOUT activation (isActive=false,
         // keyWindow=nil — verified via --win-debug): clicks still land
         // (click-through) but keyboard input goes nowhere. Activate properly

@@ -31,13 +31,14 @@ struct SettingsView: View {
     /// Section filter — the page used to be one 1200-line scroll through
     /// ten cards; the segmented filter keeps every card reachable in one hop.
     private enum Section: String, CaseIterable, Identifiable {
-        case all, general, ai, data, about
+        case all, general, ai, growth, data, about
         var id: String { rawValue }
         var label: String {
             switch self {
             case .all: L("All")
             case .general: L("General")
             case .ai: L("AI")
+            case .growth: L("Growth")
             case .data: L("Data & Safety")
             case .about: L("About")
             }
@@ -71,6 +72,12 @@ struct SettingsView: View {
                     if section == .all || section == .ai {
                         codexSubscriptionCard
                         aiCard
+                    }
+                    // Brain Growth has its own tab: its toggles and the
+                    // learning table are what people come here to flip, and
+                    // burying them under "AI" cost two clicks every time.
+                    if section == .all || section == .growth {
+                        BrainGrowthCard()
                     }
                     if section == .all || section == .data {
                         whitelistCard
