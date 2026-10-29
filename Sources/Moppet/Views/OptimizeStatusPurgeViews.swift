@@ -406,6 +406,7 @@ struct PurgeView: View {
     @State private var selected: Set<UUID> = []
     @State private var scanning = false
     @State private var purging = false
+    @State private var purgeProgress: BatchProgress?
     @State private var resultText: String?
     @State private var confirmingPurge = false
     /// Explicit focus plumbing for the root field (terminal-launched apps
@@ -441,8 +442,9 @@ struct PurgeView: View {
                             AiriButton(title: L("Select all"), variant: .secondary) {
                                 selected = Set(artifacts.map(\.id))
                             }
-                            AiriButton(title: L("Purge"), icon: "trash.fill", variant: .destructive,
-                                       disabled: selected.isEmpty || purging) { confirmingPurge = true }
+                            AiriButton(title: purging ? L("Purging…") : L("Purge"), icon: "trash.fill", variant: .destructive,
+                                       disabled: selected.isEmpty || purging,
+                                       busy: purging) { confirmingPurge = true }
                         }
                     }
                     if let resultText {
@@ -458,6 +460,10 @@ struct PurgeView: View {
             }
         }
         .background(Airi.pageBackground.opacity(0.001))
+        .overlay {
+            if let purgeProgress { BatchProgressOverlay(progress: purgeProgress) }
+        }
+        .animation(Airi.controlAnimation, value: purgeProgress == nil)
         .confirmationDialog(
             Text(String(format: L("Purge %lld directories (%@)?"), selected.count, selectedBytes.bytesFormatted)),
             isPresented: $confirmingPurge,
@@ -586,22 +592,38 @@ struct PurgeView: View {
     private func purge() {
         purging = true
         let chosen = artifacts.filter { selected.contains($0.id) }
+        purgeProgress = BatchProgress(title: L("Purging…"), done: 0, total: chosen.count)
+        let startedAt = Date()
         Task {
-            let results = await Task.detached { PurgeEngine.purge(chosen) }.value
-            let ok = results.filter { $0.1 == nil }
+            var ok: [(PurgeEngine.Artifact, String?)] = []
+            var failed: [(PurgeEngine.Artifact, String)] = []
+            for (index, artifact) in chosen.enumerated() {
+                purgeProgress?.detail = artifact.projectPath
+                let result = await Task.detached { PurgeEngine.purge([artifact]) }.value.first
+                if let result {
+                    if let err = result.1 {
+                        failed.append((result.0, err))
+                    } else {
+                        ok.append(result)
+                    }
+                }
+                purgeProgress?.done = index + 1
+            }
             let freed = ok.reduce(0) { $0 + $1.0.bytes }
             var text = String(format: L("Removed %lld directories · %@ freed"), ok.count, freed.bytesFormatted)
-            let failures = results.filter { $0.1 != nil }
-            if !failures.isEmpty {
-                text += "\n" + String(format: L("%lld failed"), failures.count) + ": " +
-                    failures.prefix(3).map { "\($0.0.kind): \($0.1!)" }.joined(separator: "; ")
+            if !failed.isEmpty {
+                text += "\n" + String(format: L("%lld failed"), failed.count) + ": " +
+                    failed.prefix(3).map { "\($0.0.kind): \($0.1)" }.joined(separator: "; ")
             }
             let record = CleanRecord(
                 date: Date(), sectionTitles: Array(Set(chosen.map(\.kind))).sorted(),
-                requestedBytes: freed, freedBytes: freed, itemCount: results.count,
-                items: results.map {
+                requestedBytes: freed, freedBytes: freed, itemCount: chosen.count,
+                items: ok.map {
                     CleanRecordItem(path: $0.0.url.path, bytes: $0.0.bytes, mode: .permanent,
-                                    success: $0.1 == nil, error: $0.1)
+                                    success: true, error: nil)
+                } + failed.map {
+                    CleanRecordItem(path: $0.0.url.path, bytes: $0.0.bytes, mode: .permanent,
+                                    success: false, error: $0.1)
                 }, source: .purge)
             HistoryStore.append(record)
             UXFeedback.success()
@@ -609,6 +631,8 @@ struct PurgeView: View {
             artifacts.removeAll { a in chosen.contains(where: { $0.id == a.id }) }
             selected = Set(artifacts.map(\.id))
             resultText = text
+            await BatchProgressHold.until(startedAt)
+            purgeProgress = nil
             purging = false
         }
     }

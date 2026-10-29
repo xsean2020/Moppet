@@ -241,9 +241,4 @@ struct OrphansView: View {
         .background(.ultraThinMaterial)
         .overlay(alignment: .top) { Divider().overlay(Airi.neutral200.opacity(0.5)) }
     }
-
-    private func pathDisplay(_ path: String) -> String {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        return path.hasPrefix(home) ? "~" + path.dropFirst(home.count) : path
-    }
 }

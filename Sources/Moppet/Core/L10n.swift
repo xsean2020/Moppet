@@ -165,6 +165,10 @@ private let zh: [String: String] = [
     "%@ deleted": "已删除 %@",
     "%lld related files deleted": "已删除 %lld 个关联文件",
     "Expand folders to size them — tick paths to delete": "展开目录测量大小——勾选路径永久删除",
+    "Measuring…": "测量中…",
+    "Opening %@…": "正在打开 %@…",
+    "Measuring big-file locations…": "正在测量大文件目录…",
+    "Measuring %@…": "正在测量 %@…",
     "Delete %lld": "删除 %lld",
     "Delete %lld items (%@) permanently?": "永久删除 %lld 个项目（%@）？",
     "Items are deleted permanently. This cannot be undone.": "项目将被永久删除，无法撤销。",
@@ -593,4 +597,5 @@ private let zh: [String: String] = [
     "Those paths are protected — nothing was deleted.": "这些路径受保护，没有删除任何内容。",
     "Nothing was deleted — those paths are protected or in use.":
         "没有删除任何内容 —— 这些路径受保护或正在被占用。",
+    "Some contents could not be deleted": "部分内容无法删除",
 ]

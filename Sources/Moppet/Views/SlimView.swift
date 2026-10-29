@@ -60,7 +60,8 @@ struct SlimView: View {
                             }
                             AiriButton(title: slimmingNow.map { L("Slimming") + " \($0)…" } ?? L("Slim"),
                                        icon: "scissors", variant: .destructive,
-                                       disabled: selected.isEmpty || slimming) {
+                                       disabled: selected.isEmpty || slimming,
+                                       busy: slimming) {
                                 confirming = true
                             }
                         }

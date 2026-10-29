@@ -5,6 +5,52 @@ import Foundation
 /// candidate before it enters the preview list).
 enum ScanEngine {
 
+    /// Bounds how many directory walks run at once across the WHOLE engine.
+    ///
+    /// `parallelSize` fans out 8 children per level and recurses two levels
+    /// deep, while `topChildren` keeps 8 of those chains in flight — so a
+    /// 500-entry layer could put hundreds of `enumerator` walks on the disk
+    /// simultaneously. Past a few dozen concurrent walks the volume stops
+    /// going faster and starts thrashing: memory pressure rises, the CPU
+    /// burns in kernel stat paths, and the OS filesystem lock contention
+    /// shows up as erratic progress. 32 keeps the queue saturated without
+    /// the pile-up.
+    private actor IOThrottle {
+        static let shared = IOThrottle(limit: 32)
+
+        private let limit: Int
+        private var active = 0
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+
+        init(limit: Int) { self.limit = limit }
+
+        func acquire() async {
+            if active < limit {
+                active += 1
+                return
+            }
+            await withCheckedContinuation { waiters.append($0) }
+        }
+
+        /// Hands the permit straight to the next waiter when there is one
+        /// (no decrement/increment round trip, so `active` can never drift).
+        func release() {
+            if waiters.isEmpty {
+                active = max(0, active - 1)
+            } else {
+                waiters.removeFirst().resume()
+            }
+        }
+    }
+
+    /// The synchronous leaf walk, behind the global throttle.
+    private static func throttledSize(of url: URL) async -> SizeSummary {
+        await IOThrottle.shared.acquire()
+        let summary = size(of: url)
+        await IOThrottle.shared.release()
+        return summary
+    }
+
     /// C realpath(3) — resolves firmlinks (/var→/private/var) that
     /// URL.resolvingSymlinksInPath leaves untouched on this machine.
     static func realFileSystemPath(_ path: String) -> String {
@@ -92,14 +138,18 @@ enum ScanEngine {
 
         // Stage 1 — Spotlight: a whole-home extension search in ~1s. Covers
         // everything indexed; misses folders excluded from Spotlight.
-        let mdfindResults = extensions.flatMap { ext -> [URL] in
-            let query = "(kMDItemFSName == '*.\(ext)'c)"
-            let output = runShell("/usr/bin/mdfind", ["-onlyin", resolvedRoot, query])
-            return output.split(separator: "\n").compactMap { line -> URL? in
-                let path = line.trimmingCharacters(in: .whitespaces)
-                guard !path.isEmpty, !pruned(path) else { return nil }
-                return URL(fileURLWithPath: path)
-            }
+        // ONE query for every extension: the old per-extension loop spawned
+        // one `mdfind` process (and one index walk) per extension — three
+        // process launches for a dmg/pkg/iso rule, each paying its own
+        // ~150ms startup before the search even began.
+        let query = extensions
+            .map { "(kMDItemFSName == '*.\($0)'c)" }
+            .joined(separator: " || ")
+        let mdfindOutput = runShell("/usr/bin/mdfind", ["-onlyin", resolvedRoot, query])
+        let mdfindResults: [URL] = mdfindOutput.split(separator: "\n").compactMap { line -> URL? in
+            let path = line.trimmingCharacters(in: .whitespaces)
+            guard !path.isEmpty, !pruned(path) else { return nil }
+            return URL(fileURLWithPath: path)
         }
         if Task.isCancelled {
             return []
@@ -191,6 +241,11 @@ enum ScanEngine {
 
     /// Runs a command, returns stdout (empty on failure — deep scan
     /// degrades to the fallback walk instead of failing the item).
+    ///
+    /// The wait is a semaphore signalled from `terminationHandler`, not a
+    /// `Thread.sleep` poll: the old loop woke every 20ms for up to 20s
+    /// (1000 wakeups per query) and held a thread spinning on a process
+    /// that was doing all the actual work.
     private static func runShell(_ launchPath: String, _ arguments: [String]) -> String {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: launchPath)
@@ -198,21 +253,43 @@ enum ScanEngine {
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice
+
+        let exited = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in exited.signal() }
         do { try process.run() } catch { return "" }
-        let group = DispatchGroup()
-        group.enter()
-        var data = Data()
-        DispatchQueue.global().async {
-            data = pipe.fileHandleForReading.readDataToEndOfFile()
-            group.leave()
+
+        // Drain concurrently: a full 64KB pipe buffer would block the child
+        // forever if we waited for exit before reading (mdfind over a home
+        // easily exceeds it).
+        final class OutputBox: @unchecked Sendable {
+            private let lock = NSLock()
+            private var storage = Data()
+            var data: Data {
+                lock.lock(); defer { lock.unlock() }
+                return storage
+            }
+            func set(_ value: Data) {
+                lock.lock(); storage = value; lock.unlock()
+            }
         }
-        let deadline = Date().addingTimeInterval(20)
-        while process.isRunning && Date() < deadline {
-            Thread.sleep(forTimeInterval: 0.02)
+        let box = OutputBox()
+        let drained = DispatchGroup()
+        drained.enter()
+        DispatchQueue.global(qos: .utility).async {
+            box.set(pipe.fileHandleForReading.readDataToEndOfFile())
+            drained.leave()
         }
-        if process.isRunning { process.terminate() }
-        group.wait()
-        return String(data: data, encoding: .utf8) ?? ""
+
+        if exited.wait(timeout: .now() + 20) == .timedOut {
+            process.terminate()
+            if exited.wait(timeout: .now() + 2) == .timedOut {
+                // A child that ignores SIGTERM would otherwise keep the read
+                // blocked forever; closing our read end forces it to return.
+                try? pipe.fileHandleForReading.close()
+            }
+        }
+        drained.wait()
+        return String(data: box.data, encoding: .utf8) ?? ""
     }
 
     private static func globSegment(_ segment: String, matches name: String) -> Bool {
@@ -281,7 +358,7 @@ enum ScanEngine {
         let fm = FileManager.default
         var isDir: ObjCBool = false
         guard fm.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue, depth > 0 else {
-            let summary = size(of: url)
+            let summary = await throttledSize(of: url)
             SizeCache.shared.store(url, summary: summary)
             return summary
         }
@@ -289,7 +366,7 @@ enum ScanEngine {
         let keys: [URLResourceKey] = [.isDirectoryKey, .totalFileAllocatedSizeKey, .fileSizeKey]
         guard let entries = try? fm.contentsOfDirectory(
             at: url, includingPropertiesForKeys: keys) else {
-            let summary = size(of: url)
+            let summary = await throttledSize(of: url)
             SizeCache.shared.store(url, summary: summary)
             return summary
         }
@@ -306,7 +383,9 @@ enum ScanEngine {
             }
         }
 
-        // Cap the fan-out; surplus subdirs sized serially inside one task.
+        // Batch the children so a 500-entry layer does not create 500 child
+        // tasks; the real concurrency ceiling is `IOThrottle` at the leaf
+        // walk, which is what the disk actually feels.
         let fanOut = 8
         let grouped = stride(from: 0, to: max(subdirs.count, 1), by: fanOut).map {
             Array(subdirs[$0..<min($0 + fanOut, subdirs.count)])
@@ -450,13 +529,55 @@ enum ScanEngine {
         return (Array(out.sorted { $0.bytes > $1.bytes }.prefix(limit)), missed)
     }
 
+    /// `ls`-grade listing — ONE `contentsOfDirectory` call, stat-grade
+    /// attributes only. Files get their allocated size for free; directories
+    /// come back with bytes=0 because a real size needs a recursive walk
+    /// (directories with a still-valid SizeCache entry land with their real
+    /// size in the same pass). This is what makes entering a huge directory
+    /// instant: the layer is navigable after ~one readdir, and real sizes
+    /// stream in afterwards via `topChildren`.
+    static func listChildren(of directory: URL, limit: Int = 500) -> [SpaceEntry] {
+        let fm = FileManager.default
+        let keys: Set<URLResourceKey> = [.isDirectoryKey, .totalFileAllocatedSizeKey, .fileSizeKey]
+        guard let entries = try? fm.contentsOfDirectory(
+            at: directory, includingPropertiesForKeys: Array(keys)) else {
+            return []
+        }
+        var out: [SpaceEntry] = []
+        for entry in entries {
+            let values = try? entry.resourceValues(forKeys: keys)
+            let isDir = values?.isDirectory ?? false
+            if isDir, let cached = SizeCache.shared.lookup(entry) {
+                // Warm entry: real size in the first frame, no "Measuring…".
+                out.append(SpaceEntry(id: entry.path, url: entry, bytes: cached.bytes,
+                                      isDirectory: true, fileCount: cached.files))
+            } else {
+                let bytes: Int64 = isDir ? 0
+                    : Int64(values?.totalFileAllocatedSize ?? values?.fileSize ?? 0)
+                out.append(SpaceEntry(id: entry.path, url: entry, bytes: bytes,
+                                      isDirectory: isDir, fileCount: isDir ? 0 : 1))
+            }
+        }
+        return Array(out.sorted { $0.bytes > $1.bytes }.prefix(limit))
+    }
+
     /// Sizes direct children of a directory in parallel, returning the top N.
     /// `progress` fires on a background executor as (completed, total) —
     /// the AnalyzeView progress bar; hop to main before touching @State.
+    /// `onEntry` streams each sized child THE MOMENT it lands (also on a
+    /// background executor) so a caller can fill sizes in live instead of
+    /// waiting for the whole layer — entering a big directory no longer
+    /// blocks on a full recursive walk of every child.
+    ///
+    /// Concurrency is WINDOWED (see `maxInFlight`): every result comes from
+    /// `parallelSize`, whose own 8-way fan-out multiplies whatever window we
+    /// open here — unbounded, a 500-entry layer spawned 500 sizing chains at
+    /// once and the I/O thrash made cold walks slower, not faster. Cache
+    /// hits inside `parallelSize` make warm runs near-free either way.
     static func topChildren(of directory: URL, limit: Int = 24,
-                            progress: (@Sendable (Int, Int) -> Void)? = nil) async -> [SpaceEntry] {
-        let fm = FileManager.default
-        guard let entries = try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isDirectoryKey]) else {
+                            progress: (@Sendable (Int, Int) -> Void)? = nil,
+                            onEntry: (@Sendable (SpaceEntry) -> Void)? = nil) async -> [SpaceEntry] {
+        guard let entries = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isDirectoryKey]) else {
             return []
         }
         // Thread-safe completion counter (the sizing tasks run concurrently).
@@ -471,28 +592,47 @@ enum ScanEngine {
         }
         let counter = Counter()
         let total = entries.count
+        // 8 concurrent child sizings: saturates the parallelSize fan-out
+        // (8×8 = 64 leaves in flight) without piling hundreds of directory
+        // walks on top of each other.
+        let maxInFlight = 8
+        let sizeEntry = { @Sendable (entry: URL) async -> SpaceEntry? in
+            // Cooperative cancel: skip any entry not yet started.
+            if Task.isCancelled { return nil }
+            // Created inside the closure: FileManager is thread-safe but not
+            // Sendable, so capturing the outer instance trips the compiler.
+            let fm = FileManager.default
+            // Cache-aware sizing: warm entries are a single mtime stat.
+            let summary = await parallelSize(of: entry)
+            progress?(counter.bump(), total)
+            guard summary.bytes > 0 else { return nil }
+            var isDir: ObjCBool = false
+            fm.fileExists(atPath: entry.path, isDirectory: &isDir)
+            let sized = SpaceEntry(id: entry.path, url: entry, bytes: summary.bytes,
+                                   isDirectory: isDir.boolValue, fileCount: summary.files)
+            onEntry?(sized)
+            return sized
+        }
+        // Sliding window: whenever one sizing finishes, seed the next entry.
+        var next = entries.makeIterator()
         let sized: [SpaceEntry] = await withTaskGroup(of: SpaceEntry?.self) { group in
-            for entry in entries {
-                group.addTask {
-                    // Cooperative cancel: skip any entry not yet started.
-                    if Task.isCancelled { return nil }
-                    // Cache-aware parallel sizing: warm runs are instant.
-                    let summary = await parallelSize(of: entry)
-                    progress?(counter.bump(), total)
-                    guard summary.bytes > 0 else { return nil }
-                    var isDir: ObjCBool = false
-                    fm.fileExists(atPath: entry.path, isDirectory: &isDir)
-                    return SpaceEntry(id: entry.path, url: entry, bytes: summary.bytes,
-                                      isDirectory: isDir.boolValue, fileCount: summary.files)
-                }
+            for _ in 0..<maxInFlight {
+                guard let entry = next.next() else { break }
+                group.addTask { await sizeEntry(entry) }
             }
             var out: [SpaceEntry] = []
             for await e in group {
                 if Task.isCancelled { group.cancelAll(); break }
                 if let e { out.append(e) }
+                if let entry = next.next() {
+                    group.addTask { await sizeEntry(entry) }
+                }
             }
             return out
         }
+        // Flush the throttled cache writes so a quit right after a cold
+        // walk doesn't drop the just-measured subtree summaries.
+        SizeCache.shared.persistNow()
         return Array(sized.sorted { $0.bytes > $1.bytes }.prefix(limit))
     }
 }

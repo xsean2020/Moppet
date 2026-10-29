@@ -6,15 +6,56 @@ import Foundation
 /// round-trip against this app's own MCP server. No network involved.
 enum BrainSmokeTest {
 
+    /// Can this process apply a REAL restrictive seatbelt profile? Note the
+    /// probe must mirror BrainSandbox's deny-default shape: some hardened
+    /// environments happily apply permissive `(allow default)` profiles but
+    /// deny `sandbox_apply` for restrictive ones (EPERM) — an allow-default
+    /// probe would falsely report sandbox support here.
+    static func probeSandboxExec() -> Bool {
+        let probe = Process()
+        probe.executableURL = URL(fileURLWithPath: "/usr/bin/sandbox-exec")
+        probe.arguments = [
+            "-p",
+            "(version 1)(deny default)(allow process-exec)(allow process-fork)"
+                + "(allow file-read*)(allow file-write* (subpath \"/private/tmp\"))",
+            "/bin/echo", "probe",
+        ]
+        probe.standardOutput = FileHandle.nullDevice
+        probe.standardError = FileHandle.nullDevice
+        guard (try? probe.run()) != nil else { return false }
+        probe.waitUntilExit()
+        return probe.terminationStatus == 0
+    }
+
     static func run() -> Never {
-        var failures = 0
+        // A reference box, not a bare Int: `failures` is mutated only inside
+        // the nested `expect`, and the compiler's dataflow can't see through
+        // the capture — it constant-folded the bare Int to 0 and emitted
+        // "condition always evaluates to true / will never be executed" on
+        // the FAIL branch below. A heap read can't be folded.
+        final class FailureCount { var value = 0 }
+        let failureBox = FailureCount()
         func expect(_ name: String, _ condition: Bool, _ detail: String = "") {
             let mark = condition ? "✓" : "✗"
             FileHandle.standardError.write(Data("\(mark) \(name)\(detail.isEmpty ? "" : " — \(detail)")\n".utf8))
-            if !condition { failures += 1 }
+            if !condition { failureBox.value += 1 }
         }
         func trace(_ text: String) {
             FileHandle.standardError.write(Data("[trace] \(text)\n".utf8))
+        }
+        /// Hardened environments (CI, nested-seatbelt denials) refuse to spawn
+        /// `sandbox-exec` at all — `sandbox_apply: Operation not permitted` —
+        /// which turns every sandboxed-shell expectation into a false failure
+        /// that says nothing about the code. Probe ONCE; when unavailable,
+        /// those checks report SKIP instead of failing.
+        let sandboxUsable = Self.probeSandboxExec()
+        func expectSandboxed(_ name: String, _ condition: Bool, _ detail: String = "") {
+            guard sandboxUsable else {
+                FileHandle.standardError.write(Data(
+                    "⚠︎ SKIP \(name) — sandbox-exec unavailable in this environment\n".utf8))
+                return
+            }
+            expect(name, condition, detail)
         }
         /// Run an async check and block until it finishes — the smoke run is a
         /// single synchronous sequence, and `expect` must stay callable inline.
@@ -328,9 +369,9 @@ enum BrainSmokeTest {
         expect("verdict: half the tools failing is bad", mostlyFailing.verdict == .bad)
         var oneError = makeOutcome(); oneError.toolCalls = 4; oneError.toolErrors = 1
         expect("verdict: one error out of four is neutral", oneError.verdict == .neutral)
-        var idle = makeOutcome()
+        let idle = makeOutcome()
         expect("verdict: a work intent with no tool call is neutral", idle.verdict == .neutral)
-        var chat = makeOutcome(.chat)
+        let chat = makeOutcome(.chat)
         expect("verdict: a chat turn with no tool call is good", chat.verdict == .good)
         expect("verdict: only bad turns are worth a reflection call",
                denied.deservesReflection && !clean.deservesReflection)
@@ -1170,8 +1211,8 @@ enum BrainSmokeTest {
                 command: "echo hi > \(workspace.path)/sandboxed.txt",
                 cwd: workspace.path, mode: .workspaceWrite, workspaceRoot: workspace.path)
             let allowedFile = FileManager.default.fileExists(atPath: workspace.appendingPathComponent("sandboxed.txt").path)
-            expect("sandbox workspace-write allows writes", allowedFile,
-                   "exit \(allowed.exitCode) stderr=\(allowed.stderr.prefix(100)) profile=[\(BrainSandbox.profile(mode: .workspaceWrite, workspaceRoot: workspace.path) ?? "-")]")
+            expectSandboxed("sandbox workspace-write allows writes", allowedFile,
+                            "exit \(allowed.exitCode) stderr=\(allowed.stderr.prefix(100)) profile=[\(BrainSandbox.profile(mode: .workspaceWrite, workspaceRoot: workspace.path) ?? "-")]")
 
             let networkBlocked = await BrainSandbox.run(
                 command: "curl -m 2 -sf https://example.com && echo NETWORK-REACHED",
@@ -1369,15 +1410,15 @@ enum BrainSmokeTest {
             expect("exec session spawns", session != nil)
             if let session {
                 let early = await session.wait(seconds: 0.4)
-                expect("exec session still running before stdin", early == nil,
-                       "exit=\(early.map(String.init) ?? "nil")")
+                expectSandboxed("exec session still running before stdin", early == nil,
+                                "exit=\(early.map(String.init) ?? "nil")")
                 session.write("hello\n")
                 let code = await session.wait(seconds: 5)
-                expect("exec session exits after stdin", code == 0,
-                       "exit=\(code.map(String.init) ?? "nil")")
+                expectSandboxed("exec session exits after stdin", code == 0,
+                                "exit=\(code.map(String.init) ?? "nil")")
                 let output = session.drainOutput()
-                expect("exec session echoes stdin", output.contains("GOT:hello"), "[\(output.prefix(80))]")
-                expect("exec session captures tail", output.contains("TAIL"))
+                expectSandboxed("exec session echoes stdin", output.contains("GOT:hello"), "[\(output.prefix(80))]")
+                expectSandboxed("exec session captures tail", output.contains("TAIL"))
             }
             expect("registry stop clears sessions", !registry.stop().isEmpty)
 
@@ -1502,7 +1543,8 @@ enum BrainSmokeTest {
         HarnessStore.rootOverride = nil
         try? FileManager.default.removeItem(at: workspace)
 
-        print(failures == 0 ? "BRAIN SMOKE PASS" : "BRAIN SMOKE FAIL (\(failures) failures)")
-        exit(failures == 0 ? 0 : 1)
+        let failed = failureBox.value
+        print(failed == 0 ? "BRAIN SMOKE PASS" : "BRAIN SMOKE FAIL (\(failed) failures)")
+        exit(failed == 0 ? 0 : 1)
     }
 }

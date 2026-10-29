@@ -339,18 +339,17 @@ struct LargeFilesView: View {
         .overlay(alignment: .top) { Divider().overlay(Airi.neutral200.opacity(0.5)) }
     }
 
-    private func pathDisplay(_ path: String) -> String {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        return path.hasPrefix(home) ? "~" + path.dropFirst(home.count) : path
-    }
-
+    // Deletions here are user-initiated (rows are hand-picked, then a
+    // confirmation dialog runs), so the relaxed policy applies: protected
+    // home categories are deletable on explicit request, while system
+    // locations, the home root and the whitelist stay locked.
     private static func deletable(_ url: URL) -> Bool {
-        SafetyGuard.checkDeletable(url).allowed
+        SafetyGuard.checkDeletable(url, policy: .userConfirmed).allowed
     }
 
     /// Human reason a row is locked, straight from the safety layer.
     private static func lockReason(_ url: URL) -> String {
-        guard let reason = SafetyGuard.checkDeletable(url).reason else {
+        guard let reason = SafetyGuard.checkDeletable(url, policy: .userConfirmed).reason else {
             return L("Locked")
         }
         if reason.hasPrefix("protected category: ") {

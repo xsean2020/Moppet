@@ -287,6 +287,9 @@ struct SettingsView: View {
         @State private var draft = ""
         @State private var result: String?
         @State private var refreshing = false
+        /// True while a model row is being deleted — disables the trash button
+        /// so a double-click cannot remove two rows at once.
+        @State private var deletingModel: String?
 
         var body: some View {
             VStack(alignment: .leading, spacing: Airi.space1) {
@@ -393,13 +396,23 @@ struct SettingsView: View {
                     .textSelection(.enabled)
                 Spacer()
                 Button {
-                    delete(model)
+                    deletingModel = model
+                    Task {
+                        delete(model)
+                        try? await Task.sleep(nanoseconds: 300_000_000)
+                        deletingModel = nil
+                    }
                 } label: {
-                    Image(systemName: "trash")
-                        .font(Airi.footnoteFont)
-                        .foregroundStyle(Airi.neutral400)
+                    if deletingModel == model {
+                        ProgressView().controlSize(.mini)
+                    } else {
+                        Image(systemName: "trash")
+                            .font(Airi.footnoteFont)
+                            .foregroundStyle(Airi.neutral400)
+                    }
                 }
                 .buttonStyle(.plain)
+                .disabled(deletingModel != nil)
                 .help(L("Remove from list"))
             }
             .padding(.horizontal, 10)

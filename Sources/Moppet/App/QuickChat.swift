@@ -7,7 +7,8 @@ import Observation
 /// Spotlight-style quick chat: single-click the pet pops an input-only bar
 /// centered on screen. The bar STAYS after submitting — follow-up questions
 /// type straight in while the answer streams into the pet's speech bubble;
-/// it closes on click-away / Esc / clicking the pet again. Runs on its own
+/// it closes ONLY on a blank-space click (bare desktop), Esc, or clicking
+/// the pet again — clicks into any app's window leave it up. Runs on its own
 /// BrainAgent — the rollout lands in the same session directory, so quick
 /// chats show up in the chat window's session list and keep full context.
 @MainActor
@@ -70,7 +71,7 @@ final class QuickChat {
         }
         // Slash commands run locally (codex TUI parity) — output goes to the
         // pet bubble; UI-only ones point at the chat window. The bar stays:
-        // only click-away / Esc / pet-reclick close it.
+        // only a blank-space click / Esc / pet-reclick close it.
         if trimmed.hasPrefix("/") {
             let command = trimmed.split(separator: " ").first.map(String.init) ?? trimmed
             Task { @MainActor in
@@ -160,9 +161,10 @@ final class QuickChatPanel: NSPanel {
 @MainActor
 final class QuickChatPanelController {
     private var panel: QuickChatPanel?
-    /// Click-outside dismissal: local monitor catches clicks in our own
-    /// windows, global monitor catches clicks in other apps / the desktop.
-    private var localMonitor: Any?
+    /// Blank-space-click dismissal: only a click on empty desktop (no
+    /// on-screen content window under the cursor) closes the bar. Clicks
+    /// inside any app's window — ours or others' — leave it up so the user
+    /// can keep working with the bar docked. Esc / pet-reclick still close.
     private var globalMonitor: Any?
 
     func show() {
@@ -208,26 +210,43 @@ final class QuickChatPanelController {
         self.panel = panel
     }
 
+    private func removeDismissMonitors() {
+        if let globalMonitor { NSEvent.removeMonitor(globalMonitor) }
+        globalMonitor = nil
+    }
+
     private func installDismissMonitors() {
-        guard localMonitor == nil, globalMonitor == nil else { return }
-        localMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
-            // Clicks inside the pet panel belong to its tap gestures (toggle);
-            // everything else in our windows dismisses.
-            if !(event.window is PetPanel), event.window !== self?.panel {
-                self?.hide()
-            }
-            return event
-        }
+        guard globalMonitor == nil else { return }
+        // Global monitor only: blank space lives on the desktop, which is
+        // never our own window, so local events (our windows, the bar, the
+        // pet) can't be blank-space clicks — they must not dismiss.
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown) { [weak self] _ in
-            self?.hide()
+            guard let self else { return }
+            if !Self.contentWindowUnderMouse() { self.hide() }
         }
     }
 
-    private func removeDismissMonitors() {
-        if let localMonitor { NSEvent.removeMonitor(localMonitor) }
-        if let globalMonitor { NSEvent.removeMonitor(globalMonitor) }
-        localMonitor = nil
-        globalMonitor = nil
+    /// True when an on-screen, normal-layer content window (any app) sits
+    /// under the mouse — i.e. the user is about to click CONTENT, not the
+    /// bare desktop. The desktop itself is excluded by `.excludeDesktopElements`,
+    /// and the Dock / menu bar / our status-bar-level panel are filtered by
+    /// the layer-0 check, so those all read as "blank" and dismiss.
+    private static func contentWindowUnderMouse() -> Bool {
+        let mouse = NSEvent.mouseLocation
+        guard let primary = NSScreen.screens.first else { return true }
+        // Cocoa (bottom-left origin, y up) → CoreGraphics (top-left, y down).
+        let point = CGPoint(x: mouse.x, y: primary.frame.height - mouse.y)
+        guard let list = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+            as? [[String: Any]] else { return true }   // unknown → keep the bar up
+        for info in list {
+            guard info[kCGWindowLayer as String] as? Int == 0,
+                  let b = info[kCGWindowBounds as String] as? [String: CGFloat] else { continue }
+            let frame = CGRect(x: b["X"] ?? 0, y: b["Y"] ?? 0,
+                               width: b["Width"] ?? 0, height: b["Height"] ?? 0)
+            if frame.contains(point) { return true }
+        }
+        return false
     }
 }
 

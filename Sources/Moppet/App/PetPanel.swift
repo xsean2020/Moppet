@@ -462,6 +462,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // click-to-activate fixes both.
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
+        // Modern minimal scrollbars app-wide (hairline indicator, hover/scroll
+        // fade-in) — replaces the legacy gray track+knob look everywhere.
+        ScrollbarTuner.install()
         activateMonitor = NSEvent.addLocalMonitorForEvents(
             matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { event in
             if !NSApp.isActive {

@@ -67,6 +67,9 @@ struct ChatView: View {
     @State private var selectMode = false
     @State private var selectedSessions: Set<String> = []
     @State private var confirmingBatchDelete = false
+    /// True while a deletion is in flight — disables the confirm button and
+    /// shows a spinner so the user knows the click registered.
+    @State private var isDeleting = false
     /// Pending user-attached images (sent with the next message).
     @State private var attachments: [ChatAttachment] = []
     /// Ephemeral slash-command output cards.
@@ -80,6 +83,12 @@ struct ChatView: View {
     @State private var expandedOutputs: Set<Int> = []
     /// Expanded reasoning summaries.
     @State private var expandedReasoning: Set<Int> = []
+    /// User-defined provider profiles, snapshotted once per change instead of
+    /// re-read per render: `providerOptions` used to call
+    /// `AIProviderRegistry.load()` — open + JSON-decode a file — from inside
+    /// the composer's body, and the chat body re-evaluates on every streamed
+    /// token (dozens of times per second while an answer is being written).
+    @State private var providerProfiles: [AIProviderProfile] = []
     @FocusState private var inputFocused: Bool
     @Environment(\.openWindow) private var openWindow
     @Environment(\.dismiss) private var dismiss
@@ -131,6 +140,7 @@ struct ChatView: View {
                 inputFocused = true
             }
             aiSettings = AISettings.load()
+            providerProfiles = AIProviderRegistry.load()
             UserInputCenter.chatSurfaceVisible = true
             // While the chat window lives, it can also reopen both windows
             // for the router (pet panel / menu bar).
@@ -143,6 +153,12 @@ struct ChatView: View {
         }
         .onDisappear {
             UserInputCenter.chatSurfaceVisible = false
+        }
+        .onReceive(NotificationCenter.default.publisher(
+            for: AIProviderRegistry.changedNotification)) { _ in
+            // Settings added/renamed/removed a provider profile — refresh the
+            // snapshot the picker reads (see `providerProfiles`).
+            providerProfiles = AIProviderRegistry.load()
         }
         .onChange(of: store.currentSessionID) { _, _ in
             notices = []
@@ -330,9 +346,14 @@ struct ChatView: View {
             HStack {
                 Spacer()
                 AiriButton(title: L("Cancel"), variant: .secondary) { sessionToDelete = nil }
-                AiriButton(title: L("Delete"), variant: .destructive) {
-                    store.delete(info)
-                    sessionToDelete = nil
+                AiriButton(title: L("Delete"), variant: .destructive, disabled: isDeleting, busy: isDeleting) {
+                    isDeleting = true
+                    Task {
+                        store.delete(info)
+                        try? await Task.sleep(nanoseconds: 300_000_000)
+                        isDeleting = false
+                        sessionToDelete = nil
+                    }
                 }
             }
         }
@@ -351,11 +372,16 @@ struct ChatView: View {
             HStack {
                 Spacer()
                 AiriButton(title: L("Cancel"), variant: .secondary) { confirmingBatchDelete = false }
-                AiriButton(title: L("Delete"), variant: .destructive) {
-                    store.deleteAll(Array(selectedSessions))
-                    selectedSessions = []
-                    selectMode = false
-                    confirmingBatchDelete = false
+                AiriButton(title: L("Delete"), variant: .destructive, disabled: isDeleting, busy: isDeleting) {
+                    isDeleting = true
+                    Task {
+                        store.deleteAll(Array(selectedSessions))
+                        try? await Task.sleep(nanoseconds: 300_000_000)
+                        selectedSessions = []
+                        selectMode = false
+                        isDeleting = false
+                        confirmingBatchDelete = false
+                    }
                 }
             }
         }
@@ -559,7 +585,7 @@ struct ChatView: View {
     /// providerId/modelId — see AIProviders.swift).
     private var providerOptions: [AIProviderOption] {
         AIVendor.allCases.map(AIProviderOption.builtin)
-            + AIProviderRegistry.load().map { AIProviderOption.profile($0.id) }
+            + providerProfiles.map { AIProviderOption.profile($0.id) }
     }
 
     private var chatProviderBinding: Binding<AIProviderOption> {

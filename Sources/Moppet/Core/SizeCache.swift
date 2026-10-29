@@ -62,7 +62,14 @@ final class SizeCache {
     /// Caller must hold `lock`.
     private func evictIfNeeded() {
         guard store.count > Self.maxEntries else { return }
-        let surplus = store.count - Self.maxEntries
+        // Evict in BATCHES down to 90% of the cap. Trimming to exactly the
+        // cap meant the very next insert pushed the store over again, so a
+        // cold scan re-sorted all 5000 entries on every persist tick.
+        // Sorted-prefix is O(n log n) on an already-small dictionary — the
+        // win here is doing it 10× less often, not a fancier data structure.
+        let target = Self.maxEntries - Self.maxEntries / 10
+        let surplus = store.count - target
+        guard surplus > 0 else { return }
         let oldest = store.sorted { $0.value.cachedAt < $1.value.cachedAt }.prefix(surplus)
         for (key, _) in oldest {
             store.removeValue(forKey: key)
@@ -111,6 +118,19 @@ final class SizeCache {
         }
     }
 
+    /// Drop ONE entry — no ancestor walk. Analyze deletions refresh their
+    /// ancestors' summaries from the in-memory tree instead of dropping them
+    /// (see `FileNode.applyDeletion`); only the deleted path itself and the
+    /// home root (not derivable from the tree) need a plain removal.
+    func remove(_ url: URL) {
+        lock.lock(); defer { lock.unlock() }
+        store.removeValue(forKey: Self.cacheKey(url))
+        persist()
+    }
+
+    /// Immediate flush of the throttled disk writes — call at the end of a
+    /// bulk measuring pass so a quit right afterwards doesn't lose the
+    /// just-measured subtree summaries (store() only persists every 2s).
     func persistNow() {
         lock.lock(); defer { lock.unlock() }
         persist()

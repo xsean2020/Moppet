@@ -26,10 +26,6 @@ struct BatchProgress: Equatable {
 
     /// "7 / 12" — nil for indeterminate work (no count to show).
     var countText: String? { total > 0 ? "\(done) / \(total)" : nil }
-
-    static func indeterminate(_ title: String, detail: String? = nil) -> BatchProgress {
-        BatchProgress(title: title, done: 0, total: 0, detail: detail)
-    }
 }
 
 /// Centered modal shown while a destructive batch runs: dim, opaque card,

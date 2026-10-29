@@ -131,9 +131,31 @@ extension NSColor {
 }
 
 extension Int64 {
+    /// One shared formatter, lock-guarded, instead of a fresh one per call.
+    /// The class method `ByteCountFormatter.string(fromByteCount:countStyle:)`
+    /// builds a formatter (and its ICU state) for every single size label —
+    /// and Analyze/Clean render hundreds of labels per pass. NSFormatter is
+    /// not documented as thread-safe, hence the lock: size strings are also
+    /// built from background sizing/audit code.
+    private static let byteFormatter: ByteCountFormatter = {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        return formatter
+    }()
+    private static let byteFormatterLock = NSLock()
+
     var bytesFormatted: String {
-        ByteCountFormatter.string(fromByteCount: self, countStyle: .file)
+        Self.byteFormatterLock.lock()
+        defer { Self.byteFormatterLock.unlock() }
+        return Self.byteFormatter.string(fromByteCount: self)
     }
+}
+
+/// Shortens a home-absolute path to a `~`-prefixed display form. Shared by
+/// LargeFilesView, OrphansView and any other list that shows full paths.
+func pathDisplay(_ path: String) -> String {
+    let home = FileManager.default.homeDirectoryForCurrentUser.path
+    return path.hasPrefix(home) ? "~" + path.dropFirst(home.count) : path
 }
 
 extension Double {

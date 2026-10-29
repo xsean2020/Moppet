@@ -159,6 +159,23 @@ final class Evolver {
         return running
     }
 
+    /// Sync critical sections for the async `tick()` — calling `NSLock.lock()`
+    /// directly from an async context is unavailable (Swift 6 error) and is
+    /// what generated the "will be unavailable in Swift 6" warnings.
+    private func beginTick() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if running { return false }
+        running = true
+        return true
+    }
+
+    private func endTick() {
+        lock.lock()
+        running = false
+        lock.unlock()
+    }
+
     /// Called from `submit()`: the user is back, drop everything.
     func cancel() {
         task?.cancel()
@@ -174,11 +191,8 @@ final class Evolver {
         guard !isRunning else { return }
         guard GrowthLedger.shared.remaining() > 5_000 else { return }
 
-        lock.lock()
-        if running { lock.unlock(); return }
-        running = true
-        lock.unlock()
-        defer { lock.lock(); running = false; lock.unlock() }
+        guard beginTick() else { return }
+        defer { endTick() }
 
         defer { _ = try? GrowthLedger.shared.reconcile() }
 

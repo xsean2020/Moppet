@@ -29,6 +29,10 @@ struct BrainGrowthCard: View {
     @State private var canaryLine = ""
     @State private var skillNames: [String] = []
     @State private var memoryCues: [String] = []
+    /// True while a destructive action (delete lesson / rollback / discard
+    /// proposal) is in flight — disables the button and shows a spinner so
+    /// the user knows the click registered.
+    @State private var isProcessing = false
 
     var body: some View {
         SettingsCard {
@@ -105,10 +109,16 @@ struct BrainGrowthCard: View {
                             .foregroundStyle(Airi.neutral500)
                         Spacer()
                         Button(L("Roll back")) {
-                            _ = try? PromotionGate.rollback()
-                            refresh()
+                            isProcessing = true
+                            Task {
+                                _ = try? PromotionGate.rollback()
+                                try? await Task.sleep(nanoseconds: 300_000_000)
+                                isProcessing = false
+                                refresh()
+                            }
                         }
                         .controlSize(.small)
+                        .disabled(isProcessing)
                         .help(L("Restore the version before the last change"))
                     }
                 }
@@ -152,16 +162,28 @@ struct BrainGrowthCard: View {
                             }
                             Spacer()
                             Button(L("Approve")) {
-                                _ = Evolver.approve(proposal.id)
-                                refresh()
+                                isProcessing = true
+                                Task {
+                                    _ = Evolver.approve(proposal.id)
+                                    try? await Task.sleep(nanoseconds: 300_000_000)
+                                    isProcessing = false
+                                    refresh()
+                                }
                             }
                             .buttonStyle(.borderedProminent)
                             .controlSize(.small)
+                            .disabled(isProcessing)
                             Button(L("Discard")) {
-                                Evolver.reject(proposal.id)
-                                refresh()
+                                isProcessing = true
+                                Task {
+                                    Evolver.reject(proposal.id)
+                                    try? await Task.sleep(nanoseconds: 300_000_000)
+                                    isProcessing = false
+                                    refresh()
+                                }
                             }
                             .controlSize(.small)
+                            .disabled(isProcessing)
                         }
                     }
                 }
@@ -185,12 +207,22 @@ struct BrainGrowthCard: View {
                             }
                             Spacer()
                             Button {
-                                _ = LessonLibrary.remove(lesson)
-                                refresh()
+                                isProcessing = true
+                                Task {
+                                    _ = LessonLibrary.remove(lesson)
+                                    try? await Task.sleep(nanoseconds: 300_000_000)
+                                    isProcessing = false
+                                    refresh()
+                                }
                             } label: {
-                                Image(systemName: "trash")
+                                if isProcessing {
+                                    ProgressView().controlSize(.mini)
+                                } else {
+                                    Image(systemName: "trash")
+                                }
                             }
                             .buttonStyle(.borderless)
+                            .disabled(isProcessing)
                             .help(L("Forget this lesson"))
                         }
                     }

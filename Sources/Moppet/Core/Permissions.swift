@@ -35,14 +35,6 @@ enum Permissions {
         return value
     }
 
-    /// Drops the cached verdict so a just-completed Settings grant is picked
-    /// up on the next read instead of ten seconds later.
-    static func invalidate() {
-        lock.lock()
-        cachedResult = nil
-        lock.unlock()
-    }
-
     private static func probeFullDiskAccess() -> Bool {
         let tccDB = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/com.apple.TCC/TCC.db")

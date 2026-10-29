@@ -58,7 +58,8 @@ struct HistoryView: View {
                     expanded = []
                 }
                 if !records.isEmpty {
-                    AiriButton(title: L("Clear"), icon: "trash", variant: .destructive) {
+                    AiriButton(title: L("Clear"), icon: "trash", variant: .destructive,
+                               disabled: isClearing, busy: isClearing) {
                         confirmingClear = true
                     }
                 }
@@ -74,9 +75,14 @@ struct HistoryView: View {
             titleVisibility: .visible
         ) {
             Button(L("Clear"), role: .destructive) {
-                HistoryStore.clear()
-                records = []
-                expanded = []
+                isClearing = true
+                Task {
+                    HistoryStore.clear()
+                    try? await Task.sleep(nanoseconds: 300_000_000)
+                    records = []
+                    expanded = []
+                    isClearing = false
+                }
             }
             Button(L("Cancel"), role: .cancel) {}
         } message: {
@@ -87,6 +93,9 @@ struct HistoryView: View {
     }
 
     @State private var confirmingClear = false
+    /// True while the clear-all is in flight — disables the button and shows
+    /// a spinner so the user knows the click registered.
+    @State private var isClearing = false
 
     private var totalFreed: Int64 {
         records.reduce(0) { $0 + $1.freedBytes }

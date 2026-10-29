@@ -123,6 +123,72 @@ enum SmokeTest {
         expect("allow regular cache dir",
                SafetyGuard.checkDeletable(home.appendingPathComponent("Library/Caches/com.example.app")).allowed)
 
+        // MARK: Safety guard policy (pet = strict, userConfirmed = relaxed)
+        // userConfirmed still refuses the never-relax tier: system locations,
+        // the home root, outside home, malformed paths.
+        expect("userConfirmed still denies filesystem root",
+               !SafetyGuard.checkDeletable(URL(fileURLWithPath: "/"), policy: .userConfirmed).allowed)
+        expect("userConfirmed still denies /System",
+               !SafetyGuard.checkDeletable(URL(fileURLWithPath: "/System/Library"), policy: .userConfirmed).allowed)
+        expect("userConfirmed still denies home itself",
+               !SafetyGuard.checkDeletable(home, policy: .userConfirmed).allowed)
+        expect("userConfirmed still denies outside home",
+               !SafetyGuard.checkDeletable(URL(fileURLWithPath: "/opt/whatever"), policy: .userConfirmed).allowed)
+        // …but relaxes the protected home categories.
+        expect("userConfirmed allows Desktop",
+               SafetyGuard.checkDeletable(home.appendingPathComponent("Desktop/BigFolder"), policy: .userConfirmed).allowed)
+        expect("userConfirmed allows Documents",
+               SafetyGuard.checkDeletable(home.appendingPathComponent("Documents/old stuff"), policy: .userConfirmed).allowed)
+        expect("userConfirmed allows Safari data",
+               SafetyGuard.checkDeletable(home.appendingPathComponent("Library/Safari/History.db"), policy: .userConfirmed).allowed)
+        // …and the strict default is unchanged (no policy argument == pet).
+        expect("default policy stays strict for Desktop",
+               !SafetyGuard.checkDeletable(home.appendingPathComponent("Desktop/BigFolder")).allowed)
+
+        // MARK: BatchDeleter — tiered parallel delete
+        // Small seed → one direct recursive removeItem; big tree (hint over
+        // the threshold) → expanded and unlinked in parallel; a symlink
+        // inside the tree is unlinked, never followed.
+        do {
+            let fm = FileManager.default
+            let root = fm.temporaryDirectory
+                .appendingPathComponent("moppet-bd-\(UUID().uuidString)")
+            let smallDir = root.appendingPathComponent("small")
+            try fm.createDirectory(at: smallDir, withIntermediateDirectories: true)
+            for i in 0..<8 {
+                try Data("x".utf8).write(to: smallDir.appendingPathComponent("f\(i)"))
+            }
+            let bigDir = root.appendingPathComponent("big")
+            try fm.createDirectory(at: bigDir.appendingPathComponent("sub"),
+                                   withIntermediateDirectories: true)
+            let bigFileCount = 1300
+            for i in 0..<bigFileCount {
+                let parent = i.isMultiple(of: 2) ? bigDir : bigDir.appendingPathComponent("sub")
+                try Data("x".utf8).write(to: parent.appendingPathComponent("f\(i)"))
+            }
+            let keepMe = root.appendingPathComponent("keepme.txt")
+            try Data("keep".utf8).write(to: keepMe)
+            try fm.createSymbolicLink(at: bigDir.appendingPathComponent("link"),
+                                      withDestinationURL: keepMe)
+
+            let outcome = awaitSync {
+                await BatchDeleter.remove(
+                    urls: [smallDir, bigDir],
+                    fileCounts: [bigDir.path: bigFileCount + 2],
+                    progress: nil)
+            }
+            expect("batch delete: small tree gone (direct tier)",
+                   !fm.fileExists(atPath: smallDir.path))
+            expect("batch delete: big tree gone (expanded tier)",
+                   !fm.fileExists(atPath: bigDir.path))
+            expect("batch delete: no failures", outcome.failures.isEmpty,
+                   "\(outcome.failures.count) failed: \(outcome.failures.prefix(2))")
+            expect("batch delete: symlink target untouched", fm.fileExists(atPath: keepMe.path))
+            try? fm.removeItem(at: root)
+        } catch {
+            expect("batch delete: fixture setup failed", false, "\(error)")
+        }
+
         // MARK: Glob matching
 
         expect("glob * matches", SafetyGuard.glob("*.dmg", matches: "Installer.dmg"))
@@ -611,6 +677,26 @@ enum SmokeTest {
                    SafetyGuard.globMatchesPathOrAncestor(
                        NSHomeDirectory() + "/Library/Caches/Foo",
                        NSHomeDirectory() + "/Library/Caches/Foo/deep/nested/file"))
+
+            // Whitelist parse cache: memoized by mtime, so an EDIT must
+            // invalidate it. This is safety, not just speed — a stale cache
+            // would let a path the user just protected be deleted. Driven
+            // through a temp fixture so the real whitelist is untouched.
+            let wlDir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("moppet-wl-smoke-\(UUID().uuidString)", isDirectory: true)
+            try? FileManager.default.createDirectory(at: wlDir, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: wlDir) }
+            let wlFile = wlDir.appendingPathComponent("whitelist")
+            try? "~/KeepMe\n# comment\n\n".write(to: wlFile, atomically: true, encoding: .utf8)
+            expect("whitelist: parses and drops comments/blanks",
+                   SafetyGuard.loadWhitelistPatterns(from: wlFile) == ["~/KeepMe"])
+            try? "~/AlsoKeep\n".write(to: wlFile, atomically: true, encoding: .utf8)
+            // Deterministic mtime bump: two writes inside the same tick would
+            // otherwise leave the cache legitimately valid.
+            try? FileManager.default.setAttributes(
+                [.modificationDate: Date().addingTimeInterval(5)], ofItemAtPath: wlFile.path)
+            expect("whitelist: edit invalidates the parse cache",
+                   SafetyGuard.loadWhitelistPatterns(from: wlFile) == ["~/AlsoKeep"])
 
             // apply_patch guards: workspace root is never a valid target and
             // delete/move needs an anchored hunk / whitelist pass.

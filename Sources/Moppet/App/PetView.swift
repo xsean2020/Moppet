@@ -477,7 +477,11 @@ struct MoleSceneView: NSViewRepresentable {
         let view = SCNView(frame: NSRect(x: 0, y: 0, width: 230, height: 270))
         view.scene = puppet.scene
         view.backgroundColor = .clear
-        view.antialiasingMode = .multisampling4X
+        // 2X, not 4X: the scene is ~15 primitives in a 230×270 floating panel,
+        // and 4X samples every pixel four times per frame for an edge
+        // difference no one can see at that size — it was pure GPU burn on a
+        // window that is on screen (and animating) all day.
+        view.antialiasingMode = .multisampling2X
         view.isPlaying = true
         view.delegate = context.coordinator
         context.coordinator.scnView = view
@@ -909,7 +913,17 @@ struct PetView: View {
                 PetInteractionView(
                     panel: panel,
                     onTap: {
-                        if bus.state == .celebrating || bus.state == .sad {
+                        if bubbleVisible {
+                            // Click during a visible bubble means "dismiss
+                            // it" — same effect as the auto-hide (cancel the
+                            // pending timer, drop the bubble, settle talking
+                            // back to idle). The input bar is NOT toggled:
+                            // closing a bubble and opening a bar in one tap
+                            // reads as a glitch.
+                            bubbleHideTask?.cancel()
+                            withAnimation(Airi.controlAnimation) { bubbleVisible = false }
+                            if bus.state == .talking { bus.setState(.idle) }
+                        } else if bus.state == .celebrating || bus.state == .sad {
                             // Click during a celebration or a sad moment
                             // means "got it" — settle back to idle.
                             bus.settle()
@@ -1129,13 +1143,25 @@ struct PetView: View {
     /// Resize the hosting panel so the layout's target size becomes real. The
     /// RIGHT edge and BOTTOM stay pinned — the pet never moves; the bubble
     /// grows leftward and upward, into the empty desktop area.
+    ///
+    /// The frame change is ANIMATED: an instant snap shrinks the window before
+    /// the bubble's fade-out has played, clipping the card mid-animation —
+    /// the vanish read as a choppy collapse. A short ease matches the
+    /// bubble's spring closely enough that card and window move as one.
     private func syncPanelSize(_ size: CGSize) {
         guard let panel else { return }
         let frame = panel.frame
         guard abs(frame.width - size.width) > 0.5 || abs(frame.height - size.height) > 0.5 else { return }
-        panel.setFrame(NSRect(x: frame.maxX - size.width, y: frame.minY,
-                              width: size.width, height: size.height),
-                       display: true)
+        let target = NSRect(x: frame.maxX - size.width, y: frame.minY,
+                            width: size.width, height: size.height)
+        // Streaming answers resize the panel repeatedly — an in-flight window
+        // animation is superseded by the next target, never queued up.
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.22
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            context.allowsImplicitAnimation = true
+            panel.setFrame(target, display: true)
+        }
     }
 
     /// Viewport height for a long answer when the screen itself is the limit
@@ -1172,6 +1198,12 @@ struct PetView: View {
                 Color.clear.frame(height: 1)
             }
         }
+        // Dissolve toward the pet: the card fades while shrinking slightly
+        // into the corner above the mole's head (the panel widens leftward,
+        // so the pet owns the trailing edge). A bare removal just blinks —
+        // with no anchor the collapse reads as the bubble being sucked
+        // sideways by the window resize.
+        .transition(.opacity.combined(with: .scale(scale: 0.92, anchor: .bottomTrailing)))
         .animation(Airi.controlAnimation, value: bubbleVisible)
     }
 

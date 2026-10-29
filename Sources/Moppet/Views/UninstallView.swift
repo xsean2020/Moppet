@@ -299,7 +299,8 @@ struct UninstallView: View {
                                         mode: .permanent, success: true, error: nil)
                     }
                 }
-                batchProgress = (index + 1, picked.count)
+                batch?.done = index + 1
+                batch?.total = picked.count
             }            // ONE audit record for the whole batch — previously every app
             // produced its own row, so a 5-app uninstall spammed History with
             // five 1-path entries at the same timestamp.
@@ -327,7 +328,10 @@ struct UninstallView: View {
             selectedApps.subtract(trashedIDs)
             withAnimation { batchResult = outcome }
             batchRunning = false
-            batchProgress = nil
+            // Hold the ring long enough to register (small batches finish
+            // inside one frame, which reads as a glitch without this).
+            await BatchProgressHold.until(startedAt)
+            batch = nil
             UXFeedback.success()
             PetBus.shared.say(
                 String(format: L("Uninstalled %lld apps 🗑"), outcome.trashed.count),
