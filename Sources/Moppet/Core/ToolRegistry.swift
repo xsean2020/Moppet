@@ -473,7 +473,7 @@ enum ToolRegistry {
             let records = Array(HistoryStore.load().suffix(limit).reversed())
             if records.isEmpty { return "No runs recorded." }
             return records.map {
-                "· \($0.date.formatted(date: .abbreviated, time: .shortened)): freed \($0.freedBytes.bytesFormatted) in \($0.itemCount) paths [\($0.sectionTitles.joined(separator: ", "))]"
+                "· \(L10n.date($0.date)): freed \($0.freedBytes.bytesFormatted) in \($0.itemCount) paths [\($0.sectionTitles.joined(separator: ", "))]"
             }.joined(separator: "\n")
         })
 

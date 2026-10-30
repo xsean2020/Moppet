@@ -187,8 +187,7 @@ struct SystemHogsView: View {
                                 .toggleStyle(.checkbox)
                                 .controlSize(.small)
                                 .labelsHidden()
-                            Text(snapshot.date?
-                                .formatted(date: .abbreviated, time: .shortened) ?? snapshot.id)
+                            Text(snapshot.date.map { L10n.date($0) } ?? snapshot.id)
                                 .font(.system(size: 12, design: .monospaced))
                                 .foregroundStyle(Airi.neutral700)
                             Spacer()

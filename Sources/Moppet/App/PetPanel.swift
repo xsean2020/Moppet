@@ -398,7 +398,8 @@ final class WindowRouter {
             FileHandle.standardError.write(Data((
                 "win-debug id=\(id) frame=\(window.frame) visible=\(window.isVisible) "
                 + "occlusion=\(window.occlusionState.rawValue) activeSpace=\(window.isOnActiveSpace) "
-                + "mini=\(window.isMiniaturized) key=\(window.isKeyWindow)\n"
+                + "mini=\(window.isMiniaturized) key=\(window.isKeyWindow) "
+                + "opaque=\(window.isOpaque) bgAlpha=\(window.backgroundColor.alphaComponent)\n"
             ).utf8))
         }
     }

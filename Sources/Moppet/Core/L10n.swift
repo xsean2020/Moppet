@@ -36,6 +36,37 @@ enum L10n {
         resolvedCode == "zh-Hans" ? (zh[key] ?? key) : key
     }
 
+    /// Locale that follows the in-app language switch, NOT the system one.
+    /// `Date.formatted(...)` reads the system locale, so an English macOS with
+    /// the app set to 中文 produced "Oct 30, 2026" inside a Chinese sentence.
+    static var locale: Locale { Locale(identifier: resolvedCode) }
+
+    /// Localized date/time for every UI surface (history, modifications,
+    /// session titles). Always route through here instead of
+    /// `Date.formatted(date:time:)`.
+    static func date(_ date: Date,
+                     dateStyle: DateFormatter.Style = .medium,
+                     timeStyle: DateFormatter.Style = .short) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = locale
+        formatter.dateStyle = dateStyle
+        formatter.timeStyle = timeStyle
+        return formatter.string(from: date)
+    }
+
+    /// "3 小时前" / "3 hours ago" for recent timestamps; absolute date once the
+    /// event is older than a week (relative ages stop being useful there).
+    static func relativeDate(_ date: Date) -> String {
+        let interval = Date().timeIntervalSince(date)
+        guard interval >= 0, interval < 7 * 24 * 60 * 60 else {
+            return self.date(date)
+        }
+        let formatter = RelativeDateTimeFormatter()
+        formatter.locale = locale
+        formatter.unitsStyle = .full
+        return formatter.localizedString(for: date, relativeTo: Date())
+    }
+
     /// Forces the zh table to initialize and sanity-checks known mappings.
     /// A duplicate key in the literal traps at first init (Swift runtime) —
     /// calling this from SmokeTest surfaces that in CI instead of crashing
@@ -124,6 +155,20 @@ private let zh: [String: String] = [
     "Codex-style agent with shell, patches & cleaning tools": "Codex 风格智能体——可执行命令、打补丁、调用清理工具",
     "Add an API key in Settings to enable the agent": "在设置里添加 API Key 即可启用智能体",
     "tools": "个工具",
+    // dashboard round 2 — primary action, disk pressure, plain-language status
+    "Scan for cleanable items": "扫描可清理项",
+    "Open the clean page and scan the current selection": "打开清理页并扫描当前勾选内容",
+    "Tight": "空间偏紧",
+    "Very low": "空间不足",
+    "Available": "可用空间",
+    "%@ used of %@": "已用 %@ · 共 %@",
+    "Chat history": "聊天记录",
+    "%lld tools available": "%lld 个工具可用",
+    "Custom endpoint": "自定义端点",
+    // sidebar rows — concrete verbs, so the band label is not repeated
+    "Cache Clean": "缓存清理",
+    "App Uninstall": "应用卸载",
+    "Project Cleanup": "项目清理",
     // clean flow
     "Pick what to look for — nothing is deleted before you confirm": "选择要查找的内容——确认前不会删除任何东西",
     "Measuring candidates — read-only pass": "测量候选——只读扫描",
@@ -269,6 +314,7 @@ private let zh: [String: String] = [
     // status / optimize / purge
     "Output": "输出", "Disk · %@": "磁盘 · %@", "Top processes": "进程资源占用",
     "Scanning project folders…": "正在扫描项目目录…", "Search roots": "搜索根目录",
+    "Restore default folders": "恢复默认目录",
     "%@ free": "%@ 可用",
     "Process data unavailable": "暂时拿不到进程数据",
     "%1$lld active · %2$lld disabled": "%1$lld 个启用 · %2$lld 个已禁用",
@@ -389,6 +435,10 @@ private let zh: [String: String] = [
     "No AI provider configured yet — open Settings to add an API key or sign in.":
         "还没有配置 AI 服务商——请打开设置添加 API Key 或登录。",
     "%@ is chat-window only — double-click the pet to open it": "%@ 只能在聊天窗口使用——双击宠物打开",
+    "The model returned no text — open the chat window for details.":
+        "模型没有返回文字内容——详情见聊天窗口。",
+    "The model returned an error with no details.": "模型返回了错误，但没有给出原因。",
+    "(empty response)": "（空回复）",
     // chat window
     "set an API key in Settings": "请在设置里配置 API Key",
     "sandbox": "沙盒",
@@ -541,6 +591,15 @@ private let zh: [String: String] = [
     "Biggest files on disk — select and move to the Trash": "磁盘上最大的文件——勾选后移入废纸篓",
     "Min size": "最小大小", "Scope": "范围",
     "User Folders": "用户文件夹", "Whole Home": "整个主目录", "Containers & Caches": "容器与缓存",
+    // large files → custom scan folders
+    "Custom Folder": "自定义目录",
+    "Add Folder…": "添加目录…",
+    "Remove folder": "移除目录",
+    "Pick at least one folder to scan.": "请至少选择一个要扫描的目录",
+    "Choose folders to scan": "选择要扫描的目录",
+    "Folder not found": "目录不存在",
+    "None of the chosen folders exist anymore — add a folder and scan again.":
+        "所选目录都已不存在——请重新添加目录后再扫描。",
     "No large files found": "没有找到大文件",
     "Try a smaller size filter or another scope.": "试试调低大小门槛或换一个范围。",
     "Spotlight indexing seems off — results may be incomplete. Turn it on in System Settings → Siri & Spotlight.":

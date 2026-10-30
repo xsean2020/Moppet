@@ -21,7 +21,10 @@ struct MoppetApp: App {
                                        "--brain-exec", "--yes", "--probe-floater",
                                        "--probe-models", "--probe-pet-bubble",
                                        "--probe-pet-panel", "--probe-imk", "--probe-analyze",
-                                       "--probe-analyze-render",
+                                       "--probe-analyze-render", "--probe-sidebar", "--probe-home",
+                                       "--net-probe",
+                                       "--samples", "--hosts", "--json", "--throughput",
+                                       "--compare", "--run", "--rounds", "--control-ip", "--no-record",
                                        "--route-perf", "--win-debug", "--scheduled-clean"]
         let args = CommandLine.arguments
         // A bare "--" is the conventional separator (`swift run Moppet -- --smoke`)
@@ -45,6 +48,36 @@ struct MoppetApp: App {
             let output = args.count > index + 1 ? args[index + 1] : "/tmp/moppet-analyze.png"
             let appearance = args.count > index + 2 ? args[index + 2] : "light"
             Task { @MainActor in AnalyzeRenderProbe.run(outputPath: output, appearance: appearance) }
+        }
+        // Headless network probe: the measurement kernel, validated in a
+        // terminal before any UI exists. `Moppet --net-probe [--json]`.
+        if args.contains("--net-probe") {
+            NetworkProbeCLI.run()
+        }
+        // Sidebar render: writes a PNG of the nav panel so its spacing and
+        // icon work can be checked without a screen-recording grant.
+        // `Moppet --probe-sidebar out.png dark 700`
+        if let index = args.firstIndex(of: "--probe-sidebar") {
+            let output = args.count > index + 1 ? args[index + 1] : "/tmp/moppet-sidebar.png"
+            let appearance = args.count > index + 2 ? args[index + 2] : "light"
+            let height = args.count > index + 3 ? (Double(args[index + 3]) ?? 700) : 700
+            Task { @MainActor in
+                SidebarRenderProbe.runPanel(outputPath: output, appearance: appearance,
+                                            height: height)
+            }
+        }
+        // Dashboard render: writes a PNG of the landing page so card layout
+        // and metric legibility can be checked without screen recording.
+        // `Moppet --probe-home out.png dark 780 640`
+        if let index = args.firstIndex(of: "--probe-home") {
+            let output = args.count > index + 1 ? args[index + 1] : "/tmp/moppet-home.png"
+            let appearance = args.count > index + 2 ? args[index + 2] : "light"
+            let width = args.count > index + 3 ? (Double(args[index + 3]) ?? 780) : 780
+            let height = args.count > index + 4 ? (Double(args[index + 4]) ?? 640) : 640
+            Task { @MainActor in
+                HomeRenderProbe.run(outputPath: output, appearance: appearance,
+                                    width: width, height: height)
+            }
         }
         // LaunchAgent entry: the scheduled safe clean. Runs headless, records
         // to history with source .scheduled, exits.
@@ -258,13 +291,15 @@ enum Route: String, Hashable, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .dashboard: L("Dashboard")
-        case .clean: L("Clean")
-        case .uninstall: L("Uninstall")
+        // Concrete row names: the band header already says "Space Cleanup",
+        // so a row also called "Clean" read as the same thing twice.
+        case .clean: L("Cache Clean")
+        case .uninstall: L("App Uninstall")
         case .optimize: L("Optimize")
         case .startup: L("Startup")
         case .analyze: L("Analyze")
         case .status: L("Status")
-        case .purge: L("Purge")
+        case .purge: L("Project Cleanup")
         case .slim: L("Slim")
         case .hogs: L("Space Hogs")
         case .largeFiles: L("Large Files")
@@ -276,52 +311,28 @@ enum Route: String, Hashable, CaseIterable, Identifiable {
 
     var icon: String {
         switch self {
+        // One glyph family, all outline: every symbol below is a linear SF
+        // Symbol at the same optical weight. `tray.full` (a filled stack) and
+        // `square.and.arrow.down.on.square` (a dense double-frame) were the
+        // two marks that read as a different icon set.
         case .dashboard: "square.grid.2x2"
         case .clean: "paintbrush"
-        case .uninstall: "square.and.arrow.down.on.square"
+        case .uninstall: "trash"
         case .optimize: "wand.and.rays"
         case .startup: "power"
-        case .analyze: "chart.bar.doc.horizontal"
+        case .analyze: "chart.bar.xaxis"
         case .status: "cpu"
         case .purge: "shippingbox"
         case .slim: "scissors"
         case .hogs: "internaldrive"
         case .largeFiles: "doc.text.magnifyingglass"
-        case .orphans: "tray.full"
+        case .orphans: "tray"
         case .history: "clock.arrow.circlepath"
         case .settings: "gearshape"
         }
     }
 
     /// mole command equivalence shown as a tiny caption in the sidebar.
-}
-
-/// Sidebar grouping by job, not by implementation: Dashboard → free up space →
-/// keep the machine healthy → read the reports, with History/Settings last
-/// (macOS convention).
-///
-/// Band labels name the *category*, never a row: "Clean" over a row also
-/// called "Clean" just made the top of the sidebar look doubled. Rows stay
-/// the concrete actions; the header is the umbrella.
-private enum RouteGroup {
-    // Computed (not stored) so a language switch re-resolves L() — a stored
-    // static would keep the first language's band labels for the whole run.
-    static var top: [(label: String, routes: [Route])] {
-        [("", [.dashboard])]
-    }
-    static var cleaning: [(label: String, routes: [Route])] {
-        // Uninstall before Orphans: residue is what uninstalling leaves behind.
-        [(L("Space Cleanup"), [.clean, .uninstall, .orphans, .purge, .slim])]
-    }
-    static var system: [(label: String, routes: [Route])] {
-        [(L("Maintenance"), [.hogs, .largeFiles, .optimize, .startup])]
-    }
-    static var insights: [(label: String, routes: [Route])] {
-        [(L("Insights"), [.status, .analyze])]
-    }
-    static var bottom: [(label: String, routes: [Route])] {
-        [("", [.history, .settings])]
-    }
 }
 
 struct RootView: View {
@@ -422,123 +433,19 @@ struct RootView: View {
     }
 
     // MARK: - Sidebar
+    /// The panel itself lives in SidebarPanel.swift (brand header, grouped
+    /// route list, pet footer) so its spacing ladder is testable on its own.
     private var sidebar: some View {
-        VStack(spacing: 0) {
-            // brand header
-            HStack(spacing: 8) {
-                Image(nsImage: MoppetBrandIcon.image)
-                    .resizable()
-                    .interpolation(.high)
-                    .frame(width: 20, height: 20)
-                Text("Moppet")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(Airi.neutral950)
-                Spacer()
-            }
-            .padding(.horizontal, 14)
-            .padding(.top, 14)
-            .padding(.bottom, 10)
-
-            ScrollView {
-                // Bands are separated by whitespace, not by extra stack
-                // spacing: rows inside a band sit 2pt apart so each band
-                // reads as one block, and the 16pt jump between bands is
-                // what the eye uses to parse the list at a glance.
-                VStack(alignment: .leading, spacing: 0) {
-                    sidebarSection(rows: RouteGroup.top, topPadding: 2)
-                    sidebarSection(rows: RouteGroup.cleaning, topPadding: Airi.space3)
-                    sidebarSection(rows: RouteGroup.system, topPadding: Airi.space3)
-                    sidebarSection(rows: RouteGroup.insights, topPadding: Airi.space3)
-                    sidebarSection(rows: RouteGroup.bottom, topPadding: Airi.space4)
-                }
-                .padding(.horizontal, 10)
-                .padding(.bottom, 8)
-            }
-
-            Divider().overlay(Airi.neutral200.opacity(0.5))
-            // footer: pet toggle — PetPanelVisibilityFlag is @Observable, so
-            // the eye tracks the actual panel state (previously it read a
-            // plain controller property in body and never refreshed).
-            HStack(spacing: 8) {
-                Image(systemName: "pawprint.fill")
-                    .font(Airi.captionFont)
-                    .foregroundStyle(Airi.primary)
-                Text(String(format: L("%@ · desktop pet"), PetIdentity.name))
-                    .font(Airi.caption2Font)
-                    .foregroundStyle(Airi.neutral500)
-                    .lineLimit(1)
-                Spacer()
-                Button {
-                    PetPanelController.shared.isVisible
-                        ? PetPanelController.shared.hide()
-                        : PetPanelController.shared.show()
-                } label: {
-                    Image(systemName: PetPanelVisibilityFlag.shared.visible
-                          ? "eye" : "eye.slash")
-                        .font(Airi.footnoteFont)
-                        .foregroundStyle(Airi.neutral500)
-                }
-                .buttonStyle(.plain)
-                .help(L("Show / hide the pet"))
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        // Liquid Glass (macOS 26+) already gives NavigationSplitView a sidebar
-        // material; stacking ultraThinMaterial on top double-blurs it and reads
-        // as a milky band. Keep the explicit material only pre-26.
-        .background(OSCompat.usesLiquidGlass
-                    ? AnyShapeStyle(Color.clear)
-                    : AnyShapeStyle(.ultraThinMaterial))
-        // Keep the sidebar a usable width when the window narrows — without
-        // a floor, .balanced style crushes it until row titles wrap mid-word.
-        .navigationSplitViewColumnWidth(min: 208, ideal: 224, max: 288)
+        SidebarPanel(route: $route)
     }
 
     private func backToDashboard() {
         route = .dashboard
     }
 
-    // MARK: - Sidebar
-
-    /// One labelled band of routes ("Space Cleanup", "Maintenance", …).
-    /// Empty label = no section header (Dashboard, History/Settings bands).
-    @ViewBuilder
-    private func sidebarSection(rows: [(label: String, routes: [Route])],
-                                topPadding: CGFloat = 0) -> some View {
-        ForEach(Array(rows.enumerated()), id: \.offset) { index, row in
-            if !row.label.isEmpty {
-                Text(row.label)
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(Airi.neutral500)
-                    .textCase(.uppercase)
-                    .padding(.leading, 12)
-                    // Only the first band gets the caller's gap; extra rows
-                    // in the same call get the standard header gap.
-                    .padding(.top, index == 0 ? topPadding : Airi.space3)
-                    .padding(.bottom, Airi.space1)
-            }
-            VStack(alignment: .leading, spacing: 2) {
-                ForEach(row.routes) { item in
-                    sidebarRow(item)
-                }
-            }
-            .padding(.top, row.label.isEmpty ? topPadding : 0)
-        }
-    }
-
-    private func sidebarRow(_ item: Route) -> some View {
-        let isActive = route == item
-        return SidebarRowButton(item: item, isActive: isActive) {
-            route = item
-        }
-        .keyboardShortcut(Self.routeShortcut(item))
-    }
-
     /// ⌘1…⌘9 jumps to the first nine sidebar routes (dashboard first),
     /// giving the whole app keyboard navigation without touching the flow.
-    private static func routeShortcut(_ route: Route) -> KeyboardShortcut? {
+    static func routeShortcut(_ route: Route) -> KeyboardShortcut? {
         // Same order as RouteGroup so the shortcut number matches what the
         // eye counts in the sidebar (rows are reordered, shortcuts follow).
         let ordered: [Route] = [.dashboard, .clean, .uninstall, .orphans, .purge,
@@ -582,64 +489,6 @@ struct RootView: View {
         case .settings:
             SettingsView(onClose: backToDashboard)
         }
-    }
-}
-
-/// Sidebar row with hover feedback — the plain Button had no hover state, so
-/// rows only reacted on click (off-pattern for macOS list navigation).
-private struct SidebarRowButton: View {
-    let item: Route
-    let isActive: Bool
-    let action: () -> Void
-
-    @State private var hovering = false
-    @State private var pressed = false
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 10) {
-                Image(systemName: item.icon)
-                    .font(Airi.bodyFont)
-                    .symbolRenderingMode(.hierarchical)
-                    .foregroundStyle(isActive ? Airi.primary : Airi.neutral500)
-                    .frame(width: 20)
-                    // The icon bounces whenever its row BECOMES active —
-                    // the selection change reads as an event, not a repaint.
-                    .symbolEffect(.bounce, value: isActive)
-                Text(item.title)
-                    .font(.system(size: 13, weight: isActive ? .semibold : .regular))
-                    .foregroundStyle(isActive ? Airi.primary : Airi.neutral800)
-                    .lineLimit(1)
-                Spacer()
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(isActive ? Airi.primary.opacity(0.1)
-                          : hovering ? Airi.neutral100.opacity(0.6) : Color.clear)
-                    // Active pill gets a soft primary glow.
-                    .shadow(color: isActive ? Airi.primary.opacity(0.15) : .clear,
-                            radius: 6, y: 1)
-            )
-            .scaleEffect(pressed ? 0.97 : 1)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        // macOS 26 paints a blue keyboard-focus ring on the first focusable
-        // sidebar row at launch, so the *inactive* Dashboard row looked
-        // "selected" right next to the real active pill. Selection is already
-        // conveyed by the pill + ⌘1–9, so suppress the focus effect here.
-        .focusEffectDisabled()
-        .onHover { hovering = $0 }
-        .animation(Airi.hoverAnimation, value: hovering)
-        .animation(Airi.hoverAnimation, value: isActive)
-        .animation(Airi.hoverAnimation, value: pressed)
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { _ in pressed = true }
-                .onEnded { _ in pressed = false }
-        )
     }
 }
 

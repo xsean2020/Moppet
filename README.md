@@ -188,7 +188,7 @@ swift build
 | **项目清理** Purge | **21 类**可再生产物（node_modules、target、build、dist、.next、.gradle、Pods、`__pycache__`…），自定义根目录并行扫描 | 永久删除（确认框明确告知不进废纸篓） |
 | **瘦身** Slim | 自读 fat header 扫描通用二进制 → 副本剥离 Intel 切片 → 原身份重签名 → codesign 校验通过才替换 | 原件进废纸篓；失败自动回滚；**仅 Apple Silicon** |
 | **空间大户** Space Hogs | APFS 本地快照、Docker（镜像/容器/卷/构建缓存）、Homebrew 旧版本；iOS 备份 / 邮件 / 信息为只读报告 | 快照永久删、Docker prune、brew cleanup；只读项不删 |
-| **大文件** Large Files | 按大小 Top N，可按最小体积与范围筛选；受保护路径（文档/桌面等）标锁 | 进废纸篓（可恢复） |
+| **大文件** Large Files | 按大小 Top N，可按最小体积与范围筛选；范围支持**自定义目录**（NSOpenPanel 多选、可增删、跨启动记忆，目录失效会标红并跳过）；受保护路径（文档/桌面等）标锁 | 进废纸篓（可恢复） |
 | **优化** Optimize | Finder/Dock 重启、DNS 刷新、Spotlight 重建、内存 purge、网络卷 .DS_Store、30 天+ Saved State、健康报告 | 不涉及用户数据 |
 | **启动项** Startup | 扫描 `~/Library/LaunchAgents`、`/Library/LaunchAgents`、`/Library/LaunchDaemons`（`com.apple.*` 折叠计数）；显示 RunAtLoad / KeepAlive / loaded | **不删文件**：写 `Disabled` + `launchctl bootout` 立即停跑，可逆 |
 | **状态** Status | CPU / 内存 / 网络 / 电池 / Top 进程 / uptime，2 秒刷新 | 仅 SIGTERM（带确认） |

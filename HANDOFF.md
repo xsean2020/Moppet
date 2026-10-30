@@ -16,6 +16,75 @@
 - **视觉轮**：Analyze 首扫进度环终于接上了数据（此前永远 0%）——phase-2 每测完一个源 tick 一次，底栏新增「测量中 N / M…」心跳 chip（两相扫描下底栏不再看起来已经完成）；EntryRow 的 `NSWorkspace.icon(forFile:)` 加 NSCache（流式 re-sort 时不再每 body 重新取图）。
 - 已知未修（审核确认、留待后续）：ScrollbarTuner 每 didUpdate 全树遍历 + 滚动条不可交互/无 AX（需要重设计）；BrainGrowthCard.refresh 在 MainActor 做整片文件 IO；parallelSize 任务数无滑动窗口上界（IOThrottle=32 兜底）；AnalyzeView 删除收尾的同步 IO 在主线程。
 
+### 2026-10-30 追加：大文件「自定义目录」
+
+- `LargeFilesEngine.Scope` 新增 `.custom`；`find(...)` 增加 `customRoots:` 参数（仅 `.custom` 读取，自动展开 `~`、过滤已不存在/非目录的路径，空集合直接返回）。新增 `LargeFilesEngine.CustomRoots`，用 UserDefaults（key `largeFiles.customRoots`）持久化绝对路径。
+- `LargeFilesView` 范围菜单新增「自定义目录」：首次切入选会自动弹 `NSOpenPanel`（仅目录、可多选）；卡片内每个目录一个 chip，可单独移除；失效目录标红「目录不存在」并在扫描时跳过；改动目录集合会清空旧结果，避免把已移除目录里的文件误勾进废纸篓。目录为空时 Scan 禁用。
+- 空结果提示从 `spotlightWarning: Bool` 改为通用 `warningMessage: String?`（Spotlight 未开 / 自定义目录全部失效共用一张卡）。`--smoke` 通过。
+
+### 2026-10-30 追加：空气泡（模型无输出 / 报错）改为提示文案
+
+- **现象**：快问快答（QuickChat）的答案写在宠物气泡里。模型没有任何文字输出时（纯工具轮、空回复），`turnCompleted` 把 `""`（或只剩 `" · 812 tk"`）写进气泡，`hideAfter 0` 让一张**空白卡片**一直挂着；错误描述为空时则是一个孤零零的 `✗`。聊天窗的 assistant 空条目同样会渲染成空卡片。
+- **PetBus 统一兜底**：新增 `emptyAnswerHint`（模型没返回文字 → 提示去聊天窗看详情）与 `streamingPlaceholder`（`…`）。`say()` / `endStreamingTurn()` 的空白文本一律替换为提示；`beginStreamingTurn()` 直接以 `…` 开场（首 token 慢时不再是空气泡）；`sayStreaming()` 忽略纯空白增量（否则气泡被清空但还在屏幕上）；空白收尾不摆 celebrating 姿势，落到 `.idle`。
+- **QuickChat**：空回答不再拼接 token 计数（否则气泡只剩 `" · 812 tk"`）；错误描述为空回落「模型返回了错误，但没有给出原因。」。
+- **视图侧兜底**：`PetView.bubbleMessage` / `PetBubbleContent` / `ChatView.markdownBubble` 对空白文本再兜一层（渲染提示而不是空卡片），宽高也按兜底文本计算，避免「窄卡片 + 长提示」溢出。
+- 验证：`swift build --disable-sandbox` 0 错 0 警；`--smoke` PASS（新增 4 条气泡断言：占位开场 / 空白增量保占位 / 空收尾转提示且不庆祝 / 空白 `say()` 转提示）。
+
+### 2026-10-30 追加：项目清理「搜索根目录」改用文件夹选择器
+
+- **动因**：手打路径太麻烦（且打错只会得到「目录不存在」）。`PurgeView` 的 `TextField + Add` 换成 `NSOpenPanel`（仅目录、可多选、起始目录为最后一个根目录），与「大文件 → 自定义目录」的交互对齐。
+- **持久化**：新增 `PurgeEngine.RootsStore`（UserDefaults key `purge.roots`，存绝对路径）。`load()` 返回 `nil` 表示从未保存 → 首次仍用 `defaultRoots()`；保存空数组表示「用户清空了」，不会被默认值覆盖回来。此前手工添加的目录关窗即丢。
+- **一致性**：根目录集合变化会清空已扫出的行/勾选/结果文本——已移除目录里的产物不能还留着被勾选删除；列表行用 `~/` 缩写显示，悬停看全路径；全部删空时提供「恢复默认目录」并把 Scan 禁用。
+- **保留的防线**：`/` 与家目录仍被拒绝（`Refusing to walk the whole disk / home folder`），只是提示从红框改为行内红字。
+- 影响面：`PurgeView` 仅被 `RootView` 引用；`swift build --disable-sandbox` 0 错 0 警，`--smoke` PASS。§10 里「Purge 根目录框补 FocusState 焦点接线」那条随文本框一起作废。
+
+### 2026-10-30 追加：侧边栏视觉轮（图标 / 排版 / 色彩 / 顶底布局）
+
+按一份四维度视觉批评落地，**面板已抽成独立文件**：
+
+- **结构**：侧边栏从 `RootView.sidebar` 抽成 `Views/SidebarPanel.swift`（`SidebarPanel` + `RouteGroup` + `SidebarRowButton`），`RootView` 只剩一行委托。`RouteGroup.bottom`（历史/设置）从滚动列表尾部改成**钉在 ScrollView 之外**——作为列表尾部时，700pt 默认窗口高度下「设置」直接被裁掉。
+- **图标**：全部换成线性 SF Symbols（`tray.full→tray`、`square.and.arrow.down.on.square→trash`、`chart.bar.doc.horizontal→chart.bar.xaxis`），统一 `.system(size:13, weight:.medium)` + `.symbolRenderingMode(.monochrome)`；底栏 `pawprint.fill→pawprint`。
+- **排版**：行高 32、行缝 1、组间距 14、行内边距 12、圆角 8；分组标题 11pt Regular `#8E8E93`（深色 `#9C9CA3`）——**CJK 标签不加 tracking**（`headerTracking()` 判断），否则中文会变成「空 间 清 理」。
+- **色彩**：选中态 `rgba(0,122,255,0.08)`（深色 0.22 alpha），去掉原来的 primary 阴影 + semibold；未选中补 hover 底衬（浅色 black 4% / 深色 white 6%）。
+- **顶/底**：品牌行 14pt semibold、图标 22pt，顶部留白在 32pt 标题栏安全区之外再加 26pt；底部 `Divider()` 换成两端渐隐 hairline（`Airi.hairline`），footer 图标统一 12pt。
+- 令牌集中在 `AiriTheme.swift` 的 `// MARK: - Sidebar ladder`。
+- **新调试开关** `--probe-sidebar <png> [light|dark] [height]`（`App/SidebarRenderProbe.swift`）：面板离屏 2x 渲染，无需录屏权限。注意：本机 `screencapture` 无权限；`NavigationSplitView` 在离屏 NSWindow 里**不布局 sidebar 列**（只能单独 host 面板）；构建须 `swift build --disable-sandbox`。
+
+### 2026-10-30 追加：网络测量内核 + `--net-probe`（P0，仅 CLI，无 UI）
+
+- 新增 `Core/Modules/NetworkEngine.swift`（测量内核）+ `Core/NetworkProbeCLI.swift`（`--net-probe` 入口）。开关：`--samples N` `--hosts a,b` `--json` `--throughput`。
+- **分段测量必须用 Network.framework，不能用 URLSession**：本机开着 PAC 代理时，`URLSessionTaskMetrics` 把请求塞进隧道，报出 TCP 1454ms，而直连同一 IP 的 `connect()` 只有 1.0ms（`connectionProxyDictionary` 与清空 `*_PROXY` 都无效）。`NWConnection` 不读系统代理，拿到的是网络本身。
+- 四个阶段：DNS（`getaddrinfo`，冷解析用 `r<rand>.example.com` 绕缓存）→ TCP（BSD 非阻塞 `connect()` 到 IP，排除 DNS 污染）→ TLS（`NWConnection` TLS ready 减去 TCP）→ TTFB（TLS 连接上发 HTTP/1.1 GET，ALPN 钉死 h1.1，否则 h2 二进制帧让"首字节"失去意义）。
+- **实测基线（本机，2026-10-30）**：cloudflare TCP 1.2ms / TLS 1800–2400ms（放大 1000×+，握手反复 RTO）；apple TCP 7ms / TLS 35ms；baidu TCP 35ms / TLS 40ms；冷 DNS 100ms。若只 ping 或只测 DNS 会得出"网络很好"的相反结论。
+- 判定阈值：**TLS > 400ms 且 TLS÷TCP > 10** 才算握手异常。只看比值会误报——TCP 4ms → TLS 100ms 也是 24×，那是正常证书开销。
+- 吞吐：多流（默认 4）NWConnection 下载 + 丢弃前 1.5s 慢启动，实测 9.4Mbps / 7.6MB / 6.5s。
+- `--smoke` 新增 11 条统计断言（中位数抗离群、偶数取中间两值均值、MAD 围绕中位数、p95、负值丢弃、放大比零除保护），当前 **SMOKE PASS**。
+- 踩坑：`StreamReader` 用 `[weak self]` 会让 reader 在 continuation 闭包返回后立刻释放，handler 变空操作 → continuation 永不 resume → 整个测速挂死（120s 超时）。必须强引用 + `finish()` 里置 nil 断环。
+
+### 2026-10-30 追加：网络参照系（P1）+ `--compare`
+
+- 新增 `Core/NetworkReference.swift`：`Verdict`（improved/unchanged/regressed/inconclusive）、`MetricChange`、`paired()`、`unpaired()`、`NetworkSampleStore`（`~/.moppet/network/samples.jsonl`，0600，按 `interface|host|hour` 分桶）。
+- `--compare`：默认 **A/A 自检**（A、B 交错各 6 轮，什么都不改，四个指标必须全 `unchanged`）；加 `--run "<cmd>"` 变 A/B（测→执行→再测，不可回滚的配置改动走 unpaired）。
+- 判定：`MDD = 2.8σ/√n`，σ 用 1.4826×MAD；**对照组默认取网关**（不经 DNS/WAN），`净改善 = Δ实验 − Δ对照`，σ 平方和相加；再叠加 3% 实际下限；`n<5` 一律 `inconclusive`（findings 同样要求 n≥5）。
+- 普通运行自动记录历史，下次同接口同时段多打一行 `history ttfb p50/p10/p90`；`--no-record` 跳过。
+- **验收**：A/A 实测 `4/4 unchanged`；`--smoke` 新增 10 条合成断言（清晰改善→improved、噪声→unchanged、n<5→inconclusive、对照组同幅漂移把改善抵消）全绿。
+- 坑：函数内 `typealias Ref = NetworkReference` 会让 Swift 误判外层 `failures` 恒为 0，在 `print(failures == 0 ? ...)` 报 "will never be executed"；改用全限定名。
+
+### 2026-10-30 追加：网络测量代码评审修正（4 条）
+
+- **NWPathMonitor 等待**：轮询 20×50ms（上限 1s）改为 `withCheckedContinuation` + `ResumeGate` 单次 resume + **2s** 超时。回调即返回，不再靠轮询撞运气。（注：`interface` 原本不会丢——它 fallback 到 `route.interface`；真正会丢的是 `interfaceKind/isExpensive/isConstrained`。）
+- **SYN 重传判定**：原实现用绝对值 1s/3s/7s ±25%，会把 900ms 的正常连接误判成重传。改为**相对基线**（取最快样本）+ 步长 15% 窗口 + 要求 n≥3；已加回归断言「慢链路不算重传」。
+- **外部命令**：本来每次运行只调一次，但发现一个隐藏的第三次调用——`route -n get default` 输出里**没有 `mtu:` 键**（MTU 在表格列里），所以 `route.mtu` 恒为 nil，`networksetup -getMTU` 每次都会跑，而且是同步阻塞。改为按表头名定位 `mtu` 列解析，fallback 改 async 且基本不再触发。解析器抽成纯函数 `parseRoute`，用真实样本在 `--smoke` 里断言。
+- **统计防御**：`Stats.of` 原本已 `guard !isEmpty` + `isFinite` 过滤，不会除零。但评审点得对——NaN 的后果不是崩溃而是**静默失效**：`NaN > mdd` 恒为 false，判定会永远读 `unchanged`。补了 NaN/Infinity/空数组的显式断言。
+
+### 2026-10-30 修复：macOS 26 毛玻璃（vibrancy）完全消失
+
+- **现象**：主窗口没有任何磨砂玻璃，侧栏和详情区都是纯色平板。
+- **根因**：`WindowVibrancy` 用 `NSVisualEffectView` + `.behindWindow` 混合，这种模式要求窗口自身对合成器透明（`isOpaque == false` + `backgroundColor` 带 alpha）。macOS 26 的 SwiftUI 给的是 `isOpaque=true, backgroundColor=white`，效果视图无背景可采样 → 退化成纯色。全窗口实测只有 1 个 `NSVisualEffectView`（就是自己那个，material=21），**没有**系统 sidebar material；各详情页 `.background(Airi.pageBackground.opacity(0.001))` 那个 0.001 alpha 的 hack 也因此一直是白写。
+- **非侧边栏视觉轮引入**：`git worktree` 编基线版本对比，基线同样 `opaque=true bgAlpha=1.0`，是 macOS 26（26.3.1 实测）改了窗口合成行为。
+- **修复**：`Components.swift` 的 `PassThroughVibrancy` 新增 `makeWindowTransparent()`（`window.isOpaque = false` + `window.backgroundColor = .clear`），在 `viewDidMoveToWindow()` 和 `updateNSView()` 各调一次（resize / 外观切换 / 折叠侧栏都可能把窗口改回不透明）。ChatView 共用同一组件，一并修好。
+- **诊断**：`--win-debug` 的 dump 新增 `opaque=` / `bgAlpha=` 两列；修复后实测 `opaque=false bgAlpha=0.0`，`--smoke` PASS。
+
 ---
 
 ## 0. 一句话概述

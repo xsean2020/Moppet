@@ -265,7 +265,7 @@ struct SettingsView: View {
                 NSWorkspace.shared.open(target)
             }
         case .authenticated(let account, let expires):
-            codexLoginState = "✓ Signed in (\(account), expires \(expires.formatted(date: .abbreviated, time: .shortened)))"
+            codexLoginState = "✓ Signed in (\(account), expires \(L10n.date(expires)))"
             ai = AISettings.load()
             codexLoginBusy = false
             PetBus.shared.say("Codex subscription ready 🎫", state: .celebrating)

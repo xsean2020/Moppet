@@ -12,6 +12,29 @@ struct WindowVibrancy: NSViewRepresentable {
     /// pass every hit through to the SwiftUI content above it.
     final class PassThroughVibrancy: NSVisualEffectView {
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            makeWindowTransparent()
+        }
+
+        /// `blendingMode = .behindWindow` samples the desktop *behind* the
+        /// window, and the window server only offers that backdrop to a window
+        /// that is not opaque. SwiftUI hands us an opaque white window
+        /// (`isOpaque=true`, `backgroundColor = white`), so the effect view had
+        /// nothing to sample and composited as a flat fill — the window looked
+        /// like a solid sheet with no glass at all.
+        ///
+        /// Verified with `--probe-window` (which prints the effect stack):
+        /// before this, `isOpaque=true bg=1,1,1,1`; after, `isOpaque=false
+        /// bg=0,0,0,0` and the sidebar/detail show the blurred desktop again.
+        func makeWindowTransparent() {
+            guard let window else { return }
+            if window.isOpaque { window.isOpaque = false }
+            if window.backgroundColor.alphaComponent != 0 {
+                window.backgroundColor = .clear
+            }
+        }
     }
 
     func makeNSView(context: Context) -> NSVisualEffectView {
@@ -30,6 +53,11 @@ struct WindowVibrancy: NSViewRepresentable {
     }
     func updateNSView(_ view: NSVisualEffectView, context: Context) {
         view.material = material
+        // SwiftUI re-runs this on every body update and some of those (window
+        // resize, appearance change, split-view column toggle) can put the
+        // window back to opaque — re-assert rather than trusting the one-shot
+        // viewDidMoveToWindow.
+        (view as? PassThroughVibrancy)?.makeWindowTransparent()
     }
 }
 
@@ -334,85 +362,110 @@ struct IconItemCard: View {
     let title: String
     let subtitle: String
     var metadata: String? = nil
+    var tint: Color = Airi.primary
     let action: () -> Void
 
     @State private var hovering = false
     @State private var appeared = false
+    @State private var pressed = false
     private let entranceIndex: Double
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     init(icon: String, title: String, subtitle: String, metadata: String? = nil,
-         entranceIndex: Double = 0, action: @escaping () -> Void) {
+         tint: Color = Airi.primary, entranceIndex: Double = 0,
+         action: @escaping () -> Void) {
         self.icon = icon
         self.title = title
         self.subtitle = subtitle
         self.metadata = metadata
+        self.tint = tint
         self.entranceIndex = entranceIndex
         self.action = action
     }
 
-    @State private var pressed = false
-
     var body: some View {
         Button(action: action) { cardContent }
             .buttonStyle(.plain)
-            .opacity(appeared ? 1 : 0)
-            .offset(y: appeared ? 0 : 8)
-            .scaleEffect(pressed ? 0.98 : hovering ? 1.015 : 1)
-            .animation(Airi.hoverAnimation, value: pressed)
+            .opacity(appeared || reduceMotion ? 1 : 0)
+            .offset(y: appeared || reduceMotion ? 0 : 8)
+            .scaleEffect(reduceMotion ? 1 : (pressed ? 0.98 : hovering ? 1.01 : 1))
+            .animation(reduceMotion ? nil : Airi.hoverAnimation, value: pressed)
             .onAppear {
-                withAnimation(Airi.entranceCurve.delay(entranceIndex * 0.05)) { appeared = true }
+                if reduceMotion {
+                    appeared = true
+                } else {
+                    withAnimation(Airi.entranceCurve.delay(entranceIndex * 0.05)) {
+                        appeared = true
+                    }
+                }
             }
             .onHover { hovering = $0 }
-            .animation(Airi.cardAnimation, value: hovering)
+            .animation(reduceMotion ? nil : Airi.cardAnimation, value: hovering)
             .simultaneousGesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { _ in pressed = true }
                     .onEnded { _ in pressed = false }
             )
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(Text("\(title). \(subtitle)"))
+            .accessibilityAddTraits(.isButton)
     }
 
+    /// Leading colour chip + title/subtitle stack. The old version pinned the
+    /// card to 132pt and parked a 64pt watermark glyph top-right, which left
+    /// ~90pt of dead space under the copy and let long subtitles run into the
+    /// illustration. Height is content-driven now; no watermark at all.
     private var cardContent: some View {
-        ZStack(alignment: .topLeading) {
-            RoundedRectangle(cornerRadius: Airi.radiusCard, style: .continuous)
-                .fill(Airi.cardBackground)
-            DotPattern(opacity: hovering ? 1 : 0)
-                .clipShape(RoundedRectangle(cornerRadius: Airi.radiusCard, style: .continuous))
-            // watermark icon
-            HStack {
-                Spacer()
-                Image(systemName: icon)
-                    .font(.system(size: 64, weight: .light))
-                    .symbolRenderingMode(.hierarchical)
-                    .foregroundStyle(hovering ? Airi.primary : Airi.neutral400)
-                    .opacity(hovering ? 0.5 : 0.3)
-                    .scaleEffect(hovering ? 1.2 : 1)
-                    .offset(x: hovering ? -4 : 0, y: hovering ? -3 : 0)
-                    .padding(.trailing, 14)
-                    .padding(.top, 10)
-            }
-            VStack(alignment: .leading, spacing: Airi.space1) {
+        HStack(alignment: .top, spacing: Airi.space3) {
+            Image(systemName: icon)
+                .font(.system(size: 14, weight: .medium))
+                .symbolRenderingMode(.monochrome)
+                .foregroundStyle(tint)
+                .frame(width: 26, height: 26)
+                .background(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(tint.opacity(0.12))
+                )
+
+            VStack(alignment: .leading, spacing: 2) {
                 if let metadata {
                     Text(metadata)
-                        .font(Airi.captionFont)
+                        .font(Airi.footnoteFont)
                         .foregroundStyle(Airi.neutral500)
                 }
                 Text(title)
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundStyle(hovering ? Airi.primary : Airi.neutral950)
+                    .font(Airi.emphasisFont)
+                    .foregroundStyle(hovering ? tint : Airi.neutral950)
+                    .lineLimit(1)
                 Text(subtitle)
                     .font(Airi.captionFont)
                     .foregroundStyle(Airi.neutral500)
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
-                Spacer(minLength: 28)
+                    // Reserve the second line so one- and two-line cards in
+                    // the same grid row keep identical heights.
+                    .lineLimit(2, reservesSpace: true)
             }
-            .padding(Airi.space4)
+
+            Spacer(minLength: 0)
+
+            Image(systemName: "chevron.right")
+                .font(Airi.caption2Font.weight(.semibold))
+                .foregroundStyle(Airi.neutral400)
+                .padding(.top, 5)
         }
-        .frame(height: 132)
+        .padding(Airi.space3)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            ZStack {
+                RoundedRectangle(cornerRadius: Airi.radiusCard, style: .continuous)
+                    .fill(Airi.cardBackground)
+                DotPattern(opacity: hovering ? 0.8 : 0)
+                    .clipShape(RoundedRectangle(cornerRadius: Airi.radiusCard, style: .continuous))
+            }
+        )
         .overlay(
             RoundedRectangle(cornerRadius: Airi.radiusCard, style: .continuous)
                 .strokeBorder(
-                    hovering ? Airi.primary.opacity(0.5) : Airi.neutral200.opacity(0.6),
+                    hovering ? tint.opacity(0.5) : Airi.neutral200.opacity(0.6),
                     lineWidth: hovering ? 2 : 1
                 )
                 .allowsHitTesting(false)

@@ -63,7 +63,7 @@ final class ChatSessionStore {
                 SessionInfo(
                     id: entry.id,
                     title: BrainRollout.titleForSession(sessionID: entry.id)
-                        ?? "Session \(entry.date.formatted(date: .abbreviated, time: .shortened))",
+                        ?? "Session \(L10n.date(entry.date))",
                     date: entry.date,
                     itemCount: entry.itemCount
                 )

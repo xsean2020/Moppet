@@ -45,10 +45,26 @@ final class PetBus {
     private let settleLock = NSLock()
     private var settleTask: Task<Void, Never>?
 
+    /// The bubble is the quick bar's ONLY surface, so a blank message must
+    /// never reach it: an empty card reads as a broken bubble. Callers that
+    /// genuinely have nothing to say (model returned no text, error without
+    /// detail) get this hint instead.
+    static let emptyAnswerHint = L("The model returned no text — open the chat window for details.")
+
+    /// Streaming bubble placeholder, shown from `beginStreamingTurn()` until
+    /// the first non-blank delta arrives (a slow first token used to sit as
+    /// an empty card).
+    static let streamingPlaceholder = "…"
+
+    private static func nonBlank(_ text: String, fallback: String = emptyAnswerHint) -> String {
+        text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? fallback : text
+    }
+
     func say(_ text: String, state: PetState? = nil, hideAfter: TimeInterval? = nil) {
+        let body = Self.nonBlank(text)
         applyOnMain {
             self.streamingDismissed = false
-            self.message = text
+            self.message = body
             self.messageID = UUID()
             self.messageHideInterval = hideAfter
             if let state { self.state = state }
@@ -91,13 +107,16 @@ final class PetBus {
 
     // MARK: Streaming turns (quick bar answer → pet bubble)
 
-    /// Opens a streaming turn: shows the bubble once (empty) and keeps it
-    /// on screen; the deltas that follow update the text only.
-    func beginStreamingTurn() {
+    /// Opens a streaming turn: shows the bubble once and keeps it on screen;
+    /// the deltas that follow update the text only. The bubble opens with a
+    /// placeholder rather than "" — a slow first token (or a turn that never
+    /// produces text) must not leave an empty card hanging over the pet.
+    func beginStreamingTurn(placeholder: String = PetBus.streamingPlaceholder) {
+        let body = Self.nonBlank(placeholder, fallback: PetBus.streamingPlaceholder)
         applyOnMain {
             self.streamingTurnActive = true
             self.streamingDismissed = false
-            self.message = ""
+            self.message = body
             self.messageID = UUID()
             self.messageHideInterval = 0
             self.state = .talking
@@ -107,9 +126,12 @@ final class PetBus {
     /// One streaming delta. Text-only on purpose: the bubble content
     /// updates if visible, but messageID does NOT move — re-announcing
     /// every token would re-open a bubble the user just tapped away.
+    /// Whitespace-only deltas are ignored: they would blank the bubble while
+    /// keeping it on screen.
     func sayStreaming(_ text: String) {
+        let body = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : text
         applyOnMain {
-            self.message = text
+            if let body { self.message = body }
             guard !self.streamingDismissed else { return }
             if self.state != .talking { self.state = .talking }
         }
@@ -129,8 +151,14 @@ final class PetBus {
     /// text like a regular say() (persistent bubble, final pose). A turn
     /// the user dismissed ends silently back at idle — unless `breakThrough`
     /// (errors must be seen even if the answer stream was closed).
+    /// A blank `final` (model returned nothing / tool-only turn with no
+    /// summary) shows the hint instead of an empty bubble, and never poses
+    /// as a celebration.
     func endStreamingTurn(final: String, finalState: PetState = .celebrating,
                           breakThrough: Bool = false) {
+        let blank = final.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let body = Self.nonBlank(final)
+        let pose: PetState = (blank && finalState == .celebrating) ? .idle : finalState
         applyOnMain {
             let dismissed = self.streamingDismissed
             self.streamingTurnActive = false
@@ -139,14 +167,14 @@ final class PetBus {
                 if self.state == .talking { self.state = .idle }
                 return
             }
-            self.message = final
+            self.message = body
             self.messageID = UUID()
             self.messageHideInterval = 0
-            self.state = finalState
+            self.state = pose
         }
-        if finalState == .celebrating {
+        if pose == .celebrating {
             scheduleSettle(after: 3.2)
-        } else if finalState == .sad {
+        } else if pose == .sad {
             scheduleSettle(after: 4.0)
         }
     }

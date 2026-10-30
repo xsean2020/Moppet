@@ -1,5 +1,23 @@
 import SwiftUI
 
+/// One-shot hand-off from the dashboard: "Scan for cleanable items" navigates
+/// to Clean and asks it to start the read-only scan immediately. A persisted
+/// flag survives the route swap (the view is rebuilt after navigation).
+enum CleanLaunch {
+    private static let key = "clean.autoScan"
+
+    static func requestScan() {
+        UserDefaults.standard.set(true, forKey: key)
+    }
+
+    /// Returns true at most once per request.
+    static func consumeScanRequest() -> Bool {
+        guard UserDefaults.standard.bool(forKey: key) else { return false }
+        UserDefaults.standard.set(false, forKey: key)
+        return true
+    }
+}
+
 /// The clean flow — mole's dry-run-first contract rendered as a native UI:
 /// choose sections → scan (preview) → review findings → confirm → clean.
 struct CleanView: View {
@@ -74,6 +92,13 @@ struct CleanView: View {
         } message: {
             Text(L("Browser caches can only be cleared while the browser is closed — a running browser keeps rewriting them. Unsaved tabs/forms may be lost (most browsers restore tabs on relaunch)."))
         }
+        .onAppear {
+            // Dashboard CTA: start the same scan the page's Scan button runs,
+            // but only when there is a selection to measure.
+            guard CleanLaunch.consumeScanRequest(),
+                  !viewModel.selectedItems.isEmpty else { return }
+            viewModel.startScan()
+        }
         .onChange(of: viewModel.phase) { _, phase in
             if phase == .done { UXFeedback.success() }
         }
@@ -81,7 +106,7 @@ struct CleanView: View {
 
     private var title: String {
         switch viewModel.phase {
-        case .configure, .scanning: L("Clean")
+        case .configure, .scanning: L("Cache Clean")
         case .review: L("Review")
         case .cleaning: L("Cleaning")
         case .done: L("Done")

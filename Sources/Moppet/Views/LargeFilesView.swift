@@ -36,15 +36,19 @@ struct LargeFilesView: View {
     @State private var selected: Set<URL> = []
     @State private var showTrashConfirm = false
     @State private var lastMessage: String?
-    @State private var spotlightWarning = false
+    @State private var warningMessage: String?
     /// Progress of the running trash batch — drives the center overlay.
     @State private var batch: BatchProgress?
+    /// Folders the user added for the custom scope. Persisted through
+    /// `LargeFilesEngine.CustomRoots` so the selection survives relaunch.
+    @State private var customRoots: [String] = LargeFilesEngine.CustomRoots.paths
 
     private func scopeTitle(_ scope: LargeFilesEngine.Scope) -> String {
         switch scope {
         case .userFolders: return L("User Folders")
         case .wholeHome: return L("Whole Home")
         case .containers: return L("Containers & Caches")
+        case .custom: return L("Custom Folder")
         }
     }
 
@@ -66,14 +70,15 @@ struct LargeFilesView: View {
                             .foregroundStyle(Airi.success)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    if spotlightWarning {
+                    if let warningMessage {
                         SettingsCard(padding: Airi.space3) {
                             HStack(spacing: Airi.space2) {
                                 Image(systemName: "exclamationmark.triangle.fill")
                                     .foregroundStyle(Airi.warning)
-                                Text(L("Spotlight indexing seems off — results may be incomplete. Turn it on in System Settings → Siri & Spotlight."))
+                                Text(warningMessage)
                                     .font(Airi.captionFont)
                                     .foregroundStyle(Airi.neutral700)
+                                    .fixedSize(horizontal: false, vertical: true)
                             }
                         }
                     }
@@ -98,6 +103,14 @@ struct LargeFilesView: View {
             if let batch { BatchProgressOverlay(progress: batch) }
         }
         .animation(Airi.controlAnimation, value: batch == nil)
+        // Picking "自定义目录" for the first time jumps straight into the
+        // folder chooser — otherwise the scope menu would select an empty
+        // list and the Scan button would just be disabled with no next step.
+        .onChange(of: scope) { _, newScope in
+            if newScope == .custom && customRoots.isEmpty {
+                pickCustomRoots()
+            }
+        }
         .confirmationDialog(
             Text(String(format: L("Move %lld files to the Trash?"), selectedFiles.count)),
             isPresented: $showTrashConfirm,
@@ -133,76 +146,215 @@ struct LargeFilesView: View {
 
     private var filterCard: some View {
         SettingsCard(padding: Airi.space3) {
-            HStack(spacing: Airi.space3) {
-                Picker(L("Min size"), selection: $minSize) {
-                    ForEach(MinSize.allCases) { size in
-                        Text(size.rawValue).tag(size)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .frame(maxWidth: 300)
-                Picker(L("Scope"), selection: $scope) {
-                    ForEach(LargeFilesEngine.Scope.allCases, id: \.self) { scope in
-                        Text(scopeTitle(scope)).tag(scope)
-                    }
-                }
-                .pickerStyle(.menu)
-                .frame(maxWidth: 220)
-                Spacer()
-                AiriButton(title: L("Scan"), icon: "magnifyingglass",
-                           busy: scanning) {
-                    Task { await scan() }
-                }
-            }
-            HStack(spacing: Airi.space2) {
-                Button(L("Select all deletable")) {
-                    selected = Set(files.filter { Self.deletable($0.url) }.map(\.url))
-                }
-                .buttonStyle(.plain)
-                .font(Airi.captionFont.weight(.medium))
-                .foregroundStyle(Airi.primary)
-                Button(L("Deselect all")) { selected = [] }
-                    .buttonStyle(.plain)
-                    .font(Airi.captionFont)
-                    .foregroundStyle(Airi.neutral500)
-                Spacer()
-                if scanning {
-                    HStack(spacing: 8) {
-                        if let p = scanProgress, p.total > 0 {
-                            ProgressRing(progress: Double(p.done) / Double(max(p.total, 1)),
-                                         lineWidth: 4, showValue: false)
-                                .frame(width: 22, height: 22)
-                            TickingNumber(value: p.done)
-                            Text("/\(p.total)")
-                        } else {
-                            // Before the first root reports, the ring sits at
-                            // zero — still honest feedback that scanning began.
-                            ProgressRing(progress: 0, lineWidth: 4, showValue: false)
-                                .frame(width: 22, height: 22)
+            VStack(alignment: .leading, spacing: Airi.space2) {
+                HStack(spacing: Airi.space3) {
+                    Picker(L("Min size"), selection: $minSize) {
+                        ForEach(MinSize.allCases) { size in
+                            Text(size.rawValue).tag(size)
                         }
-                        Text(L("Scanning…"))
                     }
-                    .font(Airi.caption2Font)
-                    .foregroundStyle(Airi.neutral500)
-                    .monospacedDigit()
-                    .animation(.spring(response: 0.4, dampingFraction: 0.9), value: scanProgress?.done ?? 0)
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: 300)
+                    Picker(L("Scope"), selection: $scope) {
+                        ForEach(LargeFilesEngine.Scope.allCases, id: \.self) { scope in
+                            Text(scopeTitle(scope)).tag(scope)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .frame(maxWidth: 220)
+                    Spacer()
+                    AiriButton(title: L("Scan"), icon: "magnifyingglass",
+                               disabled: scope == .custom && customRoots.isEmpty,
+                               busy: scanning) {
+                        Task { await scan() }
+                    }
                 }
-                Text(String(format: L("%1$@ selected of %2$@ total"),
-                            selectedFiles.reduce(0) { $0 + $1.bytes }.bytesFormatted,
-                            files.reduce(0) { $0 + $1.bytes }.bytesFormatted))
-                    .font(Airi.captionFont)
-                    .foregroundStyle(Airi.neutral500)
-                    .monospacedDigit()
+                // Custom scope: the folder chips + picker live right under the
+                // scope menu, so "where will it scan?" is answered in place.
+                if scope == .custom {
+                    customRootsRow
+                }
+                HStack(spacing: Airi.space2) {
+                    Button(L("Select all deletable")) {
+                        selected = Set(files.filter { Self.deletable($0.url) }.map(\.url))
+                    }
+                    .buttonStyle(.plain)
+                    .font(Airi.captionFont.weight(.medium))
+                    .foregroundStyle(Airi.primary)
+                    Button(L("Deselect all")) { selected = [] }
+                        .buttonStyle(.plain)
+                        .font(Airi.captionFont)
+                        .foregroundStyle(Airi.neutral500)
+                    Spacer()
+                    if scanning {
+                        HStack(spacing: 8) {
+                            if let p = scanProgress, p.total > 0 {
+                                ProgressRing(progress: Double(p.done) / Double(max(p.total, 1)),
+                                             lineWidth: 4, showValue: false)
+                                    .frame(width: 22, height: 22)
+                                TickingNumber(value: p.done)
+                                Text("/\(p.total)")
+                            } else {
+                                // Before the first root reports, the ring sits at
+                                // zero — still honest feedback that scanning began.
+                                ProgressRing(progress: 0, lineWidth: 4, showValue: false)
+                                    .frame(width: 22, height: 22)
+                            }
+                            Text(L("Scanning…"))
+                        }
+                        .font(Airi.caption2Font)
+                        .foregroundStyle(Airi.neutral500)
+                        .monospacedDigit()
+                        .animation(.spring(response: 0.4, dampingFraction: 0.9), value: scanProgress?.done ?? 0)
+                    }
+                    Text(String(format: L("%1$@ selected of %2$@ total"),
+                                selectedFiles.reduce(0) { $0 + $1.bytes }.bytesFormatted,
+                                files.reduce(0) { $0 + $1.bytes }.bytesFormatted))
+                        .font(Airi.captionFont)
+                        .foregroundStyle(Airi.neutral500)
+                        .monospacedDigit()
+                }
             }
         }
+    }
+
+    // MARK: - Custom scope
+
+    /// One removable chip per saved folder. A chip whose folder vanished is
+    /// flagged red and skipped by the scan (it is not silently rolled into
+    /// the count).
+    private var customRootsRow: some View {
+        VStack(alignment: .leading, spacing: Airi.space2) {
+            ForEach(customRoots, id: \.self) { path in
+                customRootChip(path)
+            }
+            HStack(spacing: Airi.space2) {
+                AiriButton(title: L("Add Folder…"), icon: "folder.badge.plus",
+                           variant: .secondary) {
+                    pickCustomRoots()
+                }
+                if customRoots.isEmpty {
+                    Text(L("Pick at least one folder to scan."))
+                        .font(Airi.caption2Font)
+                        .foregroundStyle(Airi.neutral500)
+                }
+                Spacer()
+            }
+            .padding(.top, customRoots.isEmpty ? 0 : 2)
+        }
+    }
+
+    private func customRootChip(_ path: String) -> some View {
+        let exists = Self.isDirectory(path)
+        return HStack(spacing: Airi.space2) {
+            Image(systemName: exists ? "folder.fill" : "folder.badge.questionmark")
+                .font(.system(size: 11))
+                .foregroundStyle(exists ? Airi.primary : Airi.warning)
+            Text(pathDisplay(path))
+                .font(Airi.captionFont)
+                .foregroundStyle(exists ? Airi.neutral800 : Airi.warning)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .help(path)
+            if !exists {
+                Text(L("Folder not found"))
+                    .font(Airi.caption2Font)
+                    .foregroundStyle(Airi.warning)
+            }
+            Spacer()
+            Button {
+                removeCustomRoot(path)
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Airi.neutral400)
+            }
+            .buttonStyle(.plain)
+            .help(L("Remove folder"))
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: Airi.radiusControl, style: .continuous)
+                .fill(Airi.neutral100.opacity(0.6))
+                .overlay(
+                    RoundedRectangle(cornerRadius: Airi.radiusControl, style: .continuous)
+                        .strokeBorder(exists ? Airi.neutral200.opacity(0.6)
+                                      : Airi.warning.opacity(0.45), lineWidth: 1)
+                )
+        )
+    }
+
+    /// NSOpenPanel rather than a text field: the folder must exist, and the
+    /// picker starts at the last saved folder so repeat scans are one click.
+    private func pickCustomRoots() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = true
+        panel.canCreateDirectories = false
+        panel.title = L("Choose folders to scan")
+        panel.prompt = L("Add")
+        if let last = customRoots.last {
+            panel.directoryURL = URL(fileURLWithPath: last)
+        }
+        guard panel.runModal() == .OK else { return }
+        var roots = customRoots
+        for url in panel.urls {
+            let path = url.standardizedFileURL.path
+            if !roots.contains(path) { roots.append(path) }
+        }
+        updateCustomRoots(roots)
+    }
+
+    private func removeCustomRoot(_ path: String) {
+        updateCustomRoots(customRoots.filter { $0 != path })
+    }
+
+    /// Rows came from the previous folder set, so changing the set clears
+    /// them — otherwise files from a removed folder linger on screen and can
+    /// still be ticked into the Trash.
+    private func updateCustomRoots(_ roots: [String]) {
+        guard roots != customRoots else { return }
+        customRoots = roots
+        LargeFilesEngine.CustomRoots.save(roots)
+        files = []
+        selected = []
+        lastMessage = nil
+        warningMessage = nil
+    }
+
+    private static func isDirectory(_ path: String) -> Bool {
+        var isDir: ObjCBool = false
+        return FileManager.default.fileExists(atPath: path, isDirectory: &isDir)
+            && isDir.boolValue
     }
 
     private func scan() async {
         scanning = true
         lastMessage = nil
-        spotlightWarning = false
+        warningMessage = nil
         scanProgress = nil
-        let found = await LargeFilesEngine.find(minBytes: minSize.bytes, scope: scope) { done, total in
+
+        // Custom scope: drop folders deleted since they were saved, so the
+        // chips and the scan agree on what is actually searched.
+        if scope == .custom {
+            let alive = customRoots.filter(Self.isDirectory)
+            if alive.count != customRoots.count {
+                customRoots = alive
+                LargeFilesEngine.CustomRoots.save(alive)
+            }
+            guard !alive.isEmpty else {
+                files = []
+                selected = []
+                warningMessage = L("None of the chosen folders exist anymore — add a folder and scan again.")
+                scanning = false
+                return
+            }
+        }
+
+        let found = await LargeFilesEngine.find(minBytes: minSize.bytes, scope: scope,
+                                                customRoots: customRoots) { done, total in
             // Sequential engine loop — callbacks arrive in order; hop to the
             // main actor before touching @State (background executor).
             Task { @MainActor in scanProgress = (done, total) }
@@ -213,11 +365,19 @@ struct LargeFilesView: View {
         // default would produce a clean run that silently skips it.
         selected = Set(found.filter { Self.deletable($0.url) }.map(\.url))
         if found.isEmpty {
-            spotlightWarning = !(await LargeFilesEngine.spotlightWorks(
-                in: scope == .wholeHome
-                    ? FileManager.default.homeDirectoryForCurrentUser.path
-                    : (scope.roots.first?
-                        .replacingOccurrences(of: "~", with: NSHomeDirectory()) ?? NSHomeDirectory())))
+            let root: String
+            switch scope {
+            case .wholeHome:
+                root = NSHomeDirectory()
+            case .custom:
+                root = customRoots.first ?? NSHomeDirectory()
+            case .userFolders, .containers:
+                root = scope.roots.first?
+                    .replacingOccurrences(of: "~", with: NSHomeDirectory()) ?? NSHomeDirectory()
+            }
+            if !(await LargeFilesEngine.spotlightWorks(in: root)) {
+                warningMessage = L("Spotlight indexing seems off — results may be incomplete. Turn it on in System Settings → Siri & Spotlight.")
+            }
         }
         scanning = false
     }
@@ -253,9 +413,11 @@ struct LargeFilesView: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                     Text(pathDisplay(file.url.path)
-                         + (modified.map { " · " + String(format: L("modified %@"), $0.formatted(date: .abbreviated, time: .omitted)) } ?? ""))
+                         + (modified.map { " · " + String(format: L("modified %@"), L10n.date($0, timeStyle: .none)) } ?? ""))
                         .font(Airi.caption2Font)
-                        .foregroundStyle(Airi.neutral400)
+                        // Path/date data, not chrome: 10pt at neutral400 sat
+                        // around 2.4:1 on a white card.
+                        .foregroundStyle(Airi.neutral500)
                         .lineLimit(1)
                         .truncationMode(.middle)
                         .help(file.url.path)

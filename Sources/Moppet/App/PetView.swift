@@ -669,7 +669,11 @@ struct PetBubbleContent: View {
     let width: CGFloat
 
     var body: some View {
-        Markdown(message)
+        // Markdown("") lays out as nothing, which is exactly the empty card
+        // this bubble must never show — fall back to the hint text.
+        let text = message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? PetBus.emptyAnswerHint : message
+        Markdown(text)
             .markdownTheme(.basic)
             .markdownTextStyle {
                 FontSize(12)
@@ -1052,8 +1056,17 @@ struct PetView: View {
         return max(base, min(560, room))
     }
 
+    /// Never lay out a blank card: `PetBus` already substitutes a hint for an
+    /// empty message, this is the view-side guard (probe paths, future
+    /// callers). Width, height and content all read THIS, so a blank message
+    /// can't produce a wide empty bubble either.
+    private var bubbleMessage: String {
+        bus.message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? PetBus.emptyAnswerHint : bus.message
+    }
+
     private var bubbleWidth: CGFloat {
-        Self.bubbleWidth(for: bus.message, maxWidth: maxBubbleTextWidth)
+        Self.bubbleWidth(for: bubbleMessage, maxWidth: maxBubbleTextWidth)
     }
 
     /// Panel width the layout wants: the base pet size while the bubble is
@@ -1095,7 +1108,7 @@ struct PetView: View {
     /// squeeze the mole out of the panel again.
     private var bubbleCardHeight: CGFloat {
         guard bubbleVisible else { return 1 }
-        let estimate = Self.bubbleHeight(for: bus.message, width: bubbleWidth)
+        let estimate = Self.bubbleHeight(for: bubbleMessage, width: bubbleWidth)
         return min(max(estimate, 48), bubbleHardCap)
     }
 
@@ -1186,7 +1199,7 @@ struct PetView: View {
                     // ViewThatFits keeps short messages hugging their content
                     // and only switches to a scrolling viewport when the text
                     // would overflow the height budget.
-                    PetBubbleCard(message: bus.message,
+                    PetBubbleCard(message: bubbleMessage,
                                   width: bubbleWidth,
                                   maxHeight: bubbleCardHeight)
                 }

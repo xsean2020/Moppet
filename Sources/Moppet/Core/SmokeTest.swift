@@ -22,6 +22,26 @@ enum SmokeTest {
         // forcing it here fails the suite instead of crashing the GUI.
         expect("L10n zh table sane (no duplicate keys, known mappings)", L10n.selfCheck())
 
+        // MARK: Pet bubble (never blank)
+
+        // The bubble is the quick bar's only surface, so a blank message used
+        // to render an EMPTY card (model returned nothing, error with no
+        // detail). Every path must publish text or an explicit hint.
+        do {
+            let bus = PetBus()
+            bus.beginStreamingTurn()
+            expect("bubble: streaming turn opens with a placeholder",
+                   !bus.message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            bus.sayStreaming("   \n")
+            expect("bubble: whitespace-only delta keeps the placeholder",
+                   bus.message == PetBus.streamingPlaceholder)
+            bus.endStreamingTurn(final: "  ")
+            expect("bubble: empty final answer becomes a hint, not a celebration",
+                   bus.message == PetBus.emptyAnswerHint && bus.state == .idle)
+            bus.say("")
+            expect("bubble: blank say() becomes a hint", bus.message == PetBus.emptyAnswerHint)
+        }
+
         // MARK: Editable daily growth budget
 
         // The Growth tab edits this cap; the ledger gate must read the CURRENT
@@ -1425,10 +1445,183 @@ enum SmokeTest {
             let fda = Permissions.hasFullDiskAccess
             expect("permissions: FDA probe returns a stable Bool",
                    fda == Permissions.hasFullDiskAccess)
+
+            // MARK: Network measurement statistics (pure — no sockets)
+            //
+            // The probe's conclusions are only as good as these aggregates: a
+            // median that silently takes the wrong element, or a MAD that
+            // measures spread around the mean, would make every "improved by
+            // 12%" claim a fiction. Pinned here so the maths cannot drift.
+
+            expect("net: median odd count",
+                   NetworkEngine.median([1, 2, 30]) == 2,
+                   "\(NetworkEngine.median([1, 2, 30]))")
+            expect("net: median even count averages the middle pair",
+                   NetworkEngine.median([10, 20, 30, 40]) == 25,
+                   "\(NetworkEngine.median([10, 20, 30, 40]))")
+            // 4 of 5 samples at 10ms, one outlier at 1000ms: the median must
+            // ignore the outlier — that is the entire reason it is used
+            // instead of the mean.
+            expect("net: median resists a single outlier",
+                   NetworkEngine.median([10, 10, 10, 10, 1000]) == 10,
+                   "\(NetworkEngine.median([10, 10, 10, 10, 1000]))")
+
+            let stats = NetworkEngine.Stats.of([10, 10, 10, 20, 100])
+            expect("net: stats carry n", stats?.n == 5, "\(stats?.n ?? -1)")
+            expect("net: stats median", stats?.median == 10, "\(stats?.median ?? -1)")
+            // Deviations are 0,0,0,10,90 → median deviation 0.
+            expect("net: stats MAD around the median", stats?.mad == 0,
+                   "\(stats?.mad ?? -1)")
+            expect("net: stats p95 lands on the upper tail",
+                   stats?.p95 == 100, "\(stats?.p95 ?? -1)")
+            expect("net: empty sample set yields no stats", NetworkEngine.Stats.of([]) == nil)
+            expect("net: negative readings are dropped",
+                   NetworkEngine.Stats.of([-5, 10])?.n == 1)
+            // A failed measurement that leaks in as NaN/inf must never reach
+            // the aggregates: one NaN turns median, MAD and the whole verdict
+            // into NaN, and `NaN > mdd` is false — the verdict would silently
+            // read "unchanged" forever.
+            expect("net: NaN readings are dropped",
+                   NetworkEngine.Stats.of([.nan, 10])?.n == 1,
+                   "\(NetworkEngine.Stats.of([.nan, 10])?.n ?? -1)")
+            expect("net: all-NaN input yields no stats",
+                   NetworkEngine.Stats.of([.nan, .nan]) == nil)
+            expect("net: infinity is dropped too",
+                   NetworkEngine.Stats.of([.infinity, 12])?.n == 1)
+            // Empty input must be safe, not crash: median/percentile index into
+            // the array.
+            expect("net: median of empty input is safe",
+                   NetworkEngine.median([]) == 0 && NetworkEngine.percentile([], 0.95) == 0)
+
+            // Amplification is TLS ÷ TCP; a zero/absent TCP must not divide by
+            // zero into infinity and then render as "inf×" in the report.
+            let sample = NetworkEngine.PhaseSample(dns: 1, tcp: 0, tls: 900, ttfb: 5,
+                                                   total: 900, httpVersion: "h1.1")
+            expect("net: amplification guards a zero TCP",
+                   sample.handshakeAmplification == nil)
+            let amplified = NetworkEngine.PhaseSample(dns: 1, tcp: 2, tls: 2000, ttfb: 5,
+                                                      total: 2002, httpVersion: "h1.1")
+            expect("net: amplification is TLS over TCP",
+                   amplified.handshakeAmplification == 1000,
+                   "\(amplified.handshakeAmplification ?? -1)")
+
+            // MARK: Network reference frame (the part that decides "did it work")
+            //
+            // These are the assertions that keep the product honest. A pipeline
+            // that answers "unchanged" to everything is useless; one that
+            // answers "improved" to noise is a lie. Both failure modes are
+            // pinned below with synthetic numbers, so the decision logic is
+            // proven without touching a socket.
+
+            // 1. Clear signal, low noise → improved.
+            expect("net ref: clear improvement is detected",
+                   NetworkReference.verdict(delta: -200, sigma: 5, n: 10, baseline: 500) == .improved)
+            // 2. Same magnitude, wrong direction → regressed.
+            expect("net ref: regression is detected",
+                   NetworkReference.verdict(delta: 200, sigma: 5, n: 10, baseline: 500) == .regressed)
+            // 3. Delta inside the noise band → unchanged.
+            expect("net ref: change inside the noise band is unchanged",
+                   NetworkReference.verdict(delta: -2, sigma: 10, n: 10, baseline: 500) == .unchanged)
+            // 4. Not enough samples → inconclusive, never a guess.
+            expect("net ref: four samples cannot conclude",
+                   NetworkReference.verdict(delta: -200, sigma: 1, n: 4, baseline: 500) == .inconclusive)
+            // 5. Statistically real but practically meaningless: 1ms off a
+            //    1000ms baseline is under the 3% floor.
+            expect("net ref: sub-3% change is not reported as improvement",
+                   NetworkReference.verdict(delta: -1, sigma: 0.05, n: 20, baseline: 1000) == .unchanged)
+
+            // 6. Paired test with a real, uniform improvement.
+            let improvedPair = NetworkReference.paired(before: [500, 510, 495, 505, 500],
+                                          after: [300, 305, 295, 302, 298],
+                                          metric: "ttfb")
+            expect("net ref: paired run reports improvement",
+                   improvedPair?.verdict == .improved,
+                   "\(improvedPair?.verdict.rawValue ?? "nil")")
+
+            // 7. The important one: the *control* moved by the same amount, so
+            //    the improvement belongs to the network, not to the change.
+            //    Without this subtraction every "optimisation" tested on a
+            //    quiet evening would look brilliant.
+            let absorbed = NetworkReference.paired(before: [500, 500, 500, 500, 500],
+                                      after: [300, 300, 300, 300, 300],
+                                      controlBefore: [20, 20, 20, 20, 20],
+                                      controlAfter: [-180, -180, -180, -180, -180],
+                                      metric: "ttfb")
+            expect("net ref: control drift is subtracted from the result",
+                   absorbed?.verdict == .unchanged,
+                   "\(absorbed?.verdict.rawValue ?? "nil") delta=\(absorbed?.delta ?? -1)")
+
+            // 8. Robust sigma ignores a single stall.
+            expect("net ref: one outlier does not inflate sigma",
+                   NetworkReference.robustSigma([10, 10, 10, 10, 10, 5000]) < 1,
+                   "\(NetworkReference.robustSigma([10, 10, 10, 10, 10, 5000]))")
+
+            // 9. Unpaired path (config changes cannot be flipped back and forth).
+            let unpaired = NetworkReference.unpaired(before: [500, 505, 495, 510, 500],
+                                        after: [300, 305, 295, 302, 298],
+                                        metric: "ttfb")
+            expect("net ref: unpaired run reports improvement",
+                   unpaired?.verdict == .improved,
+                   "\(unpaired?.verdict.rawValue ?? "nil")")
+
+            // 10. SYN retransmission detection must be relative to the link's
+            //     own baseline. The absolute 1s±25% version called a normal
+            //     900ms connect a retry — pinned here so it cannot come back.
+            expect("net: SYN retry detected against a fast baseline",
+                   NetworkEngine.synRetryCount([4.1, 4.3, 1004, 4.2, 3004]) == 2,
+                   "\(NetworkEngine.synRetryCount([4.1, 4.3, 1004, 4.2, 3004]))")
+            expect("net: a slow link is not a SYN retry",
+                   NetworkEngine.synRetryCount([900, 905, 895, 910, 900]) == 0,
+                   "\(NetworkEngine.synRetryCount([900, 905, 895, 910, 900]))")
+            expect("net: two samples cannot claim a retry",
+                   NetworkEngine.synRetryCount([4, 1004]) == 0)
+
+            // 11. `route(8)` output parsing: the MTU lives in a table column,
+            //     not a key, and the parser must find it by header name.
+            let routeSample = """
+               route to: default
+            destination: default
+                   mask: default
+                gateway: 192.168.0.1
+              interface: en11
+                  flags: <UP,GATEWAY,DONE,STATIC,PRCLONING,GLOBAL>
+             recvpipe  sendpipe  ssthresh  rtt,msec    rttvar  hopcount      mtu     expire
+                   0         0         0         0         0         0      1500         0
+            """
+            let parsedRoute = NetworkProbeCLI.parseRoute(routeSample)
+            expect("net: route parser reads interface/gateway",
+                   parsedRoute.interface == "en11" && parsedRoute.gateway == "192.168.0.1",
+                   "\(parsedRoute.interface ?? "nil")/\(parsedRoute.gateway ?? "nil")")
+            expect("net: route parser reads MTU from the column, not a key",
+                   parsedRoute.mtu == 1500, "\(parsedRoute.mtu ?? -1)")
+
+            // 12. Storage round-trip: a sample written now must read back with
+            //     the same numbers, or history silently drifts.
+            let stamp = Date(timeIntervalSince1970: 1_700_000_000)
+            let sampleRecord = NetworkReference.StoredSample(at: stamp, interface: "selftest",
+                                                ssid: nil, hour: 3, host: "selftest.invalid",
+                                                dns: 1, tcp: 2, tls: 3, ttfb: 4)
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            let roundTripped = (try? encoder.encode(sampleRecord))
+                .flatMap { try? decoder.decode(NetworkReference.StoredSample.self, from: $0) }
+            expect("net ref: stored sample round-trips",
+                   roundTripped?.ttfb == 4 && roundTripped?.hour == 3)
         }
 
-        print(failures == 0 ? "SMOKE PASS" : "SMOKE FAIL (\(failures) failures)")
-        exit(failures == 0 ? 0 : 1)
+        // if/else rather than a ternary: the ternary form made the compiler
+        // claim the failure branch was unreachable (it cannot see `failures`
+        // mutate through the nested `expect` closure), and a permanent warning
+        // hides real ones.
+        if failures == 0 {
+            print("SMOKE PASS")
+            exit(0)
+        } else {
+            print("SMOKE FAIL (\(failures) failures)")
+            exit(1)
+        }
     }
 
     /// Runs a tool synchronously (registry is async) and returns its result

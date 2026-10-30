@@ -30,6 +30,20 @@ enum PurgeEngine {
             .filter { FileManager.default.fileExists(atPath: $0.path) }
     }
 
+    /// The root list the Purge page last showed, persisted so the folders
+    /// picked in the panel survive relaunch. `nil` means "never saved" —
+    /// the page then seeds itself from `defaultRoots()`.
+    enum RootsStore {
+        private static let key = "purge.roots"
+        static func load() -> [URL]? {
+            guard let paths = UserDefaults.standard.stringArray(forKey: key) else { return nil }
+            return paths.map { URL(fileURLWithPath: $0) }
+        }
+        static func save(_ roots: [URL]) {
+            UserDefaults.standard.set(roots.map(\.path), forKey: key)
+        }
+    }
+
     /// Depth-limited parallel search for artifact directories.
     static func scan(roots: [URL], maxDepth: Int = 5,
                      progress: @escaping @Sendable (String) -> Void = { _ in }) async -> [Artifact] {
@@ -107,11 +121,13 @@ enum LargeFilesEngine {
     /// Where the UI (and the tool) look. `wholeHome` relies on Spotlight —
     /// the `find` fallback over an entire home measured >600s, so when
     /// mdfind comes back empty we run the control query and TRUST an empty
-    /// result instead of walking (same contract as deepScan).
+    /// result instead of walking (same contract as deepScan). `custom` has
+    /// no fixed roots: the Large Files page passes the user's folders in.
     enum Scope: CaseIterable {
         case userFolders      // Downloads / Documents / Desktop
         case wholeHome        // ~ via Spotlight
         case containers       // Containers / Caches / Application Support
+        case custom           // user-picked folders
 
         var roots: [String] {
             switch self {
@@ -119,7 +135,21 @@ enum LargeFilesEngine {
             case .wholeHome: return ["~"]
             case .containers: return ["~/Library/Containers", "~/Library/Caches",
                                       "~/Library/Application Support"]
+            case .custom: return []
             }
+        }
+    }
+
+    /// User-added scan folders (Large Files → 自定义目录), persisted so the
+    /// selection survives relaunches. Paths are absolute; the page's folder
+    /// picker owns writes, the engine only receives them as arguments.
+    enum CustomRoots {
+        private static let key = "largeFiles.customRoots"
+        static var paths: [String] {
+            UserDefaults.standard.stringArray(forKey: key) ?? []
+        }
+        static func save(_ paths: [String]) {
+            UserDefaults.standard.set(paths, forKey: key)
         }
     }
 
@@ -158,11 +188,22 @@ enum LargeFilesEngine {
     /// Spotlight (control-query disambiguated) and never fall back to the
     /// slow walk. `progress` reports (steps done, steps total): one step per
     /// mdfind root, plus a final step for the find fallback when it runs.
+    /// `customRoots` is only read for `.custom`; missing / non-directory
+    /// paths are dropped so a stale saved folder can't hang the scan.
     static func find(minBytes: Int64, limit: Int = 200, scope: Scope,
+                     customRoots: [String] = [],
                      progress: (@Sendable (Int, Int) -> Void)? = nil) async -> [LargeFile] {
-        let expanded = scope.roots.map {
-            $0.hasPrefix("~") ? FileManager.default.homeDirectoryForCurrentUser.path + $0.dropFirst() : $0
-        }
+        let expanded = (scope == .custom ? customRoots : scope.roots)
+            .map {
+                $0.hasPrefix("~") ? FileManager.default.homeDirectoryForCurrentUser.path + $0.dropFirst() : $0
+            }
+            .filter { path in
+                var isDir: ObjCBool = false
+                return FileManager.default.fileExists(atPath: path, isDirectory: &isDir)
+                    && isDir.boolValue
+            }
+        // Nothing to walk (first run, or every saved folder was deleted).
+        guard !expanded.isEmpty else { return [] }
         var files: [LargeFile] = []
         let totalSteps = expanded.count + (scope == .wholeHome ? 0 : 1)
         for (index, dir) in expanded.enumerated() {

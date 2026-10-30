@@ -194,10 +194,12 @@ struct OrphansView: View {
                     }
                     Text(pathDisplay(candidate.url.path)
                          + (candidate.lastModified.map {
-                            " · " + String(format: L("untouched since %@"), $0.formatted(date: .abbreviated, time: .omitted))
+                            " · " + String(format: L("untouched since %@"), L10n.date($0, timeStyle: .none))
                          } ?? ""))
                         .font(Airi.caption2Font)
-                        .foregroundStyle(Airi.neutral400)
+                        // Path/date data, not chrome — neutral400 was too
+                        // faint at 10pt on the card surface.
+                        .foregroundStyle(Airi.neutral500)
                         .lineLimit(1)
                         .truncationMode(.middle)
                         .help(candidate.url.path)

@@ -129,26 +129,35 @@ final class QuickChat {
             let final = output ?? answerText
             answerText = final
             let tk = usage.map { " · \($0.totalTokens) tk" } ?? ""
+            // Tokens are not an answer: appending the counter to an empty
+            // turn left a bubble reading "· 812 tk" (or nothing at all).
+            // Blank stays blank so the bus can show its hint instead.
+            let empty = final.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            let body = empty ? "" : final + tk
             if streamingTurnOpen {
                 streamingTurnOpen = false
-                PetBus.shared.endStreamingTurn(final: final + tk)
+                PetBus.shared.endStreamingTurn(final: body)
             } else {
                 // Tools-only turn (no streamed text): present like before.
-                PetBus.shared.say(final + tk, state: .celebrating, hideAfter: 0)
+                PetBus.shared.say(body, state: empty ? .idle : .celebrating, hideAfter: 0)
             }
         case .error(let message):
-            answerText = "✗ \(message)"
+            // An error with an empty description used to render a bare "✗"
+            // bubble — useless. Fall back to an explicit hint.
+            let detail = message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? L("The model returned an error with no details.") : message
+            answerText = "✗ \(detail)"
             if streamingTurnOpen {
                 streamingTurnOpen = false
                 // Errors break through a dismissed bubble: the user must
                 // learn the turn failed even if they closed the stream.
-                PetBus.shared.endStreamingTurn(final: "✗ \(message)",
+                PetBus.shared.endStreamingTurn(final: "✗ \(detail)",
                                                finalState: .sad, breakThrough: true)
             } else {
                 // Errors persist as well: the bubble is the only place the
                 // quick bar reports failures, and it is replaced by the next
                 // answer.
-                PetBus.shared.say("✗ \(message)", state: .sad, hideAfter: 0)
+                PetBus.shared.say("✗ \(detail)", state: .sad, hideAfter: 0)
             }
         default:
             break

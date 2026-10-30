@@ -249,7 +249,7 @@ struct ChatView: View {
         if store.totalSessions > store.sessions.count {
             text += " · " + String(format: L("recent %lld"), store.sessions.count)
         }
-        return text + " · rollout JSONL"
+        return text + " · " + L("Chat history")
     }
 
     /// Selection-mode toolbar: count + select-all + delete entry.
@@ -301,7 +301,7 @@ struct ChatView: View {
                     .foregroundStyle(isActive || isSelected ? Airi.primary : Airi.neutral800)
                     .lineLimit(1)
                     .truncationMode(.tail)
-                Text(info.date.formatted(date: .abbreviated, time: .shortened))
+                Text(L10n.date(info.date))
                     .font(Airi.caption2Font)
                     .foregroundStyle(Airi.neutral500)
             }
@@ -1003,8 +1003,12 @@ struct ChatView: View {
     }
 
     private func markdownBubble(_ content: String) -> some View {
-        HStack {
-            Markdown(content)
+        // A blank assistant item (aborted turn, empty model output) used to
+        // render as an empty card — say so instead.
+        let text = content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? L("(empty response)") : content
+        return HStack {
+            Markdown(text)
                 .markdownTheme(.basic)
                 .markdownTextStyle { FontSize(13) }
                 .padding(.horizontal, 12)

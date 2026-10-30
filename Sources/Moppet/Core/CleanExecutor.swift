@@ -262,6 +262,10 @@ enum DiskInfo {
         ]
         if let values = try? url.resourceValues(forKeys: keys) {
             let total = Int64(values.volumeTotalCapacity ?? 0)
+            // Deliberately the "important usage" figure: it includes APFS
+            // purgeable space, which is what Finder reports as Available.
+            // The plain `.volumeAvailableCapacity` key under-reports against
+            // Finder (it excludes snapshots/purgeable blocks).
             let free = Int64(values.volumeAvailableCapacityForImportantUsage ?? 0)
             return Snapshot(
                 volumeName: values.volumeName ?? "Macintosh HD",

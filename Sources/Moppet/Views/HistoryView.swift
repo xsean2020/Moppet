@@ -130,7 +130,7 @@ struct HistoryView: View {
                                     .padding(.horizontal, 6)
                                     .padding(.vertical, 2)
                                     .background(Capsule().fill(Airi.primary.opacity(0.12)))
-                                Text(record.date.formatted(date: .abbreviated, time: .shortened))
+                                Text(L10n.date(record.date))
                                     .font(Airi.captionFont)
                                     .foregroundStyle(Airi.neutral500)
                                     .monospacedDigit()

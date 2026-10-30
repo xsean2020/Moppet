@@ -400,8 +400,7 @@ struct PurgeView: View {
     var onClose: (() -> Void)?
 
     @State private var roots: [URL] = []
-    @State private var newRoot = ""
-    @State private var newRootError: String?
+    @State private var rootError: String?
     @State private var artifacts: [PurgeEngine.Artifact] = []
     @State private var selected: Set<UUID> = []
     @State private var scanning = false
@@ -409,9 +408,6 @@ struct PurgeView: View {
     @State private var purgeProgress: BatchProgress?
     @State private var resultText: String?
     @State private var confirmingPurge = false
-    /// Explicit focus plumbing for the root field (terminal-launched apps
-    /// can lack a working click-to-first-responder chain — see HANDOFF §6.24).
-    @FocusState private var newRootFocused: Bool
 
     var selectedBytes: Int64 {
         artifacts.filter { selected.contains($0.id) }.reduce(0) { $0 + $1.bytes }
@@ -475,7 +471,9 @@ struct PurgeView: View {
             Text(L("Build artifacts are regenerated on the next build — but deletion here is immediate and NOT routed through the Trash."))
         }
         .onAppear {
-            if roots.isEmpty { roots = PurgeEngine.defaultRoots() }
+            if roots.isEmpty {
+                roots = PurgeEngine.RootsStore.load() ?? PurgeEngine.defaultRoots()
+            }
         }
     }
 
@@ -484,39 +482,44 @@ struct PurgeView: View {
             VStack(alignment: .leading, spacing: Airi.space2) {
                 Text(L("Search roots")).font(Airi.cardTitleFont)
                 ForEach(roots, id: \.path) { root in
-                    HStack {
-                        Image(systemName: "folder").font(Airi.footnoteFont).foregroundStyle(Airi.neutral400)
-                        Text(root.path).font(Airi.footnoteFont).foregroundStyle(Airi.neutral700)
+                    HStack(spacing: Airi.space2) {
+                        Image(systemName: "folder.fill").font(.system(size: 11)).foregroundStyle(Airi.primary)
+                        Text(displayPath(root)).font(Airi.footnoteFont).foregroundStyle(Airi.neutral700)
+                            .lineLimit(1).truncationMode(.middle).help(root.path)
                         Spacer()
                         Button {
-                            roots.removeAll { $0 == root }
+                            removeRoot(root)
                         } label: {
                             Image(systemName: "xmark.circle.fill").foregroundStyle(Airi.neutral400)
                         }
                         .buttonStyle(.plain)
                     }
                 }
+                if roots.isEmpty {
+                    Text(L("Pick at least one folder to scan."))
+                        .font(Airi.caption2Font).foregroundStyle(Airi.neutral500)
+                }
                 HStack(spacing: Airi.space2) {
-                    TextField("~/another/projects/dir", text: $newRoot)
-                        .textFieldStyle(.plain)
-                        .font(Airi.footnoteFont)
-                        .foregroundStyle(Airi.neutral900)
-                        .focused($newRootFocused)
-                        .onTapGesture { newRootFocused = true }
-                        .onSubmit { addRoot() }
-                        .padding(6)
-                        .background(RoundedRectangle(cornerRadius: 6).fill(Airi.neutral50))
-                        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(
-                            newRootError == nil ? Airi.neutral200 : Airi.danger.opacity(0.6),
-                            lineWidth: 1))
-                    AiriButton(title: L("Add"), variant: .secondary) { addRoot() }
+                    // Panel, not a text field: the folder has to exist, so
+                    // typing a path only ever produced "not found" errors.
+                    AiriButton(title: L("Add Folder…"), icon: "folder.badge.plus",
+                               variant: .secondary) { pickRoots() }
+                    if roots.isEmpty {
+                        Button(L("Restore default folders")) {
+                            setRoots(PurgeEngine.defaultRoots())
+                        }
+                        .buttonStyle(.plain)
+                        .font(Airi.caption2Font)
+                        .foregroundStyle(Airi.primary)
+                    }
+                    Spacer()
                     AiriButton(title: scanning ? L("Scanning…") : L("Scan"), icon: "magnifyingglass",
                                disabled: scanning || roots.isEmpty) {
                         Task { await scan() }
                     }
                 }
-                if let newRootError {
-                    Text(newRootError)
+                if let rootError {
+                    Text(rootError)
                         .font(Airi.caption2Font)
                         .foregroundStyle(Airi.danger)
                 }
@@ -524,27 +527,54 @@ struct PurgeView: View {
         }
     }
 
-    /// Add the typed folder to the search roots. A silent no-op on a bad
-    /// path reads as "the button is broken" — surface the failure instead.
-    private func addRoot() {
-        let raw = newRoot.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !raw.isEmpty else { return }
-        let expanded = raw.hasPrefix("~")
-            ? NSHomeDirectory() + raw.dropFirst() : raw
-        let url = URL(fileURLWithPath: expanded)
-        var isDir: ObjCBool = false
-        let fm = FileManager.default
-        guard url.path != "/", url.path != NSHomeDirectory() else {
-            newRootError = L("Refusing to walk the whole disk / home folder")
-            return
+    /// `~/…` instead of the full home prefix keeps long project paths readable.
+    private func displayPath(_ url: URL) -> String {
+        let home = NSHomeDirectory()
+        let path = url.path
+        return path.hasPrefix(home) ? "~" + path.dropFirst(home.count) : path
+    }
+
+    /// Multi-select panel, starting in the last root so repeat picks are one
+    /// click. "/" and the home folder are rejected for the same reason the old
+    /// text field rejected them: walking them is not a project scan.
+    private func pickRoots() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = true
+        panel.canCreateDirectories = false
+        panel.title = L("Choose folders to scan")
+        panel.prompt = L("Add")
+        panel.directoryURL = roots.last ?? FileManager.default.homeDirectoryForCurrentUser
+        guard panel.runModal() == .OK else { return }
+
+        var next = roots
+        var rejected = false
+        for url in panel.urls.map(\.standardizedFileURL) {
+            guard url.path != "/", url.path != NSHomeDirectory() else {
+                rejected = true
+                continue
+            }
+            if !next.contains(url) { next.append(url) }
         }
-        if fm.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue {
-            if !roots.contains(url) { roots.append(url) }
-            newRootError = nil
-            newRoot = ""
-        } else {
-            newRootError = String(format: L("Folder not found: %@"), url.path)
-        }
+        rootError = rejected ? L("Refusing to walk the whole disk / home folder") : nil
+        setRoots(next)
+    }
+
+    private func removeRoot(_ root: URL) {
+        rootError = nil
+        setRoots(roots.filter { $0 != root })
+    }
+
+    /// Roots decide which rows are on screen, so changing the set clears them —
+    /// a folder that was removed must not leave artifacts ticked for deletion.
+    private func setRoots(_ next: [URL]) {
+        guard next != roots else { return }
+        roots = next
+        PurgeEngine.RootsStore.save(next)
+        artifacts = []
+        selected = []
+        resultText = nil
     }
 
     private func artifactRow(_ artifact: PurgeEngine.Artifact) -> some View {
