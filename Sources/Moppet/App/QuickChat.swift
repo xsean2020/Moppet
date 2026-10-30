@@ -88,6 +88,7 @@ final class QuickChat {
         // (send() gates on `active`, so Return during a stream keeps the draft).
         answerText = ""
         active = true
+        streamingTurnOpen = false
         // Pet poses busy, but the bubble stays silent until the answer: the
         // bubble shows RESULTS only, never tool calls or progress text.
         PetBus.shared.setState(.thinking)
@@ -102,12 +103,22 @@ final class QuickChat {
         brain.cancel()
     }
 
+    /// True from the first delta of a turn until the turn ends — brackets
+    /// beginStreamingTurn/endStreamingTurn so the pet can keep a dismissed
+    /// bubble closed for the whole turn (deltas AND final result).
+    private var streamingTurnOpen = false
+
     private func handle(_ event: BrainEvent) {
         switch event {
         case .assistantMessageDelta(let delta):
             answerText += delta
-            // Full text, never a tail slice — the bubble scrolls.
-            PetBus.shared.say(answerText, state: .talking, hideAfter: 0)
+            if !streamingTurnOpen {
+                streamingTurnOpen = true
+                PetBus.shared.beginStreamingTurn()
+            }
+            // Full text, never a tail slice — the bubble scrolls. Streaming
+            // path: text-only update, a dismissed bubble stays dismissed.
+            PetBus.shared.sayStreaming(answerText)
         case .toolStarted:
             // Result-only bubble: no "🔧 tool…" text. The pet still shows a
             // working pose so the turn doesn't look dead during long tool runs.
@@ -118,14 +129,27 @@ final class QuickChat {
             let final = output ?? answerText
             answerText = final
             let tk = usage.map { " · \($0.totalTokens) tk" } ?? ""
-            // Persistent by request: the answer stays on screen until the
-            // next question replaces it (hideAfter 0 = no auto-hide).
-            PetBus.shared.say(final + tk, state: .celebrating, hideAfter: 0)
+            if streamingTurnOpen {
+                streamingTurnOpen = false
+                PetBus.shared.endStreamingTurn(final: final + tk)
+            } else {
+                // Tools-only turn (no streamed text): present like before.
+                PetBus.shared.say(final + tk, state: .celebrating, hideAfter: 0)
+            }
         case .error(let message):
             answerText = "✗ \(message)"
-            // Errors persist as well: the bubble is the only place the quick
-            // bar reports failures, and it is replaced by the next answer.
-            PetBus.shared.say("✗ \(message)", state: .sad, hideAfter: 0)
+            if streamingTurnOpen {
+                streamingTurnOpen = false
+                // Errors break through a dismissed bubble: the user must
+                // learn the turn failed even if they closed the stream.
+                PetBus.shared.endStreamingTurn(final: "✗ \(message)",
+                                               finalState: .sad, breakThrough: true)
+            } else {
+                // Errors persist as well: the bubble is the only place the
+                // quick bar reports failures, and it is replaced by the next
+                // answer.
+                PetBus.shared.say("✗ \(message)", state: .sad, hideAfter: 0)
+            }
         default:
             break
         }

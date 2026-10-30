@@ -304,7 +304,8 @@ struct UninstallView: View {
                 // keep their footprint (and reappear with old state on
                 // reinstall) — the behaviour users reported as a bug.
                 let single = await UninstallEngine.batchUninstall(
-                    apps: [app], sizes: effectiveSizes, withData: true, appendRecord: false)
+                    apps: [app], sizes: effectiveSizes, withData: true,
+                    appendRecord: false, fallback: true)
                 outcome.trashed += single.trashed
                 outcome.freedBytes += single.freedBytes
                 outcome.failed += single.failed
@@ -696,7 +697,8 @@ struct UninstallView: View {
             var sizeByPath: [String: Int64] = [appCopy.url.path: appBytes]
             for file in files { sizeByPath[file.url.path] = file.bytes }
 
-            let result = await UninstallEngine.uninstall(app: appCopy, files: files, removeData: removeData)
+            let result = await UninstallEngine.uninstall(
+                app: appCopy, files: files, removeData: removeData, fallback: true)
             if result.failed.contains(where: { UninstallEngine.isAppManagementHint($0.1) }) {
                 // The failed removeItem itself is what raises the TCC prompt
                 // (undecided state) — the recovery pipeline waits for that

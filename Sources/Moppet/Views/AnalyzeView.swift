@@ -275,6 +275,19 @@ struct AnalyzeView: View {
                     Text(L("Scanning…")).font(Airi.captionFont).foregroundStyle(Airi.neutral500)
                 }
             }
+            // Two-phase scan heartbeat: phase 1 landed the tree (scanning is
+            // already false), phase 2 still streams sizes in — show the
+            // count instead of looking finished.
+            if !scanning, let progress, progress.done < progress.total {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text(String(format: L("Measuring %lld / %lld…"), progress.done, progress.total))
+                        .font(Airi.captionFont)
+                        .foregroundStyle(Airi.neutral500)
+                        .monospacedDigit()
+                        .animation(.spring(response: 0.4, dampingFraction: 0.9), value: progress.done)
+                }
+            }
             Text("\(selected.count) selected · \(selectedBytes.bytesFormatted)")
                 .font(Airi.captionFont)
                 .foregroundStyle(Airi.neutral500)
@@ -432,6 +445,9 @@ struct AnalyzeView: View {
                 }
                 .sorted { $0.bytes > $1.bytes }
             }.value
+            // A cancel during the listing must not land stale state over the
+            // current tree — or over a newer Rescan's results.
+            guard !Task.isCancelled else { return }
             let nodes = listed.map {
                 FileNode(url: $0.url, bytes: $0.bytes, isDirectory: $0.isDirectory,
                          fileCount: $0.fileCount,
@@ -455,6 +471,11 @@ struct AnalyzeView: View {
                 celebrateScan(nodes)
                 return
             }
+            // One tick per measured source — drives the footer chip (and
+            // the first-scan ring when a slow filesystem keeps it on
+            // screen). `progress` was never written before: the ring sat
+            // at a permanent 0%.
+            progress = (done: 0, total: pending.count)
             let nodesByPath = Dictionary(
                 nodes.map { ($0.url.path, $0) },
                 uniquingKeysWith: { first, _ in first })
@@ -484,14 +505,19 @@ struct AnalyzeView: View {
                     target.bytes = entry.bytes
                     target.fileCount = entry.fileCount
                     target.sizePending = false
+                    progress?.done += 1
                     if Date().timeIntervalSince(lastSort) > 0.15 {
                         lastSort = Date()
                         rootChildren.sort { $0.bytes > $1.bytes }
                     }
                 }
             }
-            scanTask = nil
+            // Clear state only for a healthy finish: a cancelled task
+            // reaching this point must not nil out a newer Rescan's handle
+            // (that would make its Cancel button a no-op) or its progress.
             guard !Task.isCancelled else { return }
+            scanTask = nil
+            progress = nil
             // Zero-byte entries never stream an update — settle the flags.
             rootChildren.forEach { $0.sizePending = false }
             rootChildren.sort { $0.bytes > $1.bytes }
@@ -736,6 +762,18 @@ private struct EntryRow: View {
 
     @State private var hovering = false
 
+    /// `NSWorkspace.icon(forFile:)` stats the path and builds a fresh image
+    /// on EVERY call — and row bodies re-evaluate on every streaming size
+    /// update + re-sort. One shared cache keyed by path.
+    private static let iconCache = NSCache<NSString, NSImage>()
+
+    static func cachedIcon(for path: String) -> NSImage {
+        if let hit = iconCache.object(forKey: path as NSString) { return hit }
+        let icon = NSWorkspace.shared.icon(forFile: path)
+        iconCache.setObject(icon, forKey: path as NSString)
+        return icon
+    }
+
     var body: some View {
         HStack(spacing: 10) {
             // Select circle (the reference design's radio-style tick).
@@ -745,7 +783,7 @@ private struct EntryRow: View {
                     .foregroundStyle(isSelected ? Airi.primary : Airi.neutral400)
             }
             .buttonStyle(.plain)
-            Image(nsImage: NSWorkspace.shared.icon(forFile: node.url.path))
+            Image(nsImage: Self.cachedIcon(for: node.url.path))
                 .resizable()
                 .frame(width: 30, height: 30)
             VStack(alignment: .leading, spacing: 1) {
@@ -820,8 +858,11 @@ private struct BubbleChart: View {
     /// streaming size update (bytes 0 → real) forces exactly one repack.
     /// The sized set is computed canonically (bytes-desc, capped) so live
     /// re-sorts of the underlying list don't invalidate the cache.
-    @State private var cachedBubbles: [Bubble] = []
-    @State private var cachedSignature: [String] = []
+    /// The memo lives on the TYPE, not in @State: `bubbles` runs inside
+    /// GeometryReader's body closure, and writing @State during a body
+    /// evaluation is SwiftUI undefined behavior. Body is MainActor, so the
+    /// isolated static is touched from one actor only.
+    @MainActor private static var memo: (signature: [String], bubbles: [Bubble])?
     /// Bubble layout is quadratic — an ls-grade layer can list 500 entries,
     /// but only the top handful are visually meaningful as bubbles.
     static let maxBubbles = 30
@@ -831,12 +872,11 @@ private struct BubbleChart: View {
             .sorted { $0.bytes > $1.bytes }
             .prefix(Self.maxBubbles))
         let signature = sized.map { "\($0.id):\($0.bytes)" }
-        if signature == cachedSignature, !cachedBubbles.isEmpty {
-            return cachedBubbles
+        if let memo = Self.memo, memo.signature == signature, !memo.bubbles.isEmpty {
+            return memo.bubbles
         }
         let packed = Self.pack(sized)
-        cachedBubbles = packed
-        cachedSignature = signature
+        Self.memo = (signature, packed)
         return packed
     }
 

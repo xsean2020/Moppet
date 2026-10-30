@@ -29,6 +29,15 @@ final class PetBus {
     /// Per-message override consumed by the bubble view (0 = keep until
     /// replaced, e.g. streaming answers). Nil = use `autoHideInterval`.
     var messageHideInterval: TimeInterval?
+    /// True between `beginStreamingTurn()` and `endStreamingTurn()`: the
+    /// quick bar's answer is streaming into the bubble.
+    private(set) var streamingTurnActive = false
+    /// True when the user tapped the bubble away while its streaming turn
+    /// is still running. Further deltas AND the turn's final result stay
+    /// hidden — the answer lives on in the chat window — until something
+    /// genuinely new speaks (a regular say() or the next turn). Without
+    /// this, every token re-opened a bubble the user had just closed.
+    private(set) var streamingDismissed = false
     /// Pending auto-settle for one-shot states (celebration loops forever
     /// otherwise — the completion announcement has nothing downstream to
     /// call settle()). Lock-guarded: `say` is called from task-group threads
@@ -38,6 +47,7 @@ final class PetBus {
 
     func say(_ text: String, state: PetState? = nil, hideAfter: TimeInterval? = nil) {
         applyOnMain {
+            self.streamingDismissed = false
             self.message = text
             self.messageID = UUID()
             self.messageHideInterval = hideAfter
@@ -77,6 +87,68 @@ final class PetBus {
 
     func setState(_ newState: PetState) {
         applyOnMain { self.state = newState }
+    }
+
+    // MARK: Streaming turns (quick bar answer → pet bubble)
+
+    /// Opens a streaming turn: shows the bubble once (empty) and keeps it
+    /// on screen; the deltas that follow update the text only.
+    func beginStreamingTurn() {
+        applyOnMain {
+            self.streamingTurnActive = true
+            self.streamingDismissed = false
+            self.message = ""
+            self.messageID = UUID()
+            self.messageHideInterval = 0
+            self.state = .talking
+        }
+    }
+
+    /// One streaming delta. Text-only on purpose: the bubble content
+    /// updates if visible, but messageID does NOT move — re-announcing
+    /// every token would re-open a bubble the user just tapped away.
+    func sayStreaming(_ text: String) {
+        applyOnMain {
+            self.message = text
+            guard !self.streamingDismissed else { return }
+            if self.state != .talking { self.state = .talking }
+        }
+    }
+
+    /// The user tapped the bubble away mid-turn: everything this turn
+    /// still says stays hidden. No-op outside a streaming turn, so the
+    /// regular tap-to-dismiss of engine messages is unaffected.
+    func dismissStreaming() {
+        applyOnMain {
+            guard self.streamingTurnActive else { return }
+            self.streamingDismissed = true
+        }
+    }
+
+    /// The streaming turn finished. An undismissed turn presents the final
+    /// text like a regular say() (persistent bubble, final pose). A turn
+    /// the user dismissed ends silently back at idle — unless `breakThrough`
+    /// (errors must be seen even if the answer stream was closed).
+    func endStreamingTurn(final: String, finalState: PetState = .celebrating,
+                          breakThrough: Bool = false) {
+        applyOnMain {
+            let dismissed = self.streamingDismissed
+            self.streamingTurnActive = false
+            self.streamingDismissed = false
+            guard !dismissed || breakThrough else {
+                if self.state == .talking { self.state = .idle }
+                return
+            }
+            self.message = final
+            self.messageID = UUID()
+            self.messageHideInterval = 0
+            self.state = finalState
+        }
+        if finalState == .celebrating {
+            scheduleSettle(after: 3.2)
+        } else if finalState == .sad {
+            scheduleSettle(after: 4.0)
+        }
     }
 
     /// End transient activity states — called by the auto-settle timer or a

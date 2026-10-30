@@ -23,6 +23,9 @@ enum BatchDeleter {
         /// match a failure back to the node that owns it (by exact path or
         /// path prefix).
         var failures: [(path: String, error: String)] = []
+        /// Paths kept because the user's whitelist protects them — found
+        /// under a selected seed during expansion, or as a seed itself.
+        var skippedWhitelist: [String] = []
     }
 
     /// Main-actor-isolated tick. A closure value with actor isolation is
@@ -51,11 +54,30 @@ enum BatchDeleter {
         var outcome = Outcome()
         var done = 0
 
-        // 1. Tier the selection.
+        // Whitelist defense-in-depth. The caller gates every seed with
+        // checkDeletable, but that check only looks at the seed itself and
+        // its ANCESTORS — a whitelisted DESCENDANT (~/Library/Caches/Steam
+        // under a selected ~/Library/Caches) would sail through and die in
+        // the recursive remove. Two layers here: whitelisted seeds are
+        // dropped outright, and any seed whose subtree could contain a
+        // whitelist hit is demoted to the expand tier, where every path is
+        // checked individually.
+        let patterns = SafetyGuard.loadWhitelistPatterns()
+        let seeds = urls.filter { url in
+            if SafetyGuard.isWhitelisted(url) {
+                outcome.skippedWhitelist.append(url.path)
+                return false
+            }
+            return true
+        }
         var direct: [URL] = []
         var expandable: [URL] = []
-        for url in urls {
-            if (fileCounts[url.path] ?? 0) > expandThreshold {
+        for url in seeds {
+            // Structural whitelist check in the canonical form — seed URLs
+            // can carry a different /var-class form than the patterns.
+            let mayContain = !patterns.isEmpty && subtreeMayContainWhitelisted(
+                canonical(url.path), patterns: patterns)
+            if (fileCounts[url.path] ?? 0) > expandThreshold || mayContain {
                 expandable.append(url)
             } else {
                 direct.append(url)
@@ -66,10 +88,15 @@ enum BatchDeleter {
         //    but a million-entry tree must not stutter the main actor).
         var files: [URL] = []
         var dirs: [URL] = []
+        var skipped: [String] = []
         if !expandable.isEmpty {
-            let expanded = await Task.detached { Self.expand(urls: expandable) }.value
+            let expanded = await Task.detached {
+                Self.expand(urls: expandable, patterns: patterns)
+            }.value
             files = expanded.files
             dirs = expanded.dirs
+            skipped = expanded.skipped
+            outcome.skippedWhitelist.append(contentsOf: expanded.skipped)
         }
 
         let total = direct.count + files.count + dirs.count
@@ -118,21 +145,40 @@ enum BatchDeleter {
         }
 
         // 4. Rmdir the expanded trees' directories deepest-first. Their
-        //    leaves are already gone, so each is a cheap metadata op;
-        //    removeItem still cleans up recursively when a leaf failed and
-        //    left debris behind.
+        //    leaves are already gone, so each is a cheap metadata op.
+        //    removeItem's recursive cleanup is still used to sweep debris
+        //    from failed leaves — EXCEPT where whitelisted content lives:
+        //    a recursive remove there would take the protected subtree with
+        //    it, so those dirs get a plain `rmdir` that only ever succeeds
+        //    on an empty directory. The protected content (and every dir
+        //    holding it) stays and is reported as "kept whitelisted content".
         let orderedDirs = dirs.sorted { $0.pathComponents.count > $1.pathComponents.count }
         if !orderedDirs.isEmpty {
-            let (count, failures) = await Task.detached {
+            let skippedSet = Set(skipped)
+            let (count, failures) = await Task.detached { [skippedSet] in
                 var count = 0
                 var failures: [(path: String, error: String)] = []
                 let fm = FileManager.default
                 for url in orderedDirs {
+                    // Both sides canonicalized (see canonical(_:)).
+                    let dirKey = canonical(url.path)
+                    let kept = skippedSet.first { $0.hasPrefix(dirKey + "/") }
+                    let holdsProtected = kept != nil
                     do {
-                        try fm.removeItem(at: url)
+                        if holdsProtected {
+                            guard rmdir(url.path) == 0 else {
+                                throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+                            }
+                        } else {
+                            try fm.removeItem(at: url)
+                        }
                         count += 1
                     } catch {
-                        failures.append((url.path, error.localizedDescription))
+                        // A dir holding whitelisted content can never empty —
+                        // name the reason instead of a bare "not empty".
+                        failures.append((url.path, kept != nil
+                            ? String(format: L("kept whitelisted content: %@"), kept!)
+                            : error.localizedDescription))
                     }
                 }
                 return (count, failures)
@@ -154,17 +200,33 @@ enum BatchDeleter {
     /// manual (`contentsOfDirectory` per level) so a symlinked directory is
     /// never entered — a link to ~/Documents inside the selection must not
     /// turn into a delete of Documents' real contents.
-    private static func expand(urls: [URL]) -> (files: [URL], dirs: [URL]) {
+    ///
+    /// Every path is also matched against the whitelist: a hit is recorded
+    /// in `skipped` and never deleted — and because a skipped directory is
+    /// never entered either, a whitelisted folder protects its whole
+    /// subtree, same semantics as checkDeletable's ancestor rule.
+    private static func expand(urls: [URL], patterns: [String])
+        -> (files: [URL], dirs: [URL], skipped: [String]) {
         var files: [URL] = []
         var dirs: [URL] = []
+        var skipped: [String] = []
         var seen = Set<String>()
         let fm = FileManager.default
         // resourceValues(forKeys:) wants a Set, contentsOfDirectory an array.
         let keySet: Set<URLResourceKey> = [.isDirectoryKey, .isSymbolicLinkKey]
         let keys: [URLResourceKey] = [.isDirectoryKey, .isSymbolicLinkKey]
+        // Empty whitelist: skip the per-path resolution entirely.
+        let whitelistActive = !patterns.isEmpty
 
         func classify(_ url: URL) {
             guard seen.insert(url.path).inserted else { return }
+            if whitelistActive, SafetyGuard.isWhitelisted(url) {
+                // Canonical form at record time: enumerated children can
+                // carry a different /var-class form than the seed URLs the
+                // rmdir phase will compare against.
+                skipped.append(canonical(url.path))
+                return
+            }
             let values = try? url.resourceValues(forKeys: keySet)
             let isSymlink = values?.isSymbolicLink ?? false
             let isDirectory = values?.isDirectory ?? false
@@ -180,6 +242,43 @@ enum BatchDeleter {
         }
 
         for url in urls { classify(url) }
-        return (files, dirs)
+        return (files, dirs, skipped)
+    }
+
+    /// The path form SafetyGuard's whitelist matching operates in —
+    /// `resolvingSymlinksInPath`, same as isWhitelisted/checkDeletable.
+    /// EVERY prefix comparison in here canonicalizes both sides with THIS,
+    /// not realpath: /var-class paths have two live forms (/var and
+    /// /private/var) and the two canonicalizers DISAGREE on which one is
+    /// canonical — mixing them silently voids the whitelist protection.
+    private static func canonical(_ path: String) -> String {
+        URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+    }
+
+    /// Conservative structural test: could any whitelist pattern match a
+    /// path AT OR BELOW the seed? `glob` wildcards are single-segment, so a
+    /// pattern only reaches into the seed's subtree when its wildcard-free
+    /// prefix is the seed itself, lies under it, or is an ancestor of it
+    /// (`~/Library/*/Steam` reaches under `~/Library/Caches`; `~/Downloads`
+    /// cannot reach under `~/Library/Caches`). Seeds the pattern matches
+    /// directly never get here — the caller's checkDeletable denies them.
+    private static func subtreeMayContainWhitelisted(
+        _ seedPath: String, patterns: [String]) -> Bool {
+        let home = NSHomeDirectory()
+        for pattern in patterns {
+            let expanded = pattern.hasPrefix("~") ? home + pattern.dropFirst() : pattern
+            let segments = expanded.split(separator: "/", omittingEmptySubsequences: false)
+            var end = segments.count
+            if let idx = segments.firstIndex(where: { $0.contains("*") || $0.contains("?") }) {
+                end = idx
+            }
+            let prefix = segments[..<end].joined(separator: "/")
+            if prefix == seedPath
+                || prefix.hasPrefix(seedPath + "/")
+                || seedPath.hasPrefix(prefix + "/") {
+                return true
+            }
+        }
+        return false
     }
 }

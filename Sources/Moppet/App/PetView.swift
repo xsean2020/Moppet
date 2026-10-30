@@ -919,10 +919,13 @@ struct PetView: View {
                             // pending timer, drop the bubble, settle talking
                             // back to idle). The input bar is NOT toggled:
                             // closing a bubble and opening a bar in one tap
-                            // reads as a glitch.
+                            // reads as a glitch. During a streaming turn the
+                            // dismissal also covers the rest of the turn —
+                            // every token used to pop the bubble right back.
                             bubbleHideTask?.cancel()
                             withAnimation(Airi.controlAnimation) { bubbleVisible = false }
                             if bus.state == .talking { bus.setState(.idle) }
+                            bus.dismissStreaming()
                         } else if bus.state == .celebrating || bus.state == .sad {
                             // Click during a celebration or a sad moment
                             // means "got it" — settle back to idle.

@@ -5,6 +5,19 @@
 
 ---
 
+## 2026-10-30 增量（审核优化 + 视觉轮，构建 0 错 0 警，smoke 237 ✓ / brain-smoke 226 ✓）
+
+接在 47b692f「Analyze overhaul」之后的一轮审核修复，下一 agent 以本节为准（下文旧数字已过时）：
+
+- **UninstallEngine 提权兜底接线**（前一会话遗留的 `deleteBundleWithAdminFallback` 半成品）：`batchUninstall`/`uninstall` 新增 `fallback: Bool = false`，仅 GUI 调用点（UninstallView 两处）传 `true`；无头（MCP `uninstall_app`、smoke）保持默认 `false`，否则 `shellWithAdmin` 的 MainActor hop 在阻塞主线程的无头模式里死锁（§6.1）。TCC 拒绝 → 管理员密码弹窗重删；取消密码框 → 保留 App Management 提示，授权引导卡照常触发。
+- **BatchDeleter 白名单子树保护（P0）**：`checkDeletable` 只看种子自身与祖先，选中 `~/Library/Caches` 会连带删掉白名单里的 `~/Library/Caches/Steam`。修复三层：① 白名单种子直接剔除；② 子树可能含白名单命中的种子强制降到展开层（`subtreeMayContainWhitelisted` 通配符前缀结构判定）；③ 展开层逐路径 `isWhitelisted`，命中的文件/目录记入 `Outcome.skippedWhitelist` 并**不删**；rmdir 阶段对含保护内容的目录改用**plain `rmdir()`**（removeItem 是递归的，会把白名单内容一起带走）。
+- **路径形式坑（新）**：本机实测 `/var` 类路径有两个活形式（`/var/...` 与 `/private/var/...`），且 `resolvingSymlinksInPath` 与 `realpath` 的归一结果**互相矛盾**（前者归到 /var 形式、后者归到 /private 形式）。BatchDeleter 内部所有前缀比对统一用 `canonical()` = `resolvingSymlinksInPath`（与 SafetyGuard 匹配宇宙一致）；SizeCache 的 key/invalidate 则统一 `realFileSystemPath`（realpath）——两个子系统各自内部一致即可，**不要跨系统混用两种归一器**。smoke 新增 3 断言（白名单子树存活/兄弟删除/跳过上报），测试文件 swap 真白名单后立即恢复。
+- **其余审核修复**：AnalyzeView 取消竞态（phase-1 落地前与 `scanTask = nil` 前都加 `Task.isCancelled` guard，取消不再清空树/选中/新任务句柄）；BubbleChart 把 body 期间写 `@State` 的缓存挪到 `@MainActor static`（SwiftUI body 内写状态是未定义行为）；SystemStatus `topProcesses` 的 sysctl 重试第二圈曾是死代码（第一圈失败直接 return）；PetBus 新增流式轮次语义（`beginStreamingTurn`/`sayStreaming`/`endStreamingTurn`/`dismissStreaming`），QuickChat 的 delta 不再逐条 bump messageID——**点宠物关掉流式气泡后不再被下一个 token 弹回**（错误仍会穿透显示）；Evolver.cancel 现在取消真实 tick 任务（旧代码 `task` 从未赋值，取消是空操作且 `running=false` 会放行并发 tick）；BrainActivity.idleOverride 读写进锁。
+- **视觉轮**：Analyze 首扫进度环终于接上了数据（此前永远 0%）——phase-2 每测完一个源 tick 一次，底栏新增「测量中 N / M…」心跳 chip（两相扫描下底栏不再看起来已经完成）；EntryRow 的 `NSWorkspace.icon(forFile:)` 加 NSCache（流式 re-sort 时不再每 body 重新取图）。
+- 已知未修（审核确认、留待后续）：ScrollbarTuner 每 didUpdate 全树遍历 + 滚动条不可交互/无 AX（需要重设计）；BrainGrowthCard.refresh 在 MainActor 做整片文件 IO；parallelSize 任务数无滑动窗口上界（IOThrottle=32 兜底）；AnalyzeView 删除收尾的同步 IO 在主线程。
+
+---
+
 ## 0. 一句话概述
 
 原生 macOS 应用：**3D 桌宠（SceneKit）+ 聊天即宠物对话（后台是 OpenAI Codex agent 能力的完整 Swift 移植）+ mole 全部清理功能 + 内置工具经 MCP 双通道供外部 AI 调用**。技术栈 SwiftUI (macOS 14+) + Swift Concurrency，5 个开源依赖。

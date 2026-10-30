@@ -90,8 +90,13 @@ final class SizeCache {
     /// returns URLs under the RESOLVED path (/var → /private/var on macOS),
     /// while a caller-built URL keeps the unresolved form — keys must match
     /// or every enumerated child misses its own just-stored summary.
+    /// Uses real `realpath` (ScanEngine.realFileSystemPath), NOT
+    /// resolvingSymlinksInPath: that API leaves /var-class paths unresolved
+    /// (the very mismatch this key exists to prevent), so a caller URL
+    /// /tmp/x and an enumerated child /private/tmp/x produced two entries
+    /// for one directory and remove()/invalidate() could miss the real key.
     private static func cacheKey(_ url: URL) -> String {
-        url.resolvingSymlinksInPath().path
+        ScanEngine.realFileSystemPath(url.path)
     }
 
     func lookup(_ url: URL) -> ScanEngine.SizeSummary? {
@@ -147,8 +152,12 @@ final class SizeCache {
     /// must drop the whole chain.
     func invalidate(_ url: URL) {
         lock.lock(); defer { lock.unlock() }
-        var current = url.resolvingSymlinksInPath()
-        let home = FileManager.default.homeDirectoryForCurrentUser.resolvingSymlinksInPath()
+        // Same canonicalization as the STORE side (realpath): with the old
+        // resolvingSymlinksInPath here, /var-class paths removed keys that
+        // were never stored and left the real ones alive.
+        var current = URL(fileURLWithPath: ScanEngine.realFileSystemPath(url.path))
+        let home = URL(fileURLWithPath: ScanEngine.realFileSystemPath(
+            FileManager.default.homeDirectoryForCurrentUser.path))
         while true {
             store.removeValue(forKey: current.path)
             if current.path == home.path || current.path == "/" { break }

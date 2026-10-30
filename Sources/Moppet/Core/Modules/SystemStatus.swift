@@ -230,7 +230,10 @@ enum SystemStatus {
         for extra in [0, 256] {
             var data = [UInt8](repeating: 0, count: size + extra * MemoryLayout<kinfo_proc>.stride)
             var actual = data.count
-            guard sysctl(&mib, 3, &data, &actual, nil, 0) == 0 else { return [] }
+            // The retry pass only helps if a failed call continues to it —
+            // `return []` here made the second lap dead code and dropped the
+            // whole metric on a transient ENOMEM.
+            guard sysctl(&mib, 3, &data, &actual, nil, 0) == 0 else { continue }
             return data.withUnsafeBytes { raw in
                 let procs = raw.bindMemory(to: kinfo_proc.self)
                 return procs.prefix(actual / MemoryLayout<kinfo_proc>.stride).map { kp in

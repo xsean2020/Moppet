@@ -184,6 +184,36 @@ enum SmokeTest {
             expect("batch delete: no failures", outcome.failures.isEmpty,
                    "\(outcome.failures.count) failed: \(outcome.failures.prefix(2))")
             expect("batch delete: symlink target untouched", fm.fileExists(atPath: keepMe.path))
+
+            // Whitelist defense-in-depth: checkDeletable only judges the
+            // SEED and its ancestors, so a whitelisted DESCENDANT would die
+            // in the recursive remove unless BatchDeleter re-checks every
+            // expanded path (and demotes the seed to the expand tier). The
+            // real whitelist file is swapped for a test pattern and restored
+            // immediately after — saveWhitelistPatterns also drops the parse
+            // cache, so the restore is fully effective.
+            let whitelistBackup = SafetyGuard.loadWhitelistPatterns()
+            let guarded = root.appendingPathComponent("guarded")
+            try fm.createDirectory(at: guarded, withIntermediateDirectories: true)
+            try Data("x".utf8).write(to: guarded.appendingPathComponent("loose.bin"))
+            let protected = guarded.appendingPathComponent("inner", isDirectory: true)
+            try fm.createDirectory(at: protected, withIntermediateDirectories: true)
+            try Data("keep".utf8).write(to: protected.appendingPathComponent("f.bin"))
+            try SafetyGuard.saveWhitelistPatterns([protected.path])
+            do {
+                let outcome2 = awaitSync {
+                    await BatchDeleter.remove(
+                        urls: [guarded], fileCounts: [guarded.path: 3], progress: nil)
+                }
+                expect("batch delete: whitelisted subtree survives",
+                       fm.fileExists(atPath: protected.appendingPathComponent("f.bin").path))
+                expect("batch delete: non-whitelisted sibling removed",
+                       !fm.fileExists(atPath: guarded.appendingPathComponent("loose.bin").path))
+                expect("batch delete: whitelist skips reported",
+                       !outcome2.skippedWhitelist.isEmpty,
+                       "\(outcome2.skippedWhitelist)")
+            }
+            try SafetyGuard.saveWhitelistPatterns(whitelistBackup)
             try? fm.removeItem(at: root)
         } catch {
             expect("batch delete: fixture setup failed", false, "\(error)")

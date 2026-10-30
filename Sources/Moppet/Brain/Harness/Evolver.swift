@@ -14,13 +14,20 @@ enum BrainActivity {
 
     static func isIdle(for seconds: TimeInterval) -> Bool {
         // Test seam: the smoke run cannot wait ten real minutes, and the full
-        // tick is the one path that only the idle gate blocks.
-        if let idleOverride { return idleOverride }
+        // tick is the one path that only the idle gate blocks. Everything
+        // here is read under the lock (the smoke test writes the override
+        // from another thread) — _idleOverride directly, the computed
+        // property would re-lock and deadlock.
         lock.lock(); defer { lock.unlock() }
+        if let _idleOverride { return _idleOverride }
         return Date().timeIntervalSince(last) >= seconds
     }
 
-    static var idleOverride: Bool?
+    static var idleOverride: Bool? {
+        get { lock.lock(); defer { lock.unlock() }; return _idleOverride }
+        set { lock.lock(); defer { lock.unlock() }; _idleOverride = newValue }
+    }
+    private static var _idleOverride: Bool?
 }
 
 /// Turns evidence into a candidate harness (design doc §5.9).
@@ -162,25 +169,39 @@ final class Evolver {
     /// Sync critical sections for the async `tick()` — calling `NSLock.lock()`
     /// directly from an async context is unavailable (Swift 6 error) and is
     /// what generated the "will be unavailable in Swift 6" warnings.
-    private func beginTick() -> Bool {
+    private func registerTick(_ newTask: Task<Void, Never>) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        if running { return false }
+        if running || task != nil { return false }
+        task = newTask
         running = true
         return true
+    }
+
+    /// cancel()'s critical section: take the live handle out.
+    private func takeTickForCancel() -> Task<Void, Never>? {
+        lock.lock()
+        defer { lock.unlock() }
+        let current = task
+        task = nil
+        running = false
+        return current
     }
 
     private func endTick() {
         lock.lock()
         running = false
+        task = nil
         lock.unlock()
     }
 
-    /// Called from `submit()`: the user is back, drop everything.
+    /// Called from `submit()`: the user is back, drop everything. Cancels
+    /// the REAL tick task — the old code cancelled a property nothing ever
+    /// assigned, so an in-flight tick ran to completion (spending budget,
+    /// possibly promoting) and the forced `running = false` let the next
+    /// tick run CONCURRENTLY with it.
     func cancel() {
-        task?.cancel()
-        task = nil
-        lock.lock(); running = false; lock.unlock()
+        takeTickForCancel()?.cancel()
     }
 
     /// One pass. Safe to call often: every guard is cheap and the first failing
@@ -191,7 +212,22 @@ final class Evolver {
         guard !isRunning else { return }
         guard GrowthLedger.shared.remaining() > 5_000 else { return }
 
-        guard beginTick() else { return }
+        // The pass runs in an inner task so the handle is registrable —
+        // cancel() must reach an in-flight tick, which the old code never
+        // could (nothing ever assigned `task`).
+        let tickTask = Task<Void, Never> {
+            await runTick(model: model, cwd: cwd)
+        }
+        // Lost the race with another tick or a cancel() between spawn and
+        // here — this pass never runs.
+        guard registerTick(tickTask) else {
+            tickTask.cancel()
+            return
+        }
+        await tickTask.value
+    }
+
+    private func runTick(model: BrainModel, cwd: String) async {
         defer { endTick() }
 
         defer { _ = try? GrowthLedger.shared.reconcile() }

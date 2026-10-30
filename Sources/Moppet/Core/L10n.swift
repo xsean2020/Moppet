@@ -178,10 +178,12 @@ private let zh: [String: String] = [
     "Opening %@…": "正在打开 %@…",
     "Measuring big-file locations…": "正在测量大文件目录…",
     "Measuring %@…": "正在测量 %@…",
+    "Measuring %lld / %lld…": "测量中 %1$lld / %2$lld…",
     "Delete %lld": "删除 %lld",
     "Delete %lld items (%@) permanently?": "永久删除 %lld 个项目（%@）？",
     "Items are deleted permanently. This cannot be undone.": "项目将被永久删除，无法撤销。",
     "Deleted %lld paths 🗑": "已删除 %lld 个路径 🗑",
+    "kept whitelisted content: %@": "已保留白名单内容：%@",
     // chat
     "Chats": "会话", "New chat": "新会话", "Delete session": "删除会话",
     "Delete chat?": "删除会话？",
