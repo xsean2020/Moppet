@@ -101,6 +101,8 @@ private let zh: [String: String] = [
     // navigation
     "Dashboard": "仪表盘", "Clean": "清理", "Uninstall": "卸载", "Optimize": "优化",
     "Analyze": "分析", "Status": "状态", "Purge": "项目清理", "History": "历史",
+    // sidebar bands — umbrella labels, deliberately different from row titles
+    "Space Cleanup": "空间清理", "Maintenance": "系统维护", "Insights": "洞察",
     "Settings": "设置",
     // dashboard
     "Moley · desktop pet": "Moley · 桌宠",

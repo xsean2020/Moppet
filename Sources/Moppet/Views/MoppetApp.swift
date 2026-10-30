@@ -296,22 +296,32 @@ enum Route: String, Hashable, CaseIterable, Identifiable {
     /// mole command equivalence shown as a tiny caption in the sidebar.
 }
 
-/// Sidebar grouping by importance: Dashboard → daily cleaning tools →
-/// system tools → History, with Settings pinned LAST (macOS convention).
-/// Four labelled/unlabelled bands, rendered top to bottom.
+/// Sidebar grouping by job, not by implementation: Dashboard → free up space →
+/// keep the machine healthy → read the reports, with History/Settings last
+/// (macOS convention).
+///
+/// Band labels name the *category*, never a row: "Clean" over a row also
+/// called "Clean" just made the top of the sidebar look doubled. Rows stay
+/// the concrete actions; the header is the umbrella.
 private enum RouteGroup {
-    static let top: [(label: String, routes: [Route])] = [
-        ("", [.dashboard]),
-    ]
-    static let cleaning: [(label: String, routes: [Route])] = [
-        (L("Clean"), [.clean, .orphans, .uninstall, .purge, .slim]),
-    ]
-    static let system: [(label: String, routes: [Route])] = [
-        (L("System"), [.hogs, .largeFiles, .optimize, .startup, .status, .analyze]),
-    ]
-    static let bottom: [(label: String, routes: [Route])] = [
-        ("", [.history, .settings]),
-    ]
+    // Computed (not stored) so a language switch re-resolves L() — a stored
+    // static would keep the first language's band labels for the whole run.
+    static var top: [(label: String, routes: [Route])] {
+        [("", [.dashboard])]
+    }
+    static var cleaning: [(label: String, routes: [Route])] {
+        // Uninstall before Orphans: residue is what uninstalling leaves behind.
+        [(L("Space Cleanup"), [.clean, .uninstall, .orphans, .purge, .slim])]
+    }
+    static var system: [(label: String, routes: [Route])] {
+        [(L("Maintenance"), [.hogs, .largeFiles, .optimize, .startup])]
+    }
+    static var insights: [(label: String, routes: [Route])] {
+        [(L("Insights"), [.status, .analyze])]
+    }
+    static var bottom: [(label: String, routes: [Route])] {
+        [("", [.history, .settings])]
+    }
 }
 
 struct RootView: View {
@@ -430,13 +440,19 @@ struct RootView: View {
             .padding(.bottom, 10)
 
             ScrollView {
-                VStack(alignment: .leading, spacing: 8) {
-                    sidebarSection(rows: RouteGroup.top)
-                    sidebarSection(rows: RouteGroup.cleaning)
-                    sidebarSection(rows: RouteGroup.system)
-                    sidebarSection(rows: RouteGroup.bottom)
+                // Bands are separated by whitespace, not by extra stack
+                // spacing: rows inside a band sit 2pt apart so each band
+                // reads as one block, and the 16pt jump between bands is
+                // what the eye uses to parse the list at a glance.
+                VStack(alignment: .leading, spacing: 0) {
+                    sidebarSection(rows: RouteGroup.top, topPadding: 2)
+                    sidebarSection(rows: RouteGroup.cleaning, topPadding: Airi.space3)
+                    sidebarSection(rows: RouteGroup.system, topPadding: Airi.space3)
+                    sidebarSection(rows: RouteGroup.insights, topPadding: Airi.space3)
+                    sidebarSection(rows: RouteGroup.bottom, topPadding: Airi.space4)
                 }
                 .padding(.horizontal, 10)
+                .padding(.bottom, 8)
             }
 
             Divider().overlay(Airi.neutral200.opacity(0.5))
@@ -486,22 +502,29 @@ struct RootView: View {
 
     // MARK: - Sidebar
 
-    /// One labelled band of routes ("Clean", "System", …). Empty label =
-    /// no section header (the Dashboard's band stays unmarked).
+    /// One labelled band of routes ("Space Cleanup", "Maintenance", …).
+    /// Empty label = no section header (Dashboard, History/Settings bands).
     @ViewBuilder
-    private func sidebarSection(rows: [(label: String, routes: [Route])]) -> some View {
-        ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+    private func sidebarSection(rows: [(label: String, routes: [Route])],
+                                topPadding: CGFloat = 0) -> some View {
+        ForEach(Array(rows.enumerated()), id: \.offset) { index, row in
             if !row.label.isEmpty {
                 Text(row.label)
                     .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(Airi.neutral400)
+                    .foregroundStyle(Airi.neutral500)
                     .textCase(.uppercase)
-                    .padding(.leading, 10)
-                    .padding(.top, 2)
+                    .padding(.leading, 12)
+                    // Only the first band gets the caller's gap; extra rows
+                    // in the same call get the standard header gap.
+                    .padding(.top, index == 0 ? topPadding : Airi.space3)
+                    .padding(.bottom, Airi.space1)
             }
-            ForEach(row.routes) { item in
-                sidebarRow(item)
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(row.routes) { item in
+                    sidebarRow(item)
+                }
             }
+            .padding(.top, row.label.isEmpty ? topPadding : 0)
         }
     }
 
@@ -516,7 +539,9 @@ struct RootView: View {
     /// ⌘1…⌘9 jumps to the first nine sidebar routes (dashboard first),
     /// giving the whole app keyboard navigation without touching the flow.
     private static func routeShortcut(_ route: Route) -> KeyboardShortcut? {
-        let ordered: [Route] = [.dashboard, .clean, .orphans, .uninstall, .purge,
+        // Same order as RouteGroup so the shortcut number matches what the
+        // eye counts in the sidebar (rows are reordered, shortcuts follow).
+        let ordered: [Route] = [.dashboard, .clean, .uninstall, .orphans, .purge,
                                 .slim, .hogs, .largeFiles, .optimize, .startup,
                                 .status, .analyze, .history, .settings]
         guard let index = ordered.firstIndex(of: route), index < 9 else { return nil }
@@ -588,7 +613,7 @@ private struct SidebarRowButton: View {
                 Spacer()
             }
             .padding(.horizontal, 10)
-            .padding(.vertical, 7)
+            .padding(.vertical, 6)
             .background(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .fill(isActive ? Airi.primary.opacity(0.1)
