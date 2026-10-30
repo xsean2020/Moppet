@@ -22,6 +22,19 @@ enum SmokeTest {
         // forcing it here fails the suite instead of crashing the GUI.
         expect("L10n zh table sane (no duplicate keys, known mappings)", L10n.selfCheck())
 
+        // MARK: Editable daily growth budget
+
+        // The Growth tab edits this cap; the ledger gate must read the CURRENT
+        // value on every call (a snapshot taken at launch would ignore it).
+        do {
+            let original = GrowthSettings.dailyTokens
+            GrowthSettings.dailyTokens = 42_000
+            expect("growth: the ledger budget follows the editable daily cap",
+                   GrowthBudget.current.maxTokensPerDay == 42_000
+                   && GrowthLedger.shared.canSpend(1, budget: .current))
+            GrowthSettings.dailyTokens = original
+        }
+
         // MARK: Scan scoping (selection must never silently widen)
 
         // CleanViewModel selection flows into the scan set (struct-copy
@@ -109,6 +122,102 @@ enum SmokeTest {
                !SafetyGuard.checkDeletable(URL(fileURLWithPath: home.path + "/Library/../../etc")).allowed)
         expect("allow regular cache dir",
                SafetyGuard.checkDeletable(home.appendingPathComponent("Library/Caches/com.example.app")).allowed)
+
+        // MARK: Safety guard policy (pet = strict, userConfirmed = relaxed)
+        // userConfirmed still refuses the never-relax tier: system locations,
+        // the home root, outside home, malformed paths.
+        expect("userConfirmed still denies filesystem root",
+               !SafetyGuard.checkDeletable(URL(fileURLWithPath: "/"), policy: .userConfirmed).allowed)
+        expect("userConfirmed still denies /System",
+               !SafetyGuard.checkDeletable(URL(fileURLWithPath: "/System/Library"), policy: .userConfirmed).allowed)
+        expect("userConfirmed still denies home itself",
+               !SafetyGuard.checkDeletable(home, policy: .userConfirmed).allowed)
+        expect("userConfirmed still denies outside home",
+               !SafetyGuard.checkDeletable(URL(fileURLWithPath: "/opt/whatever"), policy: .userConfirmed).allowed)
+        // …but relaxes the protected home categories.
+        expect("userConfirmed allows Desktop",
+               SafetyGuard.checkDeletable(home.appendingPathComponent("Desktop/BigFolder"), policy: .userConfirmed).allowed)
+        expect("userConfirmed allows Documents",
+               SafetyGuard.checkDeletable(home.appendingPathComponent("Documents/old stuff"), policy: .userConfirmed).allowed)
+        expect("userConfirmed allows Safari data",
+               SafetyGuard.checkDeletable(home.appendingPathComponent("Library/Safari/History.db"), policy: .userConfirmed).allowed)
+        // …and the strict default is unchanged (no policy argument == pet).
+        expect("default policy stays strict for Desktop",
+               !SafetyGuard.checkDeletable(home.appendingPathComponent("Desktop/BigFolder")).allowed)
+
+        // MARK: BatchDeleter — tiered parallel delete
+        // Small seed → one direct recursive removeItem; big tree (hint over
+        // the threshold) → expanded and unlinked in parallel; a symlink
+        // inside the tree is unlinked, never followed.
+        do {
+            let fm = FileManager.default
+            let root = fm.temporaryDirectory
+                .appendingPathComponent("moppet-bd-\(UUID().uuidString)")
+            let smallDir = root.appendingPathComponent("small")
+            try fm.createDirectory(at: smallDir, withIntermediateDirectories: true)
+            for i in 0..<8 {
+                try Data("x".utf8).write(to: smallDir.appendingPathComponent("f\(i)"))
+            }
+            let bigDir = root.appendingPathComponent("big")
+            try fm.createDirectory(at: bigDir.appendingPathComponent("sub"),
+                                   withIntermediateDirectories: true)
+            let bigFileCount = 1300
+            for i in 0..<bigFileCount {
+                let parent = i.isMultiple(of: 2) ? bigDir : bigDir.appendingPathComponent("sub")
+                try Data("x".utf8).write(to: parent.appendingPathComponent("f\(i)"))
+            }
+            let keepMe = root.appendingPathComponent("keepme.txt")
+            try Data("keep".utf8).write(to: keepMe)
+            try fm.createSymbolicLink(at: bigDir.appendingPathComponent("link"),
+                                      withDestinationURL: keepMe)
+
+            let outcome = awaitSync {
+                await BatchDeleter.remove(
+                    urls: [smallDir, bigDir],
+                    fileCounts: [bigDir.path: bigFileCount + 2],
+                    progress: nil)
+            }
+            expect("batch delete: small tree gone (direct tier)",
+                   !fm.fileExists(atPath: smallDir.path))
+            expect("batch delete: big tree gone (expanded tier)",
+                   !fm.fileExists(atPath: bigDir.path))
+            expect("batch delete: no failures", outcome.failures.isEmpty,
+                   "\(outcome.failures.count) failed: \(outcome.failures.prefix(2))")
+            expect("batch delete: symlink target untouched", fm.fileExists(atPath: keepMe.path))
+
+            // Whitelist defense-in-depth: checkDeletable only judges the
+            // SEED and its ancestors, so a whitelisted DESCENDANT would die
+            // in the recursive remove unless BatchDeleter re-checks every
+            // expanded path (and demotes the seed to the expand tier). The
+            // real whitelist file is swapped for a test pattern and restored
+            // immediately after — saveWhitelistPatterns also drops the parse
+            // cache, so the restore is fully effective.
+            let whitelistBackup = SafetyGuard.loadWhitelistPatterns()
+            let guarded = root.appendingPathComponent("guarded")
+            try fm.createDirectory(at: guarded, withIntermediateDirectories: true)
+            try Data("x".utf8).write(to: guarded.appendingPathComponent("loose.bin"))
+            let protected = guarded.appendingPathComponent("inner", isDirectory: true)
+            try fm.createDirectory(at: protected, withIntermediateDirectories: true)
+            try Data("keep".utf8).write(to: protected.appendingPathComponent("f.bin"))
+            try SafetyGuard.saveWhitelistPatterns([protected.path])
+            do {
+                let outcome2 = awaitSync {
+                    await BatchDeleter.remove(
+                        urls: [guarded], fileCounts: [guarded.path: 3], progress: nil)
+                }
+                expect("batch delete: whitelisted subtree survives",
+                       fm.fileExists(atPath: protected.appendingPathComponent("f.bin").path))
+                expect("batch delete: non-whitelisted sibling removed",
+                       !fm.fileExists(atPath: guarded.appendingPathComponent("loose.bin").path))
+                expect("batch delete: whitelist skips reported",
+                       !outcome2.skippedWhitelist.isEmpty,
+                       "\(outcome2.skippedWhitelist)")
+            }
+            try SafetyGuard.saveWhitelistPatterns(whitelistBackup)
+            try? fm.removeItem(at: root)
+        } catch {
+            expect("batch delete: fixture setup failed", false, "\(error)")
+        }
 
         // MARK: Glob matching
 
@@ -599,6 +708,26 @@ enum SmokeTest {
                        NSHomeDirectory() + "/Library/Caches/Foo",
                        NSHomeDirectory() + "/Library/Caches/Foo/deep/nested/file"))
 
+            // Whitelist parse cache: memoized by mtime, so an EDIT must
+            // invalidate it. This is safety, not just speed — a stale cache
+            // would let a path the user just protected be deleted. Driven
+            // through a temp fixture so the real whitelist is untouched.
+            let wlDir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("moppet-wl-smoke-\(UUID().uuidString)", isDirectory: true)
+            try? FileManager.default.createDirectory(at: wlDir, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: wlDir) }
+            let wlFile = wlDir.appendingPathComponent("whitelist")
+            try? "~/KeepMe\n# comment\n\n".write(to: wlFile, atomically: true, encoding: .utf8)
+            expect("whitelist: parses and drops comments/blanks",
+                   SafetyGuard.loadWhitelistPatterns(from: wlFile) == ["~/KeepMe"])
+            try? "~/AlsoKeep\n".write(to: wlFile, atomically: true, encoding: .utf8)
+            // Deterministic mtime bump: two writes inside the same tick would
+            // otherwise leave the cache legitimately valid.
+            try? FileManager.default.setAttributes(
+                [.modificationDate: Date().addingTimeInterval(5)], ofItemAtPath: wlFile.path)
+            expect("whitelist: edit invalidates the parse cache",
+                   SafetyGuard.loadWhitelistPatterns(from: wlFile) == ["~/AlsoKeep"])
+
             // apply_patch guards: workspace root is never a valid target and
             // delete/move needs an anchored hunk / whitelist pass.
             let patchRoot = FileManager.default.temporaryDirectory
@@ -867,19 +996,26 @@ enum SmokeTest {
                 HistoryStore.save(backup)
             }
 
-            // Bubble geometry: the card must fit the panel it lives in at
-            // every size scale (a hardcoded 232pt cap overflowed the 200pt
-            // panel and clipped the text — the reported truncation).
+            // Bubble geometry: the measured card must fit the width it is
+            // given at every size scale (a hardcoded 232pt cap once
+            // overflowed the 200pt panel and clipped the text).
             do {
                 let longLine = String(repeating: "汉", count: 80)   // far wider than any panel
                 for panelWidth in [200.0, 250.0, 312.0] as [CGFloat] {
-                    let width = PetView.bubbleWidth(for: longLine, panelWidth: panelWidth)
+                    let width = PetView.bubbleWidth(for: longLine, maxWidth: panelWidth - 24)
                     expect("pet: bubble fits a \(Int(panelWidth))pt panel",
                            width <= panelWidth - 24 + 0.5)
                 }
                 let short = "OK"
                 expect("pet: short messages keep a compact bubble",
-                       PetView.bubbleWidth(for: short, panelWidth: 200) < 96)
+                       PetView.bubbleWidth(for: short, maxWidth: 176) < 96)
+                // Height estimate drives the panel's vertical growth; if it
+                // under-reports, a long answer swallows the mole's strip (the
+                // "pet disappeared" regression) — it must scale with content.
+                let longAnswer = String(repeating: "很长的回答内容。", count: 60)
+                expect("pet: height estimate scales with the answer",
+                       PetView.bubbleHeight(for: short, width: 300) < 60
+                       && PetView.bubbleHeight(for: longAnswer, width: 300) > 300)
                 // The scroll fallback must be a CONCRETE height (a greedy
                 // ScrollView stretched two-line bubbles to 190pt — measured).
                 // Mirrored here so the constant cannot drift silently.
@@ -939,6 +1075,76 @@ enum SmokeTest {
             let remeasured = ScanEngine.cachedSize(of: fixture)
             expect("size cache: changed path re-measures bigger",
                    remeasured.bytes > first.bytes, "\(remeasured.bytes) vs \(first.bytes)")
+
+            // Deleting a file bumps the mtime of its OWN parent only —
+            // directories further up keep their old mtime, so their cached
+            // bytes looked "still valid" and Analyze kept showing the
+            // pre-delete size for every ancestor until the 3-day TTL.
+            // invalidate() must drop the whole chain, not just one entry.
+            do {
+                let kid = fixture.appendingPathComponent("kid", isDirectory: true)
+                try? fm.createDirectory(at: kid, withIntermediateDirectories: true)
+                try? Data(repeating: 0, count: 2_048)
+                    .write(to: kid.appendingPathComponent("gone.bin"))
+                _ = ScanEngine.cachedSize(of: kid)
+                _ = ScanEngine.cachedSize(of: fixture)
+                let bystander = fm.temporaryDirectory
+                    .appendingPathComponent("smoke-bystander-\(UUID().uuidString)", isDirectory: true)
+                try? fm.createDirectory(at: bystander, withIntermediateDirectories: true)
+                // Empty dirs are never cached (cachedSize skips 0/0 summaries),
+                // so the bystander needs real content to have an entry at all.
+                try? Data(repeating: 0, count: 1_024)
+                    .write(to: bystander.appendingPathComponent("keep.bin"))
+                _ = ScanEngine.cachedSize(of: bystander)
+
+                SizeCache.shared.invalidate(kid.appendingPathComponent("gone.bin"))
+                expect("size cache: invalidate drops the deleted path's ancestor chain",
+                       SizeCache.shared.lookup(kid) == nil
+                       && SizeCache.shared.lookup(fixture) == nil)
+                expect("size cache: invalidate leaves unrelated subtrees alone",
+                       SizeCache.shared.lookup(bystander) != nil)
+            }
+
+            // Analyze delete must shrink every ancestor row IN MEMORY, not
+            // just drop the deleted child: the user reported parent sizes
+            // staying at their old value after a delete.
+            do {
+                let dir = fm.temporaryDirectory
+                    .appendingPathComponent("smoke-analyze-\(UUID().uuidString)", isDirectory: true)
+                let sub = dir.appendingPathComponent("sub", isDirectory: true)
+                let deep = sub.appendingPathComponent("deep", isDirectory: true)
+                try? fm.createDirectory(at: deep, withIntermediateDirectories: true)
+                let target = deep.appendingPathComponent("victim.bin")
+                try? Data(repeating: 0, count: 4_096).write(to: target)
+
+                let victim = FileNode(url: target, bytes: 4_096, isDirectory: false, fileCount: 1)
+                let deepNode = FileNode(url: deep, bytes: 4_096, isDirectory: true, fileCount: 1)
+                deepNode.children = [victim]
+                let subNode = FileNode(url: sub, bytes: 8_192, isDirectory: true, fileCount: 3)
+                subNode.children = [deepNode]
+                let rootNode = FileNode(url: dir, bytes: 12_288, isDirectory: true, fileCount: 5)
+                rootNode.children = [subNode]
+                var tree = [rootNode]
+
+                expect("analyze: deletion is found in a nested layer",
+                       FileNode.applyDeletion(id: victim.id, in: &tree))
+                expect("analyze: deleted node leaves the tree",
+                       deepNode.children.isEmpty)
+                expect("analyze: direct parent shrinks by the deleted bytes",
+                       deepNode.bytes == 0 && deepNode.fileCount == 0,
+                       "\(deepNode.bytes)/\(deepNode.fileCount)")
+                expect("analyze: grandparent and root shrink too",
+                       subNode.bytes == 4_096 && rootNode.bytes == 8_192
+                       && subNode.fileCount == 2 && rootNode.fileCount == 4,
+                       "sub=\(subNode.bytes)/\(subNode.fileCount) root=\(rootNode.bytes)/\(rootNode.fileCount)")
+                expect("analyze: deleting an unknown id is a no-op",
+                       FileNode.applyDeletion(id: "nope", in: &tree) == false
+                       && tree.count == 1)
+                // The delete ring must never be pre-seeded outside the probe —
+                // a permanently visible modal would block the whole page.
+                expect("analyze: delete ring is not seeded without the debug flag",
+                       AnalyzeView.debugSeed == nil)
+            }
 
             // cachedTopChildren (Analyze fast-path): after a real pass every
             // child has a valid summary → snapshot with 0 misses; entries

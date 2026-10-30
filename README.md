@@ -10,7 +10,7 @@
 [![Platform](https://img.shields.io/badge/platform-macOS%2014%2B-lightgrey.svg?style=flat-square)](#要求)
 [![Swift](https://img.shields.io/badge/swift-6.0%2B-orange.svg?style=flat-square)](#要求)
 [![Tools](https://img.shields.io/badge/MCP%20tools-29-8a2be2.svg?style=flat-square)](#内置工具与-mcp29-个)
-[![Tests](https://img.shields.io/badge/tests-210%20%2B%2056%20passing-brightgreen.svg?style=flat-square)](#验证)
+[![Tests](https://img.shields.io/badge/tests-237%20%2B%20226%20passing-brightgreen.svg?style=flat-square)](#验证)
 [![Deps](https://img.shields.io/badge/dependencies-4-informational.svg?style=flat-square)](#许可与致谢)
 
 [中文](#moppet) · [English](#english)
@@ -57,7 +57,7 @@
 | 删除安全性 | "点一下就好" | 只删家目录、25 类保护路径、白名单永远优先、删除前二次校验、逐路径审计；**任何删除（含 AI、含补丁）都要审批** |
 | AI 的形态 | 侧边栏聊天窗口 | 宠物本身就是对话入口：单击说话、双击开完整聊天窗、结果回到头顶气泡 |
 | 可被外部驱动 | 无 | 内置 **MCP 服务器**（stdio + 回环 HTTP，29 个工具），Claude Code / Cursor / Codex 可以直接调用同一套清理能力 |
-| 技术栈 | Electron / 大量框架 | 单进程 SwiftUI + SceneKit；4 个依赖；debug 二进制 68 MB，`--smoke` 全量自测 1.3 秒 |
+| 技术栈 | Electron / 大量框架 | 单进程 SwiftUI + SceneKit；4 个依赖；debug 二进制 74 MB，`--smoke` 全量自测约 3 秒 |
 
 **它适合谁**：想要一个能真正解释"为什么删这个"的清理工具的人；愿意把删除权限交给一个有护栏的 agent 的人；喜欢桌宠作为交互层的人。
 
@@ -127,8 +127,8 @@ open dist/Moppet.app
 swift run Moppet                       # 主窗口 + 桌宠 + 菜单栏
 
 # ── 自测（不删除任何文件）──────────────────────────────
-swift run Moppet --smoke               # 210 项核心断言，约 1.3s
-swift run Moppet --brain-smoke         #  56 项 agent 断言，约 1.0s
+swift run Moppet --smoke               # 237 项核心断言，约 3s
+swift run Moppet --brain-smoke         # 226 项 agent 断言，约 3s
 
 # ── 作为 MCP 服务器 ────────────────────────────────────
 swift run Moppet --mcp                 # stdio（Claude Code / Cursor 常用）
@@ -184,7 +184,7 @@ swift build
 | **总览** Dashboard | 磁盘环、4 张快捷卡、系统状态胶囊、会话数 | — |
 | **清理** Clean | 4 分区 **24 条规则**（系统与用户 / 开发者 / 浏览器 / 安装包）；扫描前逐项勾选，复审页逐文件勾选 | 缓存/日志永久删除；安装包/归档进废纸篓 |
 | **孤立残留** Orphans | 反查 `~/Library` 中**已卸载应用**的残留（Caches / Preferences / Containers / Support / LaunchAgents），按 bundle id 判定 | 进废纸篓（可恢复，启发式判定） |
-| **卸载** Uninstall | 应用列表（名称/大小/图标）；关联残留（Preferences、Caches、Containers、Support、LaunchAgents、Group Containers）；系统级残留需管理员 | 应用与残留**永久删除**（不可恢复，删除前确认） |
+| **卸载** Uninstall | 应用列表（名称/大小/图标）；关联残留（Preferences、Caches、Containers、Support、LaunchAgents、Group Containers）；系统级残留需管理员；App Management 拒绝时自动走管理员提权兜底（取消密码框则回到授权引导卡） | 应用与残留**永久删除**（不可恢复，删除前确认） |
 | **项目清理** Purge | **21 类**可再生产物（node_modules、target、build、dist、.next、.gradle、Pods、`__pycache__`…），自定义根目录并行扫描 | 永久删除（确认框明确告知不进废纸篓） |
 | **瘦身** Slim | 自读 fat header 扫描通用二进制 → 副本剥离 Intel 切片 → 原身份重签名 → codesign 校验通过才替换 | 原件进废纸篓；失败自动回滚；**仅 Apple Silicon** |
 | **空间大户** Space Hogs | APFS 本地快照、Docker（镜像/容器/卷/构建缓存）、Homebrew 旧版本；iOS 备份 / 邮件 / 信息为只读报告 | 快照永久删、Docker prune、brew cleanup；只读项不删 |
@@ -192,7 +192,7 @@ swift build
 | **优化** Optimize | Finder/Dock 重启、DNS 刷新、Spotlight 重建、内存 purge、网络卷 .DS_Store、30 天+ Saved State、健康报告 | 不涉及用户数据 |
 | **启动项** Startup | 扫描 `~/Library/LaunchAgents`、`/Library/LaunchAgents`、`/Library/LaunchDaemons`（`com.apple.*` 折叠计数）；显示 RunAtLoad / KeepAlive / loaded | **不删文件**：写 `Disabled` + `launchctl bootout` 立即停跑，可逆 |
 | **状态** Status | CPU / 内存 / 网络 / 电池 / Top 进程 / uptime，2 秒刷新 | 仅 SIGTERM（带确认） |
-| **分析** Analyze | 双栏：面包屑 + 目录列表 + 气泡图；展开即并行测量；可勾选任意路径 | 选中项**永久删除**（不可恢复，删除前确认） |
+| **分析** Analyze | 双栏：面包屑 + 目录列表 + 气泡图；两相扫描——展开先秒出列表、大小流式补全；可勾选任意路径 | 选中项**永久删除**（不可恢复，删除前确认） |
 | **历史** History | 每次清理的逐路径审计（路径、字节、删除方式、成功/失败原因） | 只读 |
 | **设置** Settings | AI 供应商与模型、ChatGPT 订阅登录、宠物名字/人格、白名单、语言、扫描缓存、MCP 开关 | — |
 
@@ -430,11 +430,11 @@ glob 语义：`*` 只匹配单段（不跨 `/`），`?` 匹配单字符；命中
 |---|---|
 | **并行测量** | 目录大小按 TaskGroup 分扇下钻（宽度 8），替代串行递归 |
 | **跨启动缓存** | 测量结果入 `size-cache.json`（5000 条 LRU / 3 天 TTL）；目录 mtime 变化即失效 |
-| **两段式列表** | 卸载页先秒出元数据，大小后台并行补齐（单调进度）；分析页展开才测量 |
+| **两段式列表** | 卸载页先秒出元数据，大小后台并行补齐（单调进度）；分析页两相扫描——先秒出 ls 级列表、大小流式补全（大目录展开不再冻结） |
 | **后台 I/O** | 会话枚举、`ps` 采样、大目录遍历、缓存读写都在后台线程；UI 状态统一回主线程 |
 | **轻量会话** | 侧栏会话列表只读文件头，标题流式早停 |
 
-实测（本机 Intel，debug 构建）：同一范围的 MCP 扫描**热启动 0.26 s**（含进程启动，命中缓存）；`--smoke` 全量 210 项 **1.32 s**，`--brain-smoke` 56 项 **0.99 s**。
+实测（本机 Intel，debug 构建）：同一范围的 MCP 扫描**热启动 0.26 s**（含进程启动，命中缓存）；`--smoke` 全量 237 项 **约 2.9 s**，`--brain-smoke` 226 项 **约 2.9 s**（均含进程启动）。
 
 > 缓存的一个真坑：目录变更检测必须用 `attributesOfItem(.modificationDate)`。`URL.resourceValues(.contentModificationDateKey)` 对目录在 macOS 26 上不随子项变化更新，用它做判断会让缓存永久命中（等于没失效）。
 
@@ -442,7 +442,7 @@ glob 语义：`*` 只匹配单段（不跨 `/`），`?` 匹配单字符；命中
 
 ## 国际化
 
-轻量 `L10n`：键即英文原文，`L("Scan")` → "扫描"，367 条中文词条。跟随系统语言，Settings 可即时切换（System / English / 中文），切换会刷新整个界面。
+轻量 `L10n`：键即英文原文，`L("Scan")` → "扫描"，548 条中文词条。跟随系统语言，Settings 可即时切换（System / English / 中文），切换会刷新整个界面。
 
 对贡献者的硬要求：中英表里出现重复 key 会产生**编译警告**并在首次初始化时 **TRAP**，所以构建必须保持 **0 warning**（`--smoke` 的第一条断言就是自检）。
 
@@ -451,11 +451,14 @@ glob 语义：`*` 只匹配单段（不跨 `/`），`?` 匹配单字符；命中
 ## 项目结构
 
 ```
-Sources/Moppet/                     55 个 Swift 文件 / ~20.3k 行
+Sources/Moppet/                     93 个 Swift 文件 / ~33k 行
 ├── App/
 │   ├── PetPanel.swift              NSPanel 容器、窗口路由与离屏修复、快速扫描、AppDelegate
 │   ├── PetView.swift               SceneKit 角色 + 气泡 + 内联审批/提问卡 + 右键菜单
-│   └── QuickChat.swift             快捷输入面板（一次性 agent 会话）
+│   ├── QuickChat.swift             快捷输入面板（一次性 agent 会话）
+│   ├── ScrollbarTuner.swift        全应用极细滚动条（hover/滚动淡入）
+│   ├── TextFocus.swift             输入焦点时序助手（IME 安全）
+│   └── AnalyzeRenderProbe.swift    --render-probe 离屏渲染自检
 ├── Brain/
 │   ├── BrainAgent.swift            循环、压缩、会话、MCP 连接、事件广播
 │   ├── BrainTools.swift            shell / read_file / apply_patch / exec / plan / 提问 + 清理工具桥接
@@ -472,6 +475,7 @@ Sources/Moppet/                     55 个 Swift 文件 / ~20.3k 行
 │   ├── ToolRegistry.swift          29 个工具 + JSON Schema + 门控 + 确认 token
 │   ├── SafetyGuard.swift           保护路径、白名单、glob
 │   ├── ScanEngine.swift            pattern 展开、并行测量、缓存接入
+│   ├── BatchDeleter.swift          分层批量删除（直删/展开两层 + 白名单子树保护）
 │   ├── RuleLibrary.swift           4 分区 24 条规则
 │   ├── CleanExecutor.swift         执行 + HistoryStore 审计
 │   ├── CleanSelectionStore.swift   勾选持久化（三个扫描入口共用）
@@ -517,16 +521,16 @@ $ swift build
 Build complete!          # 0 error / 0 warning
 
 $ swift run Moppet --smoke
-210 ✓  SMOKE PASS        # 1.32s
+237 ✓  SMOKE PASS        # ~2.9s
 
 $ swift run Moppet --brain-smoke
- 56 ✓  BRAIN SMOKE PASS  # 0.99s
+226 ✓  BRAIN SMOKE PASS  # ~2.9s
 ```
 
 | 套件 | 覆盖 |
 |---|---|
-| `--smoke`（210） | 安全判定与 glob、规则库完整性、JSON 往返、磁盘/系统指标、工具注册表与破坏性门控、确认 token、缓存失效、补丁边界（删工作区根 / 无锚点 hunk / 两阶段）、勾选持久化与扫描范围、压缩配对安全、快照/Docker/brew 解析器、孤残分类规则、定时 LaunchAgent plist、CSV/JSON 导出 |
-| `--brain-smoke`（56） | apply_patch 真实文件操作、Seatbelt 沙箱三档、脚本化模型驱动的多轮循环、rollout 恢复、MCP 客户端往返、exec 会话 stdin、图片项、无头提问回落、斜杠命令 |
+| `--smoke`（237） | 安全判定与 glob、规则库完整性、JSON 往返、磁盘/系统指标、工具注册表与破坏性门控、确认 token、缓存失效、补丁边界（删工作区根 / 无锚点 hunk / 两阶段）、勾选持久化与扫描范围、压缩配对安全、快照/Docker/brew 解析器、孤残分类规则、定时 LaunchAgent plist、CSV/JSON 导出、分层批量删除（直删/展开两层、符号链接目标不受伤、白名单子树保护） |
+| `--brain-smoke`（226） | apply_patch 真实文件操作、Seatbelt 沙箱三档、脚本化模型驱动的多轮循环、rollout 恢复、MCP 客户端往返、exec 会话 stdin、图片项、无头提问回落、斜杠命令 |
 | MCP | `initialize` → `tools/list`（29）→ `scan_clean` 真实结果 → 无 `confirmed` 被拒 → `safety_check` DENIED |
 | HTTP | 只监听 `127.0.0.1`，`tools/list` 返回 29 |
 | 架构 | `swift build --triple arm64-apple-macosx14.0` 与 `x86_64-apple-macosx14.0` 均全量交叉编译通过 |
@@ -618,8 +622,8 @@ git clone git@github.com:xsean2020/Moppet.git && cd Moppet
 swift build                # Swift 6.0+, macOS 14+, ~3–5 min first time
 .build/debug/Moppet        # GUI: main window + pet + menu bar
 
-swift run Moppet --smoke          # 210 assertions, no files touched
-swift run Moppet --brain-smoke    #  56 assertions
+swift run Moppet --smoke          # 237 assertions, no files touched
+swift run Moppet --brain-smoke    # 226 assertions
 swift run Moppet --mcp            # MCP over stdio
 swift run Moppet --mcp-http 8765  # MCP over loopback HTTP
 swift run Moppet --brain-exec "clean my browser caches" --yes   # headless agent

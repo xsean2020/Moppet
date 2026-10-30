@@ -105,12 +105,19 @@ struct CleanView: View {
             .map(\.section.title).joined(separator: ", "))
     }
 
+    /// Ids whose findings are moved to the Trash rather than unlinked.
+    /// Computed once: the notice used to flatten the ENTIRE rule library
+    /// (every section × every item) for every finding on every body pass,
+    /// and short-circuiting `contains` is enough — the sentence only needs
+    /// to know whether ANY of the selected findings is a Trash-mode item.
+    private static let trashItemIDs: Set<String> = Set(
+        RuleLibrary.sections.flatMap(\.items).filter { $0.mode == .trash }.map(\.id))
+
     private var trashNotice: String {
-        let trashCount = viewModel.selectedFindings.filter { finding in
-            RuleLibrary.sections.flatMap(\.items)
-                .first(where: { $0.id == finding.itemID })?.mode == .trash
-        }.count
-        return trashCount > 0
+        let hasTrashItem = viewModel.selectedFindings.contains {
+            Self.trashItemIDs.contains($0.itemID)
+        }
+        return hasTrashItem
             ? L("Installers and archives go to the Trash (recoverable); caches and logs are removed permanently.")
             : L("Caches and logs are removed permanently. This cannot be undone.")
     }

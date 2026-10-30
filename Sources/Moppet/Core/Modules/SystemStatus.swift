@@ -172,32 +172,113 @@ enum SystemStatus {
         return Battery(percentage: 0, charging: false, present: false)
     }
 
-    // MARK: - Top processes (ps-based)
+    // MARK: - Top processes (libproc/sysctl — no external binary)
 
+    /// Top consumers, `%CPU` computed the same way `ps` does it:
+    /// cumulative CPU time ÷ process lifetime.
+    ///
+    /// This used to shell out to `/bin/ps`, which made the metric die
+    /// entirely in restricted environments (hardened sandboxes refuse to
+    /// exec external binaries → `proc.run()` throws → 0 rows → the Status
+    /// process card was empty and the smoke test failed). Everything needed
+    /// is available in-process:
+    /// - `sysctl(KERN_PROC_ALL)` — pid, start time, short name (readable for
+    ///   every process, no entitlement)
+    /// - `proc_pidinfo(PROC_PIDTASKINFO)` — cumulative CPU ns + resident
+    ///   bytes (readable for the calling user's processes; root-owned
+    ///   processes without extra entitlements are skipped)
+    /// - `proc_pidpath` — full executable path when readable
     static func topProcesses(limit: Int = 8) -> [ProcessEntry] {
-        let proc = Process()
-        let pipe = Pipe()
-        // Run /bin/ps DIRECTLY (no `zsh -c` + `head`): the shell/pipe
-        // indirection and `-r` sort both changed behaviour on macOS 26, and
-        // `ps -A` output can exceed the 64 KB pipe buffer. We suppress the
-        // header with `pid=,…`, sort by CPU and cap in Swift instead.
-        proc.executableURL = URL(fileURLWithPath: "/bin/ps")
-        proc.arguments = ["-A", "-o", "pid=,pcpu=,pmem=,comm="]
-        proc.standardOutput = pipe
-        proc.standardError = FileHandle.nullDevice
-        guard (try? proc.run()) != nil else { return [] }
-        // Drain BEFORE waiting: a full pipe makes waitUntilExit() deadlock.
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        proc.waitUntilExit()
-        guard let text = String(data: data, encoding: .utf8) else { return [] }
-        let rows = text.split(separator: "\n").compactMap { line -> ProcessEntry? in
-            let parts = line.split(whereSeparator: { $0 == " " })
-            guard parts.count >= 4, let pid = Int(parts[0]),
-                  let cpu = Double(parts[1]), let mem = Double(parts[2]) else { return nil }
-            return ProcessEntry(pid: pid, cpu: cpu, mem: mem,
-                                command: parts[3...].joined(separator: " "))
+        let now = Date()
+        let physicalMemory = Double(ProcessInfo.processInfo.physicalMemory)
+        var rows: [ProcessEntry] = []
+        rows.reserveCapacity(256)
+
+        for proc in allProcesses() {
+            guard proc.pid > 0 else { continue }
+            let elapsed = now.timeIntervalSince(proc.started)
+            guard elapsed > 0.5 else { continue }
+            // CPU % from cumulative CPU nanoseconds ÷ lifetime (ps parity).
+            // Processes whose task info is inaccessible (root daemons) still
+            // show up with a 0 estimate rather than vanishing from the list.
+            var cpu = 0.0
+            var mem = 0.0
+            if let task = taskInfo(proc.pid) {
+                let cpuSeconds = Double(task.totalUser + task.totalSystem) / 1_000_000_000
+                cpu = min(999, max(0, 100 * cpuSeconds / elapsed))
+                mem = min(100, max(0, 100 * Double(task.resident) / physicalMemory))
+            }
+            rows.append(ProcessEntry(pid: Int(proc.pid), cpu: cpu, mem: mem,
+                                     command: proc.name))
         }
         return Array(rows.sorted { $0.cpu > $1.cpu }.prefix(limit))
+    }
+
+    private struct ProcFork {
+        var pid: pid_t
+        var started: Date
+        var name: String
+    }
+
+    /// One `sysctl(KERN_PROC_ALL)` pass — pid, start time, 16-char comm name.
+    private static func allProcesses() -> [ProcFork] {
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_ALL]
+        var size = 0
+        guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > 0 else { return [] }
+        // The sysctl can grow between the size probe and the call — retry
+        // once with a generous margin instead of failing the whole metric.
+        for extra in [0, 256] {
+            var data = [UInt8](repeating: 0, count: size + extra * MemoryLayout<kinfo_proc>.stride)
+            var actual = data.count
+            // The retry pass only helps if a failed call continues to it —
+            // `return []` here made the second lap dead code and dropped the
+            // whole metric on a transient ENOMEM.
+            guard sysctl(&mib, 3, &data, &actual, nil, 0) == 0 else { continue }
+            return data.withUnsafeBytes { raw in
+                let procs = raw.bindMemory(to: kinfo_proc.self)
+                return procs.prefix(actual / MemoryLayout<kinfo_proc>.stride).map { kp in
+                    let tv = kp.kp_proc.p_starttime
+                    let started = Date(timeIntervalSince1970:
+                        Double(tv.tv_sec) + Double(tv.tv_usec) / 1_000_000)
+                    let name = withUnsafeBytes(of: kp.kp_proc.p_comm) { raw -> String in
+                        guard let base = raw.bindMemory(to: CChar.self).baseAddress else { return "" }
+                        return String(cString: base)
+                    }
+                    let pid = kp.kp_proc.p_pid
+                    // Prefer the full executable path (what `ps comm=` showed);
+                    // unreadable for root-only processes → keep the short name.
+                    var path = name
+                    if !name.isEmpty {
+                        var buffer = [CChar](repeating: 0, count: 4096)
+                        if proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 {
+                            path = String(cString: buffer)
+                        }
+                    }
+                    return ProcFork(pid: pid, started: started, name: path)
+                }
+            }
+        }
+        return []
+    }
+
+    private struct TaskInfo {
+        var totalUser: UInt64
+        var totalSystem: UInt64
+        var resident: UInt64
+    }
+
+    /// Cumulative CPU nanoseconds + resident bytes for one pid. Returns nil
+    /// for processes the caller may not inspect (root daemons).
+    private static func taskInfo(_ pid: pid_t) -> TaskInfo? {
+        var info = proc_taskinfo()
+        let result = withUnsafeMutableBytes(of: &info) { pointer -> Int32 in
+            proc_pidinfo(pid, PROC_PIDTASKINFO, 0, pointer.baseAddress,
+                         Int32(MemoryLayout<proc_taskinfo>.size))
+        }
+        guard result == Int32(MemoryLayout<proc_taskinfo>.size) else { return nil }
+        return TaskInfo(totalUser: info.pti_total_user,
+                        totalSystem: info.pti_total_system,
+                        resident: info.pti_resident_size)
     }
 
     // MARK: - Uptime

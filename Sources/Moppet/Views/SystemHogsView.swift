@@ -208,7 +208,8 @@ struct SystemHogsView: View {
                     AiriButton(title: String(format: L("Delete %lld Selected"),
                                             selectedSnapshots.count),
                                icon: "trash", variant: .destructive,
-                               disabled: selectedSnapshots.isEmpty) {
+                               disabled: selectedSnapshots.isEmpty || busyAction == "snapshots",
+                               busy: busyAction == "snapshots") {
                         confirmAction = .deleteSnapshots(Array(selectedSnapshots).sorted())
                     }
                 }

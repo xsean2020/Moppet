@@ -62,7 +62,14 @@ final class SizeCache {
     /// Caller must hold `lock`.
     private func evictIfNeeded() {
         guard store.count > Self.maxEntries else { return }
-        let surplus = store.count - Self.maxEntries
+        // Evict in BATCHES down to 90% of the cap. Trimming to exactly the
+        // cap meant the very next insert pushed the store over again, so a
+        // cold scan re-sorted all 5000 entries on every persist tick.
+        // Sorted-prefix is O(n log n) on an already-small dictionary — the
+        // win here is doing it 10× less often, not a fancier data structure.
+        let target = Self.maxEntries - Self.maxEntries / 10
+        let surplus = store.count - target
+        guard surplus > 0 else { return }
         let oldest = store.sorted { $0.value.cachedAt < $1.value.cachedAt }.prefix(surplus)
         for (key, _) in oldest {
             store.removeValue(forKey: key)
@@ -83,8 +90,13 @@ final class SizeCache {
     /// returns URLs under the RESOLVED path (/var → /private/var on macOS),
     /// while a caller-built URL keeps the unresolved form — keys must match
     /// or every enumerated child misses its own just-stored summary.
+    /// Uses real `realpath` (ScanEngine.realFileSystemPath), NOT
+    /// resolvingSymlinksInPath: that API leaves /var-class paths unresolved
+    /// (the very mismatch this key exists to prevent), so a caller URL
+    /// /tmp/x and an enumerated child /private/tmp/x produced two entries
+    /// for one directory and remove()/invalidate() could miss the real key.
     private static func cacheKey(_ url: URL) -> String {
-        url.resolvingSymlinksInPath().path
+        ScanEngine.realFileSystemPath(url.path)
     }
 
     func lookup(_ url: URL) -> ScanEngine.SizeSummary? {
@@ -111,8 +123,48 @@ final class SizeCache {
         }
     }
 
+    /// Drop ONE entry — no ancestor walk. Analyze deletions refresh their
+    /// ancestors' summaries from the in-memory tree instead of dropping them
+    /// (see `FileNode.applyDeletion`); only the deleted path itself and the
+    /// home root (not derivable from the tree) need a plain removal.
+    func remove(_ url: URL) {
+        lock.lock(); defer { lock.unlock() }
+        store.removeValue(forKey: Self.cacheKey(url))
+        persist()
+    }
+
+    /// Immediate flush of the throttled disk writes — call at the end of a
+    /// bulk measuring pass so a quit right afterwards doesn't lose the
+    /// just-measured subtree summaries (store() only persists every 2s).
     func persistNow() {
         lock.lock(); defer { lock.unlock() }
+        persist()
+    }
+
+    /// Drop the cached summary for `url` AND every ancestor up to the home
+    /// folder.
+    ///
+    /// Deleting a file bumps the mtime of its own parent directory only —
+    /// directories further up keep their old mtime (verified: same value
+    /// before and after a nested delete). Their cached `bytes` therefore
+    /// looked "still valid" and the Analyze view kept showing the pre-delete
+    /// size for every parent until the 3-day TTL. Callers that mutate a tree
+    /// must drop the whole chain.
+    func invalidate(_ url: URL) {
+        lock.lock(); defer { lock.unlock() }
+        // Same canonicalization as the STORE side (realpath): with the old
+        // resolvingSymlinksInPath here, /var-class paths removed keys that
+        // were never stored and left the real ones alive.
+        var current = URL(fileURLWithPath: ScanEngine.realFileSystemPath(url.path))
+        let home = URL(fileURLWithPath: ScanEngine.realFileSystemPath(
+            FileManager.default.homeDirectoryForCurrentUser.path))
+        while true {
+            store.removeValue(forKey: current.path)
+            if current.path == home.path || current.path == "/" { break }
+            let parent = current.deletingLastPathComponent()
+            if parent.path == current.path { break }
+            current = parent
+        }
         persist()
     }
 

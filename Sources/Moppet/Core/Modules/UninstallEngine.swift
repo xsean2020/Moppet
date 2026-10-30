@@ -171,15 +171,106 @@ enum UninstallEngine {
         return results
     }
 
+    // MARK: - Permission error classification
+
+    /// The raw localizedDescription for a refused bundle delete is a generic
+    /// Cocoa "you don't have permission" — users reasonably answer "but I
+    /// granted Full Disk Access!". FDA is read-only; on macOS 15+ the missing
+    /// grant is App Management. Translate the errno into the actionable hint,
+    /// but ONLY for /Applications paths (a home-scope EPERM has nothing to do
+    /// with App Management and would send the user to the wrong settings pane).
+    static func friendlyRemoveReason(_ url: URL, _ error: Error) -> String {
+        let ns = error as NSError
+        let denied = Self.isPermissionDenied(error)
+        if denied, url.path.hasPrefix("/Applications") {
+            return L("Permission denied — macOS 15+ needs the App Management permission (Full Disk Access is not enough). System Settings → Privacy & Security → App Management")
+        }
+        return ns.localizedDescription
+    }
+
+    /// The permission-error class an app-bundle delete fails with when the
+    /// App Management TCC decision blocks it (recorded deny, or silent deny
+    /// for an ad-hoc signature that changes on every rebuild).
+    static func isPermissionDenied(_ error: Error) -> Bool {
+        let ns = error as NSError
+        return (ns.domain == NSCocoaErrorDomain && ns.code == 513)          // NSFileWriteNoPermissionError
+            || (ns.domain == NSPOSIXErrorDomain && (ns.code == 1 || ns.code == 13)) // EPERM / EACCES
+            || ns.localizedDescription.lowercased().contains("permission")
+    }
+
+    /// POSIX single-quote escape — same convention as removeSystemLeftovers.
+    private static func shellEscaped(_ path: String) -> String {
+        "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    /// Outcome of `deleteBundleWithAdminFallback` — a plain enum because
+    /// `Result` demands an `Error`-conforming failure type and a String
+    /// message is all the callers need.
+    enum BundleDeleteFallbackOutcome {
+        case deleted
+        case failed(String)
+    }
+
+    /// Admin-elevation fallback for a permission-denied bundle delete.
+    ///
+    /// Why this exists (M1 report, 2026-10-29): a TCC App Management prompt
+    /// BLOCKS the delete syscall until answered — on a healthy machine the
+    /// first `removeItem` waits, the prompt shows, Allow completes the
+    /// delete. But when the TCC decision is already recorded (a past
+    /// "Don't Allow") or macOS silently denies (unstable ad-hoc signature),
+    /// the delete fails FAST with EPERM and no prompt ever appears — the
+    /// user saw "no permission dialog" on Apple Silicon while Intel was
+    /// fine. Because a pending prompt blocks instead of failing, a fast
+    /// failure proves no dialog is coming, so elevating now can never stack
+    /// a second dialog on top of a live TCC prompt. The AppleScript admin
+    /// route pops the native password dialog deterministically (Finder
+    /// behaves the same way for apps you don't own) and runs as root, which
+    /// also cures root-owned bundles.
+    ///
+    /// GUI callers pass `true`; headless callers (smoke, stdio MCP) must
+    /// keep the default `false` — `shellWithAdmin` hops through MainActor
+    /// and the headless modes block the main thread (HANDOFF §6.1).
+    static func deleteBundleWithAdminFallback(
+        _ url: URL, originalError: Error, fallback: Bool
+    ) async -> BundleDeleteFallbackOutcome {
+        if fallback, isPermissionDenied(originalError) {
+            do {
+                _ = try await OptimizeEngine.shellWithAdmin(
+                    "rm -rf \(shellEscaped(url.path))")
+                if !FileManager.default.fileExists(atPath: url.path) {
+                    return .deleted
+                }
+                return .failed("could not delete")
+            } catch {
+                // Cancelled password dialog or wrong password: keep the
+                // actionable App Management reason so the recovery card
+                // pipeline still engages.
+                return .failed(friendlyRemoveReason(url, originalError))
+            }
+        }
+        return .failed(friendlyRemoveReason(url, originalError))
+    }
+
+    /// True when a failure reason came from `friendlyRemoveReason`'s
+    /// App Management path — the view uses it to surface the grant card.
+    static func isAppManagementHint(_ reason: String) -> Bool {
+        reason.hasPrefix("Permission denied — macOS 15+ needs the App Management permission")
+    }
+
     /// Removes SYSTEM-level leftovers with an administrator prompt
     /// (AppleScript privileges — the GUI counterpart of mole's sudo).
     @MainActor
-    static func removeSystemLeftovers(_ files: [RelatedFile]) async -> [(String, String?)] {
+    static func removeSystemLeftovers(_ files: [RelatedFile],
+                                      progress: ((_ done: Int, _ total: Int, _ name: String) -> Void)? = nil)
+        async -> [(String, String?)] {
         var results: [(String, String?)] = []
-        for file in files {
+        let total = files.count
+        for (index, file) in files.enumerated() {
             let path = file.url.path
+            progress?(index, total, file.url.lastPathComponent)
             guard path.hasPrefix("/Library/") || path.hasPrefix("/private/var/db/receipts/") else {
                 results.append((path, "not a system path"))
+                progress?(index + 1, total, file.url.lastPathComponent)
                 continue
             }
             do {
@@ -189,6 +280,7 @@ enum UninstallEngine {
             } catch {
                 results.append((path, error.localizedDescription))
             }
+            progress?(index + 1, total, file.url.lastPathComponent)
         }
         return results
     }
@@ -228,9 +320,12 @@ enum UninstallEngine {
     /// NOT @MainActor on purpose: the batch is pure async file work, and the
     /// MainActor annotation deadlocked every headless caller (smoke blocks the
     /// main thread on a semaphore, so a MainActor hop can never run).
+    /// `fallback: true` (GUI only) elevates via admin password when a bundle
+    /// delete is TCC-denied; headless callers must keep the default `false`.
     static func batchUninstall(apps: [AppEntry], sizes: [String: Int64],
                                withData: Bool,
-                               appendRecord: Bool = true) async -> BatchOutcome {
+                               appendRecord: Bool = true,
+                               fallback: Bool = false) async -> BatchOutcome {
         var outcome = BatchOutcome()
         // Fill in any app the caller hadn't sized yet (AppEntry.bytes is 0 and
         // the dict can be incomplete mid-sizing) BEFORE recycling — once the
@@ -251,7 +346,15 @@ enum UninstallEngine {
                     outcome.failed.append((app.name, "could not delete"))
                 }
             } catch {
-                outcome.failed.append((app.name, error.localizedDescription))
+                let elevated = await deleteBundleWithAdminFallback(
+                    app.url, originalError: error, fallback: fallback)
+                switch elevated {
+                case .deleted:
+                    outcome.trashed.append((app.id, app.name))
+                    outcome.freedBytes += effectiveSizes[app.id] ?? 0
+                case .failed(let reason):
+                    outcome.failed.append((app.name, reason))
+                }
             }
         }
         var relatedItems: [(path: String, bytes: Int64)] = []
@@ -302,11 +405,25 @@ enum UninstallEngine {
         let failed: [(String, String)]
     }
 
+    /// Uninstalls one app plus its related files.
+    ///
+    /// `progress` reports (done, total, current name) over the app bundle and
+    /// every related file: an app with hundreds of leftovers takes long enough
+    /// that a static page reads as a hang.
+    /// `fallback: true` (GUI only) elevates via admin password when the bundle
+    /// delete is TCC-denied; headless callers must keep the default `false`.
     @MainActor
-    static func uninstall(app: AppEntry, files: [RelatedFile], removeData: Bool) async -> UninstallResult {
+    static func uninstall(app: AppEntry, files: [RelatedFile], removeData: Bool,
+                          fallback: Bool = false,
+                          progress: ((_ done: Int, _ total: Int, _ name: String) -> Void)? = nil)
+        async -> UninstallResult {
         var removed: [String] = []
         var failed: [(String, String)] = []
         var appOK = false
+        let dataFiles = removeData ? files.filter(\.deletable) : []
+        let total = 1 + dataFiles.count
+        var done = 0
+        progress?(done, total, app.name)
 
         // App bundle removal (works for user-writable /Applications subfolders and ~/Applications).
         // removed/failed carry full paths so the history audit can show exactly what happened.
@@ -318,32 +435,45 @@ enum UninstallEngine {
             appOK = !FileManager.default.fileExists(atPath: app.url.path)
             if appOK { removed.append(app.url.path) }
         } catch {
-            failed.append((app.url.path, error.localizedDescription))
-        }
-
-        if removeData {
-            for file in files where file.deletable {
-                // Same bundle-scoped-preferences exemption as relatedFiles —
-                // otherwise the row is deletable in the UI but blocked here.
-                let prefExempt: Bool
-                if let bid = app.bundleID {
-                    prefExempt = file.url.path.hasSuffix("/\(bid).plist")
-                        || (file.url.path.contains("/Library/Preferences/")
-                            && file.url.lastPathComponent.hasPrefix(bid + "."))
-                } else {
-                    prefExempt = false
-                }
-                guard SafetyGuard.checkDeletable(file.url).allowed || prefExempt else {
-                    failed.append((file.url.path, "blocked by safety guard"))
-                    continue
-                }
-                do {
-                    try await Task.detached { try FileManager.default.removeItem(at: file.url) }.value
-                    removed.append(file.url.path)
-                } catch {
-                    failed.append((file.url.path, error.localizedDescription))
-                }
+            let elevated = await deleteBundleWithAdminFallback(
+                app.url, originalError: error, fallback: fallback)
+            switch elevated {
+            case .deleted:
+                appOK = true
+                removed.append(app.url.path)
+            case .failed(let reason):
+                failed.append((app.url.path, reason))
             }
+        }
+        done += 1
+        progress?(done, total, app.name)
+
+        for file in dataFiles {
+            progress?(done, total, file.url.lastPathComponent)
+            // Same bundle-scoped-preferences exemption as relatedFiles —
+            // otherwise the row is deletable in the UI but blocked here.
+            let prefExempt: Bool
+            if let bid = app.bundleID {
+                prefExempt = file.url.path.hasSuffix("/\(bid).plist")
+                    || (file.url.path.contains("/Library/Preferences/")
+                        && file.url.lastPathComponent.hasPrefix(bid + "."))
+            } else {
+                prefExempt = false
+            }
+            guard SafetyGuard.checkDeletable(file.url).allowed || prefExempt else {
+                failed.append((file.url.path, "blocked by safety guard"))
+                done += 1
+                progress?(done, total, file.url.lastPathComponent)
+                continue
+            }
+            do {
+                try await Task.detached { try FileManager.default.removeItem(at: file.url) }.value
+                removed.append(file.url.path)
+            } catch {
+                failed.append((file.url.path, error.localizedDescription))
+            }
+            done += 1
+            progress?(done, total, file.url.lastPathComponent)
         }
         return UninstallResult(appTrashed: appOK, removedFiles: removed, failed: failed)
     }

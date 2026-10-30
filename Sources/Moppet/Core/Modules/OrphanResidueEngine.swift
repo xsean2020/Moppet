@@ -192,12 +192,21 @@ enum OrphanResidueEngine {
 
     /// Moves the selected orphans to the Trash (recoverable — the
     /// classification is heuristic, so nothing here is permanent).
-    static func trash(_ candidates: [Candidate]) async -> [Outcome] {
+    ///
+    /// `progress` fires once per candidate (index, total, name): a residue
+    /// batch is a long list of independent `trashItem` calls, and without it
+    /// the caller has nothing to show while it runs.
+    static func trash(_ candidates: [Candidate],
+                      progress: ((_ done: Int, _ total: Int, _ name: String) -> Void)? = nil)
+        async -> [Outcome] {
         var outcomes: [Outcome] = []
-        for candidate in candidates {
+        let total = candidates.count
+        for (index, candidate) in candidates.enumerated() {
+            progress?(index, total, candidate.bundleID)
             guard deletable(candidate.url, bundleID: candidate.bundleID) else {
                 outcomes.append(Outcome(path: candidate.url.path, success: false,
                                         error: "blocked by safety guard"))
+                progress?(index + 1, total, candidate.bundleID)
                 continue
             }
             do {
@@ -209,6 +218,7 @@ enum OrphanResidueEngine {
                 outcomes.append(Outcome(path: candidate.url.path, success: false,
                                         error: error.localizedDescription))
             }
+            progress?(index + 1, total, candidate.bundleID)
         }
         return outcomes
     }

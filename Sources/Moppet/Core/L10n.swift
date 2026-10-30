@@ -56,6 +56,15 @@ private let zh: [String: String] = [
     "+%lld more": "另 %lld 个",
     "%1$@ apps · %2$@ data": "App %1$@ · 数据 %2$@",
     " · %lld leftover files": " · %lld 个残留文件",
+    // App Management (macOS 15+ TCC) — FDA is read-only, bundle deletes need this
+    "Permission denied — macOS 15+ needs the App Management permission (Full Disk Access is not enough). System Settings → Privacy & Security → App Management":
+        "没有权限——macOS 15+ 删除其他 App 需要「App 管理」权限（「完全磁盘访问权限」只提供读取权限，并不够）。系统设置 → 隐私与安全性 → App 管理",
+    "App Management permission required": "需要「App 管理」权限",
+    "On macOS 15+, deleting other apps requires the App Management permission. Full Disk Access only grants read access and is not enough.":
+        "macOS 15+ 删除其他 App 需要「App 管理」权限。「完全磁盘访问权限」只提供读取权限，不覆盖删除操作。",
+    "If you previously clicked Don't Allow, macOS will not show the prompt again — turn it on in System Settings.":
+        "如果之前点过「不允许」，系统不会再弹窗——请在系统设置中手动打开。",
+    "Grant App Management…": "去授权「App 管理」…",
     // dashboard lifetime stats
     "Cleaned so far": "累计清理",
     "Open the cleanup history": "打开清理历史",
@@ -165,10 +174,16 @@ private let zh: [String: String] = [
     "%@ deleted": "已删除 %@",
     "%lld related files deleted": "已删除 %lld 个关联文件",
     "Expand folders to size them — tick paths to delete": "展开目录测量大小——勾选路径永久删除",
+    "Measuring…": "测量中…",
+    "Opening %@…": "正在打开 %@…",
+    "Measuring big-file locations…": "正在测量大文件目录…",
+    "Measuring %@…": "正在测量 %@…",
+    "Measuring %lld / %lld…": "测量中 %1$lld / %2$lld…",
     "Delete %lld": "删除 %lld",
     "Delete %lld items (%@) permanently?": "永久删除 %lld 个项目（%@）？",
     "Items are deleted permanently. This cannot be undone.": "项目将被永久删除，无法撤销。",
     "Deleted %lld paths 🗑": "已删除 %lld 个路径 🗑",
+    "kept whitelisted content: %@": "已保留白名单内容：%@",
     // chat
     "Chats": "会话", "New chat": "新会话", "Delete session": "删除会话",
     "Delete chat?": "删除会话？",
@@ -558,4 +573,40 @@ private let zh: [String: String] = [
     "Exported %@ · %lld runs": "导出于 %1$@ · %2$lld 次清理",
     "Freed %@ in %lld paths": "释放 %1$@，共 %2$lld 个路径",
     "Moppet — Clean History Export": "Moppet — 清理历史导出",
+    // Brain Growth (settings tab + learning table)
+    "Brain Growth": "大脑成长",
+    "Growth": "成长",
+    "The pet can learn from your own sessions: what it did right, where it hesitated, what you refused. Everything stays on this Mac as plain text files.":
+        "宠物可以从你自己的会话里学习：做对了什么、哪里犹豫过、你拒绝了什么。全部以纯文本文件保存在这台 Mac 上。",
+    "Learn from my sessions": "从我的会话中学习",
+    "Record how each turn ended and reflect on the bad ones. Costs a few thousand tokens a day at most; a hard daily budget applies.":
+        "记录每一轮是怎么结束的，并对表现不佳的轮次做反思。每天最多消耗几千 tokens，且有硬性每日预算。",
+    "Let it rewrite its own instructions": "允许它改写自己的指令",
+    "Off by default. Changes are proposed only when idle, must pass validation and a shadow-replay comparison, and anything touching the always-on prompt waits for your approval here.":
+        "默认关闭。只有在空闲时才会提出改动，且必须通过校验和影子重放对比；任何涉及常驻提示词的改动都要在这里等你批准。",
+    "Metric": "指标",
+    "Value": "数值",
+    "Usage": "占用",
+    "Always-on prompt": "常驻提示词",
+    "Skills": "技能",
+    "Memories": "记忆",
+    "Lessons": "经验",
+    "Spent today": "今日消耗",
+    "Waiting for your approval": "等待你的批准",
+    "What it has learned": "它学到了什么",
+    "Harness version": "Harness 版本",
+    "Roll back": "回滚",
+    "Restore the version before the last change": "恢复到上一次改动之前的版本",
+    "Discard": "丢弃",
+    "Forget this lesson": "忘记这条经验",
+    "files": "个文件",
+    "Daily spend limit": "每日消耗上限",
+    "Hard cap on what the growth loop may spend per day — it stops once the cap is reached.":
+        "成长循环每天可消耗的硬性上限，达到上限后立即停止。",
+    // Analyze — delete progress overlay
+    "Deleting…": "正在删除…",
+    "Those paths are protected — nothing was deleted.": "这些路径受保护，没有删除任何内容。",
+    "Nothing was deleted — those paths are protected or in use.":
+        "没有删除任何内容 —— 这些路径受保护或正在被占用。",
+    "Some contents could not be deleted": "部分内容无法删除",
 ]

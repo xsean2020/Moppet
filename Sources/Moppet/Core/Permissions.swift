@@ -16,6 +16,20 @@ enum Permissions {
     /// re-probing on every view appear without going stale mid-session.
     private static let cacheTTL: TimeInterval = 10
 
+    /// Drops the FDA cache the moment the user returns to the app. Granting
+    /// FDA happens in System Settings, so the ONLY way back is activating
+    /// this app — the old TTL alone kept reporting "no permission" for up to
+    /// 10 s after the grant, reading as "I granted it and it still says no".
+    private static let activationHook: Void = {
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { _ in
+            lock.lock()
+            cachedResult = nil
+            lock.unlock()
+        }
+    }()
+
     /// True when the process can read the user TCC database. Reading
     /// `TCC.db` is the canonical probe: it is the most TCC-protected file a
     /// granted app can open, and a denied read throws errno 1 immediately.
@@ -28,19 +42,12 @@ enum Permissions {
         }
         lock.unlock()
 
+        _ = activationHook
         let value = probeFullDiskAccess()
         lock.lock()
         cachedResult = (value, Date())
         lock.unlock()
         return value
-    }
-
-    /// Drops the cached verdict so a just-completed Settings grant is picked
-    /// up on the next read instead of ten seconds later.
-    static func invalidate() {
-        lock.lock()
-        cachedResult = nil
-        lock.unlock()
     }
 
     private static func probeFullDiskAccess() -> Bool {
@@ -61,6 +68,44 @@ enum Permissions {
     static func openFullDiskAccessSettings() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") {
             NSWorkspace.shared.open(url)
+        }
+    }
+
+    /// macOS 15 (Sequoia) split app-bundle modification into its own TCC
+    /// permission. Full Disk Access is READ-ONLY — it never grants delete
+    /// rights — so from Sequoia on, trashing another app's .app bundle in
+    /// /Applications fails with EPERM even with FDA granted and even when
+    /// the bundle is user-owned. This is the "FDA on but uninstall still
+    /// denied" answer.
+    static var needsAppManagement: Bool {
+        ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 15
+    }
+
+    /// Opens Privacy → App Management. There is no public read API for the
+    /// App Management state (any write probe would itself trigger the TCC
+    /// prompt), so the app detects it from delete failures instead — this
+    /// deep link is the actionable follow-up.
+    @MainActor
+    static func openAppManagementSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AppManagement") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    /// Benign App Management probe: touch another app bundle's modification
+    /// date. A granted environment answers success immediately; a denied or
+    /// undecided one fails. NOT a reliable prompt trigger by itself — the
+    /// system prompt is raised by the failed bundle-modification attempt
+    /// itself (removeItem) when the TCC decision is still undecided; once a
+    /// decision (especially a deny) is recorded, macOS never re-prompts and
+    /// only `openAppManagementSettings` can recover.
+    static func probeAppManagement(bundleURL: URL) -> Bool {
+        do {
+            try FileManager.default.setAttributes(
+                [.modificationDate: Date()], ofItemAtPath: bundleURL.path)
+            return true
+        } catch {
+            return false
         }
     }
 

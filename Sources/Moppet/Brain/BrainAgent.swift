@@ -227,6 +227,24 @@ final class BrainAgent {
     /// Resumable exec sessions (codex unified_exec session map).
     private let execSessions = BrainExecSessionRegistry()
 
+    // MARK: Growth instrumentation (P2, design doc §5.6)
+
+    /// Turn-level signals for `TurnOutcome`. These are plain observations of
+    /// what the loop already does — no extra model calls, no extra I/O on the
+    /// hot path. Recording is gated by `GrowthSettings.enabled` at write time.
+    private var turnStartedAt = Date()
+    private var turnPrompt = ""
+    private var turnIndex = 0
+    private var lastUserPrompt = ""
+    private var lastUserAt: Date?
+    private var previousIntent: IntentClass?
+    /// The user repeated themselves inside two minutes — the previous turn
+    /// did not land. Set at submit time, consumed by the current turn.
+    private var reAskedThisTurn = false
+    /// The user is correcting the last answer ("不对，我说的是…") — §5.7
+    /// trigger ③, the only trigger that needs no inference at all.
+    private var correctedThisTurn = false
+
     init(model: BrainModel? = nil, settings: AISettings = AISettings.load()) {
         self.settings = settings
         if let model {
@@ -294,7 +312,12 @@ final class BrainAgent {
             cwd: cwd,
             originator: "moppet-brain",
             cliVersion: "1.0.0",
-            instructions: nil
+            instructions: nil,
+            // §5.12: stamp WHICH harness produced this session at open time.
+            // Without it, "this version performs worse" can only be guessed —
+            // the per-turn outcome also carries the fingerprint, but the meta
+            // is the authoritative anchor for a session's whole lifetime.
+            harnessFingerprint: GrowthLedger.shared.fingerprint(HarnessStore.load())
         )
         writer = BrainRollout.Writer(meta: meta)
         writer?.append(context: turnContext)
@@ -306,7 +329,8 @@ final class BrainAgent {
     var turnContext: BrainTurnContext {
         BrainTurnContext(cwd: cwd, sandboxMode: sandboxMode,
                          approvalPolicy: approvalPolicy, model: modelDescription,
-                         networkAccess: networkAccess, writableRoots: writableRoots)
+                         networkAccess: networkAccess, writableRoots: writableRoots,
+                         startedAt: Date())
     }
 
     private var modelDescription: String {
@@ -375,10 +399,15 @@ final class BrainAgent {
     /// image items so every transport can re-encode them natively.
     func submit(_ text: String, images: [String] = []) async {
         guard !isRunning, !text.trimmingCharacters(in: .whitespaces).isEmpty || !images.isEmpty else { return }
+        // The user is here: any background self-improvement yields instantly.
+        BrainActivity.touch()
+        Evolver.shared.cancel()
         if writer == nil { beginSession() }
         // codex persists a turn_context per turn — /cd and mid-session
         // toggles survive restarts (they used to roll back on resume).
         writer?.append(context: turnContext)
+
+        beginTurn(prompt: text)
 
         items.append(.message(role: "user", content: text))
         writer?.append(item: .message(role: "user", content: text))
@@ -634,20 +663,151 @@ final class BrainAgent {
         }
     }
 
+    // MARK: - Growth (P2)
+
+    /// Opens the turn: timestamps it, detects "the user said it again", and
+    /// guesses the domain from words (tools refine it at the end).
+    private func beginTurn(prompt: String) {
+        turnStartedAt = Date()
+        turnPrompt = prompt
+        turnIndex += 1
+        reAskedThisTurn = false
+        correctedThisTurn = Self.correctionDetected(prompt)
+        if let last = lastUserAt, Date().timeIntervalSince(last) < 120 {
+            let overlap = CueMatcher.jaccard(CueMatcher.bigrams(lastUserPrompt),
+                                             CueMatcher.bigrams(prompt))
+            reAskedThisTurn = overlap >= 0.6
+        }
+        lastUserAt = Date()
+        lastUserPrompt = prompt
+    }
+
+    /// "不对" / "我说的是…" / "that's wrong". Deliberately narrow: a false
+    /// positive buys a reflection call the evidence cannot support, which is
+    /// how the library fills with invented lessons.
+    static func correctionDetected(_ text: String) -> Bool {
+        let lowered = text.lowercased()
+        let markers = ["不对", "不是这个", "不是我要", "我说的是", "搞错", "错了",
+                       "不是让你", "你弄错",
+                       "that's wrong", "that is wrong", "no, i meant", "not what i asked"]
+        return markers.contains { lowered.contains($0) }
+    }
+
+    /// Lessons that matched this intent and this wording. Empty when growth is
+    /// off — an opted-out user's prompt must stay byte-identical to before.
+    private func growthDeveloperBlock(intent: IntentClass) -> String {
+        guard GrowthSettings.enabled else { return "" }
+        let block = LessonLibrary.injectedBlock(intent: intent, query: turnPrompt)
+        return block.isEmpty ? "" : "\n\n" + block
+    }
+
+    /// Closes the turn: logs the outcome and, for a bad one, schedules a
+    /// reflection. Never blocks the UI — the reflection runs detached.
+    private func finishTurn(_ outcome: TurnOutcome) {
+        previousIntent = outcome.intent
+        // §5.12: the outcome belongs in the SESSION RECORD, not only in the
+        // growth log — `Reflector.focus` reads it back by line number, and the
+        // "which exit wrote what" question is answerable only if the record is
+        // in the transcript's own timeline. Written unconditionally: it is one
+        // small line in a file that already holds the whole transcript, and
+        // gating it on the growth switch would leave resumed sessions with a
+        // silently incomplete record.
+        writer?.append(.turnOutcome(outcome))
+        guard GrowthSettings.enabled else { return }
+        TurnOutcomeLog.append(outcome)
+        guard outcome.deservesReflection else { return }
+        scheduleReflection(for: outcome)
+    }
+
+    private func scheduleReflection(for outcome: TurnOutcome) {
+        // One reflection per session: `reflect/reply.md` is the durable marker,
+        // so a relaunch does not re-buy the same conclusion.
+        let marker = GrowthPaths.session(outcome.sessionID)
+            .appendingPathComponent("reflect/reply.md")
+        guard GrowthPaths.read(marker) == nil else { return }
+        let tree = HarnessStore.load()
+        let model = self.model
+        let sessionID = outcome.sessionID
+        let intent = outcome.intent
+        let corrected = outcome.userCorrected
+        Task.detached(priority: .utility) {
+            let outcomes = TurnOutcomeLog.load(days: 1).filter { $0.sessionID == sessionID }
+            let evidence = outcomes.isEmpty ? [outcome] : outcomes
+            // §5.7's trigger list lives in one place; calling it here keeps
+            // "user corrected" and "≥2 bad turns" from drifting apart from
+            // the single `deservesReflection` shortcut.
+            guard Reflector.shouldReflect(evidence, userCorrected: corrected) else { return }
+            let result = await Reflector.reflect(
+                sessionID: sessionID, outcomes: evidence,
+                intent: intent, tree: tree, model: model)
+            // The reason string is the audit trail: "budget exhausted",
+            // "NO_ENTRY" and "empty reply" must stay distinguishable.
+            _ = result.reason
+        }
+    }
+
+    /// "I'll clean that up" with no state-changing call behind it. The pattern
+    /// list is deliberately short: a false positive costs a bad verdict, and a
+    /// bad verdict costs a reflection call.
+    static func promisesAction(_ text: String) -> Bool {
+        let lowered = text.lowercased()
+        let markers = ["我来", "我会", "我马上", "这就", "正在为你", "开始清理", "已经帮你",
+                       "i'll ", "i will ", "let me ", "starting now", "on it"]
+        return markers.contains { lowered.contains($0) }
+    }
+
     private func runLoop() async {
-        let context = toolContext
+        // Approval decisions land in the growth log through this latch — the
+        // closure fires from parallel tool children, hence the lock.
+        let denied = FlagBox()
+        var context = toolContext
+        context.recordApproval = { [weak self] event in
+            if !event.approved { denied.set() }
+            self?.appendApproval(event)
+        }
         let system = BrainInstructions.systemPrompt(
             cwd: cwd, sandboxMode: sandboxMode, approvalPolicy: approvalPolicy,
             networkAccess: networkAccess)
+        let promptIntent = IntentClass.classify(text: turnPrompt, previous: previousIntent)
         let developer = BrainInstructions.assembleDeveloperMessage(cwd: cwd)
+            + growthDeveloperBlock(intent: promptIntent)
         let specs = BrainTools.allSpecs(mcpTools: mcpToolInfos,
                                         mcpConnected: !mcpClients.isEmpty)
+
+        var outcome = TurnOutcome(sessionID: sessionID, turnIndex: turnIndex,
+                                  intent: promptIntent, startedAt: turnStartedAt)
+        outcome.harnessFingerprint = GrowthLedger.shared.fingerprint(HarnessStore.load())
+        outcome.reAskedWithin120s = reAskedThisTurn
+        // Headless runs earn no verdict — they have no user to be right for.
+        outcome.headless = ApprovalCenter.headlessAutoApprove || ApprovalCenter.headlessDeny
+
+        /// The one exit path. Every `return` below goes through it, so a new
+        /// exit added later cannot silently skip accounting.
+        func finish(_ text: String?, usage: BrainUsage?) {
+            outcome.wallSeconds = Date().timeIntervalSince(turnStartedAt)
+            if let usage {
+                outcome.inputTokens = usage.inputTokens
+                outcome.outputTokens = usage.outputTokens
+            }
+            outcome.approvalDenied = denied.get
+            outcome.userCorrected = correctedThisTurn
+            if let text, !text.isEmpty, outcome.intent != .chat,
+               Set(outcome.toolNames).isDisjoint(with: TurnOutcome.mutatingTools),
+               Self.promisesAction(text) {
+                outcome.promisedButNoAction = true
+            }
+            finishTurn(outcome)
+        }
 
         // codex /compact parity: trim the context window before each submit.
         compactHistoryIfNeeded()
 
         for _ in 0..<maxTurnsPerSubmit {
-            if Task.isCancelled { return }
+            if Task.isCancelled {
+                outcome.userCancelled = true
+                finish(nil, usage: nil)
+                return
+            }
 
             var pendingCalls: [BrainToolCall] = []
             var turnFinal: String? = nil
@@ -660,7 +820,11 @@ final class BrainAgent {
                     history: items, specs: specs
                 )
                 for try await event in stream {
-                    if Task.isCancelled { return }
+                    if Task.isCancelled {
+                        outcome.userCancelled = true
+                        finish(nil, usage: nil)
+                        return
+                    }
                     switch event {
                     case .textDelta(let delta):
                         streamingText += delta
@@ -679,6 +843,7 @@ final class BrainAgent {
                 // (QuickChat / ChatView onEvent) — this internal say used to
                 // double-broadcast over their localized bubbles.
                 emit(.error(error.localizedDescription))
+                finish(nil, usage: usage)
                 return
             }
 
@@ -712,9 +877,16 @@ final class BrainAgent {
                     // in the pet bubble; the bubble itself scrolls now.
                     PetBus.shared.say(finalText, state: .talking, hideAfter: 0)
                 }
+                // Domain from what it DID, now that we know the tools.
+                outcome.intent = IntentClass.classify(
+                    text: turnPrompt, tools: outcome.toolNames, previous: previousIntent)
+                finish(message, usage: usage)
                 emit(.turnCompleted(outputMessage: message, usage: usage))
                 return
             }
+
+            outcome.toolCalls += pendingCalls.count
+            outcome.toolNames.append(contentsOf: pendingCalls.map(\.name))
 
             // Dispatch tool calls in parallel (codex runs tool calls concurrently).
             let notify: @Sendable (BrainEvent) -> Void = { [weak self] event in
@@ -744,6 +916,8 @@ final class BrainAgent {
                 return collected
             }
 
+            outcome.toolErrors += outputs.filter(\.isError).count
+
             for output in outputs.sorted(by: { a, b in a.callID < b.callID }) {
                 lastToolLine = "← \(output.output.prefix(120))"
                 if output.output.hasPrefix("image:data:image/") {
@@ -765,7 +939,36 @@ final class BrainAgent {
             }
         }
         lastError = "reached max turns (\(maxTurnsPerSubmit))"
+        outcome.maxTurnsHit = true
+        outcome.intent = IntentClass.classify(
+            text: turnPrompt, tools: outcome.toolNames, previous: previousIntent)
+        finish(nil, usage: nil)
         emit(.turnCompleted(outputMessage: nil, usage: nil))
+    }
+
+    /// Thread-safe one-bit latch: parallel tool children set it, the loop
+    /// reads it once when the turn closes.
+    private final class FlagBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = false
+        func set() { lock.lock(); value = true; lock.unlock() }
+        var get: Bool { lock.lock(); defer { lock.unlock() }; return value }
+    }
+
+    /// One line per approval decision. §5.12 (G2) puts it in the session
+    /// record — that is the copy `Reflector.focus` renders as `(approval) …`
+    /// when a reflection asks "what did the user refuse?". The per-session
+    /// growth file is a convenience duplicate, written only when the user has
+    /// opted in.
+    private func appendApproval(_ event: ApprovalEvent) {
+        writer?.append(.approvalEvent(event))
+        guard GrowthSettings.enabled else { return }
+        let url = GrowthPaths.session(sessionID).appendingPathComponent("approvals.jsonl")
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        guard let data = try? encoder.encode(event),
+              let line = String(data: data, encoding: .utf8) else { return }
+        GrowthPaths.write((GrowthPaths.read(url) ?? "") + line + "\n", to: url)
     }
 
     /// One-line human/model-readable summary of an image data URL.

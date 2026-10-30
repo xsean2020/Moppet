@@ -5,11 +5,28 @@ import Foundation
 /// Principles:
 /// - Only paths under the user's home directory are ever deletable.
 /// - Protected categories (keychains, cookies, messages, iCloud, mail,
-///   browser profiles, preferences) are refused even inside the home.
+///   browser profiles, preferences) are refused even inside the home —
+///   for automated (`.pet`) deletions. User-confirmed deletions relax
+///   these categories; system locations and the whitelist never relax.
 /// - Symlink escape: the *resolved* path must still pass every check.
 /// - A user-managed whitelist (~/.config/moppet/whitelist, one glob per
 ///   line — same format as mole's whitelist) always wins.
 enum SafetyGuard {
+
+    /// Who asked for the deletion.
+    ///
+    /// - `pet`: automated clean flows (clean rules, purge, optimize,
+    ///   uninstall, MCP/agent tools). Strictest interpretation: protected
+    ///   home categories are refused.
+    /// - `userConfirmed`: the user hand-picked paths in the UI and pressed
+    ///   Delete through a confirmation dialog. The protected-category list
+    ///   is relaxed (Desktop, Documents, Safari, browser profiles … are
+    ///   deletable on explicit request), while system locations, the home
+    ///   root, and the user's own whitelist still refuse.
+    enum Policy: Equatable {
+        case pet
+        case userConfirmed
+    }
 
     struct Verdict: Equatable {
         let allowed: Bool
@@ -64,14 +81,45 @@ enum SafetyGuard {
 
     // MARK: - Whitelist
 
+    /// Parsed whitelist cache. `checkDeletable` runs once per candidate path
+    /// and a scan yields hundreds of candidates, so the old implementation
+    /// re-read + re-parsed the same unchanged file hundreds of times per
+    /// pass. The file's mtime is the invalidation key: any edit (Settings,
+    /// the user's editor, `saveWhitelistPatterns`) changes it, and a missing
+    /// file caches as "no patterns" until one appears.
+    ///
+    /// Keyed by path as well so the smoke test can drive a temp file without
+    /// polluting the real whitelist's entry.
+    private static let whitelistLock = NSLock()
+    private static var whitelistCache: (path: String, patterns: [String], mtime: Date?)?
+
     /// Lines are globs matched against the *resolved* absolute path.
     /// `~` at line start expands to the home directory.
-    static func loadWhitelistPatterns() -> [String] {
-        guard let text = try? String(contentsOf: whitelistURL, encoding: .utf8) else { return [] }
-        return text
-            .split(separator: "\n")
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty && !$0.hasPrefix("#") }
+    static func loadWhitelistPatterns(from url: URL = whitelistURL) -> [String] {
+        let path = url.path
+        let mtime = (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate]
+            as? Date
+        whitelistLock.lock()
+        if let cache = whitelistCache, cache.path == path, cache.mtime == mtime {
+            let patterns = cache.patterns
+            whitelistLock.unlock()
+            return patterns
+        }
+        whitelistLock.unlock()
+
+        let patterns: [String]
+        if let text = try? String(contentsOf: url, encoding: .utf8) {
+            patterns = text
+                .split(separator: "\n")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty && !$0.hasPrefix("#") }
+        } else {
+            patterns = []
+        }
+        whitelistLock.lock()
+        whitelistCache = (path, patterns, mtime)
+        whitelistLock.unlock()
+        return patterns
     }
 
     static func saveWhitelistPatterns(_ patterns: [String]) throws {
@@ -79,6 +127,12 @@ enum SafetyGuard {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try patterns.joined(separator: "\n").appending("\n")
             .write(to: whitelistURL, atomically: true, encoding: .utf8)
+        // Drop the cache explicitly: a same-second rewrite can leave the
+        // mtime unchanged, and a stale whitelist is a SAFETY bug, not a perf
+        // one — never rely on mtime granularity to notice our own write.
+        whitelistLock.lock()
+        whitelistCache = nil
+        whitelistLock.unlock()
     }
 
     // MARK: - Glob matching (for whitelist)
@@ -119,7 +173,7 @@ enum SafetyGuard {
 
     // MARK: - Core verdict
 
-    static func checkDeletable(_ url: URL) -> Verdict {
+    static func checkDeletable(_ url: URL, policy: Policy = .pet) -> Verdict {
         // 1. Must be absolute, no ".." components, no control characters.
         let raw = url.path
         guard raw.hasPrefix("/") else { return .deny("not an absolute path") }
@@ -146,12 +200,15 @@ enum SafetyGuard {
             return .deny("outside user home directory")
         }
 
-        // 5. Protected categories inside the home.
-        let homePrefix = home.path + "/"
-        for sub in protectedHomeSubpaths {
-            let protectedPath = homePrefix + sub
-            if rp == protectedPath || rp.hasPrefix(protectedPath + "/") {
-                return .deny("protected category: \(sub)")
+        // 5. Protected categories inside the home. The user's own confirmed
+        //    deletions may relax these (steps 3–4 still apply).
+        if policy == .pet {
+            let homePrefix = home.path + "/"
+            for sub in protectedHomeSubpaths {
+                let protectedPath = homePrefix + sub
+                if rp == protectedPath || rp.hasPrefix(protectedPath + "/") {
+                    return .deny("protected category: \(sub)")
+                }
             }
         }
 
@@ -165,11 +222,6 @@ enum SafetyGuard {
         }
 
         return .ok()
-    }
-
-    /// Convenience used by the scan engine: returns nil when protected.
-    static func deletableURL(_ url: URL) -> URL? {
-        checkDeletable(url).allowed ? url : nil
     }
 
     /// Whitelist-only check (the "never touch" globs), without the

@@ -7,7 +7,8 @@ import Observation
 /// Spotlight-style quick chat: single-click the pet pops an input-only bar
 /// centered on screen. The bar STAYS after submitting — follow-up questions
 /// type straight in while the answer streams into the pet's speech bubble;
-/// it closes on click-away / Esc / clicking the pet again. Runs on its own
+/// it closes ONLY on a blank-space click (bare desktop), Esc, or clicking
+/// the pet again — clicks into any app's window leave it up. Runs on its own
 /// BrainAgent — the rollout lands in the same session directory, so quick
 /// chats show up in the chat window's session list and keep full context.
 @MainActor
@@ -70,7 +71,7 @@ final class QuickChat {
         }
         // Slash commands run locally (codex TUI parity) — output goes to the
         // pet bubble; UI-only ones point at the chat window. The bar stays:
-        // only click-away / Esc / pet-reclick close it.
+        // only a blank-space click / Esc / pet-reclick close it.
         if trimmed.hasPrefix("/") {
             let command = trimmed.split(separator: " ").first.map(String.init) ?? trimmed
             Task { @MainActor in
@@ -87,6 +88,7 @@ final class QuickChat {
         // (send() gates on `active`, so Return during a stream keeps the draft).
         answerText = ""
         active = true
+        streamingTurnOpen = false
         // Pet poses busy, but the bubble stays silent until the answer: the
         // bubble shows RESULTS only, never tool calls or progress text.
         PetBus.shared.setState(.thinking)
@@ -101,12 +103,22 @@ final class QuickChat {
         brain.cancel()
     }
 
+    /// True from the first delta of a turn until the turn ends — brackets
+    /// beginStreamingTurn/endStreamingTurn so the pet can keep a dismissed
+    /// bubble closed for the whole turn (deltas AND final result).
+    private var streamingTurnOpen = false
+
     private func handle(_ event: BrainEvent) {
         switch event {
         case .assistantMessageDelta(let delta):
             answerText += delta
-            // Full text, never a tail slice — the bubble scrolls.
-            PetBus.shared.say(answerText, state: .talking, hideAfter: 0)
+            if !streamingTurnOpen {
+                streamingTurnOpen = true
+                PetBus.shared.beginStreamingTurn()
+            }
+            // Full text, never a tail slice — the bubble scrolls. Streaming
+            // path: text-only update, a dismissed bubble stays dismissed.
+            PetBus.shared.sayStreaming(answerText)
         case .toolStarted:
             // Result-only bubble: no "🔧 tool…" text. The pet still shows a
             // working pose so the turn doesn't look dead during long tool runs.
@@ -117,14 +129,27 @@ final class QuickChat {
             let final = output ?? answerText
             answerText = final
             let tk = usage.map { " · \($0.totalTokens) tk" } ?? ""
-            // Persistent by request: the answer stays on screen until the
-            // next question replaces it (hideAfter 0 = no auto-hide).
-            PetBus.shared.say(final + tk, state: .celebrating, hideAfter: 0)
+            if streamingTurnOpen {
+                streamingTurnOpen = false
+                PetBus.shared.endStreamingTurn(final: final + tk)
+            } else {
+                // Tools-only turn (no streamed text): present like before.
+                PetBus.shared.say(final + tk, state: .celebrating, hideAfter: 0)
+            }
         case .error(let message):
             answerText = "✗ \(message)"
-            // Errors persist as well: the bubble is the only place the quick
-            // bar reports failures, and it is replaced by the next answer.
-            PetBus.shared.say("✗ \(message)", state: .sad, hideAfter: 0)
+            if streamingTurnOpen {
+                streamingTurnOpen = false
+                // Errors break through a dismissed bubble: the user must
+                // learn the turn failed even if they closed the stream.
+                PetBus.shared.endStreamingTurn(final: "✗ \(message)",
+                                               finalState: .sad, breakThrough: true)
+            } else {
+                // Errors persist as well: the bubble is the only place the
+                // quick bar reports failures, and it is replaced by the next
+                // answer.
+                PetBus.shared.say("✗ \(message)", state: .sad, hideAfter: 0)
+            }
         default:
             break
         }
@@ -160,9 +185,10 @@ final class QuickChatPanel: NSPanel {
 @MainActor
 final class QuickChatPanelController {
     private var panel: QuickChatPanel?
-    /// Click-outside dismissal: local monitor catches clicks in our own
-    /// windows, global monitor catches clicks in other apps / the desktop.
-    private var localMonitor: Any?
+    /// Blank-space-click dismissal: only a click on empty desktop (no
+    /// on-screen content window under the cursor) closes the bar. Clicks
+    /// inside any app's window — ours or others' — leave it up so the user
+    /// can keep working with the bar docked. Esc / pet-reclick still close.
     private var globalMonitor: Any?
 
     func show() {
@@ -208,26 +234,43 @@ final class QuickChatPanelController {
         self.panel = panel
     }
 
+    private func removeDismissMonitors() {
+        if let globalMonitor { NSEvent.removeMonitor(globalMonitor) }
+        globalMonitor = nil
+    }
+
     private func installDismissMonitors() {
-        guard localMonitor == nil, globalMonitor == nil else { return }
-        localMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
-            // Clicks inside the pet panel belong to its tap gestures (toggle);
-            // everything else in our windows dismisses.
-            if !(event.window is PetPanel), event.window !== self?.panel {
-                self?.hide()
-            }
-            return event
-        }
+        guard globalMonitor == nil else { return }
+        // Global monitor only: blank space lives on the desktop, which is
+        // never our own window, so local events (our windows, the bar, the
+        // pet) can't be blank-space clicks — they must not dismiss.
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown) { [weak self] _ in
-            self?.hide()
+            guard let self else { return }
+            if !Self.contentWindowUnderMouse() { self.hide() }
         }
     }
 
-    private func removeDismissMonitors() {
-        if let localMonitor { NSEvent.removeMonitor(localMonitor) }
-        if let globalMonitor { NSEvent.removeMonitor(globalMonitor) }
-        localMonitor = nil
-        globalMonitor = nil
+    /// True when an on-screen, normal-layer content window (any app) sits
+    /// under the mouse — i.e. the user is about to click CONTENT, not the
+    /// bare desktop. The desktop itself is excluded by `.excludeDesktopElements`,
+    /// and the Dock / menu bar / our status-bar-level panel are filtered by
+    /// the layer-0 check, so those all read as "blank" and dismiss.
+    private static func contentWindowUnderMouse() -> Bool {
+        let mouse = NSEvent.mouseLocation
+        guard let primary = NSScreen.screens.first else { return true }
+        // Cocoa (bottom-left origin, y up) → CoreGraphics (top-left, y down).
+        let point = CGPoint(x: mouse.x, y: primary.frame.height - mouse.y)
+        guard let list = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+            as? [[String: Any]] else { return true }   // unknown → keep the bar up
+        for info in list {
+            guard info[kCGWindowLayer as String] as? Int == 0,
+                  let b = info[kCGWindowBounds as String] as? [String: CGFloat] else { continue }
+            let frame = CGRect(x: b["X"] ?? 0, y: b["Y"] ?? 0,
+                               width: b["Width"] ?? 0, height: b["Height"] ?? 0)
+            if frame.contains(point) { return true }
+        }
+        return false
     }
 }
 
@@ -271,7 +314,16 @@ struct QuickChatInputView: View {
         )
         .onExitCommand { quick.hideInput() }
         .onChange(of: quick.panelVisible) { _, visible in
-            if visible { focused = true }
+            guard visible else { return }
+            // Same rule as the chat composer: the field may only take focus
+            // after the app is active and THIS panel is key, otherwise the
+            // IME session starts in a background context (IMK/TSM log noise,
+            // dropped first keystroke).
+            TextFocus.whenReady({
+                NSApp.isActive && NSApp.keyWindow is QuickChatPanel
+            }) {
+                focused = true
+            }
         }
         // No onAppear focus: the panel is built BEFORE show() activates the
         // app — focusing here hits IMK from a background app (see showInput).

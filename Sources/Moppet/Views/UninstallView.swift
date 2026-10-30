@@ -15,7 +15,10 @@ struct UninstallView: View {
     @State private var selectedApps: Set<String> = []
     @State private var loading = true
     @State private var batchRunning = false
-    @State private var batchProgress: (done: Int, total: Int)? = nil
+    /// Progress of whatever destructive batch is running (batch uninstall,
+    /// single uninstall, or the admin leftover sweep) — one source of truth
+    /// for both the inline pill and the center overlay.
+    @State private var batch: BatchProgress?
     @State private var batchResult: UninstallEngine.BatchOutcome?
     @State private var searchText = ""
     @State private var selection: UninstallEngine.AppEntry?
@@ -25,6 +28,16 @@ struct UninstallView: View {
     @State private var resultText: String?
     @State private var busy = false
     @State private var adminResultText: String?
+    /// Shown when a delete was refused with the App Management TCC error —
+    /// FDA does not cover app-bundle deletion on macOS 15+.
+    @State private var showAppManagementHint = false
+    /// App Management recovery: the bundle to re-probe and the work to redo
+    /// once the permission appears. The TCC prompt (if it ever comes) is
+    /// raised by the failed delete itself; a recorded deny never re-prompts,
+    /// so recovery = jump to Settings, then resume on return to the app.
+    @State private var pendingAppManagementURL: URL?
+    @State private var pendingAppManagementWork: (() -> Void)?
+    @State private var openedAppManagementSettings = false
     /// Batch-uninstall confirmation (deletion is permanent now, so it must ask).
     @State private var confirmingBatch = false
     /// Single-app confirmation — permanent deletion needs an explicit confirm.
@@ -85,6 +98,10 @@ struct UninstallView: View {
             }
         }
         .background(Airi.pageBackground.opacity(0.001))
+        .overlay {
+            if let batch { BatchProgressOverlay(progress: batch) }
+        }
+        .animation(Airi.controlAnimation, value: batch == nil)
         .confirmationDialog(
             Text(String(format: L("Uninstall %lld apps + data (%@)?"), pickedApps.count, pickedBytes.bytesFormatted)),
             isPresented: $confirmingBatch,
@@ -112,6 +129,16 @@ struct UninstallView: View {
                  : L("The app is deleted permanently. This cannot be undone."))
         }
         .onAppear { loadingPulse = true }
+        // App Management recovery step 3: the user toggled the permission in
+        // System Settings and came back — re-probe and resume the pending
+        // uninstall/batch without making them press anything again.
+        .onReceive(NotificationCenter.default.publisher(
+            for: NSApplication.didBecomeActiveNotification)) { _ in
+            guard let url = pendingAppManagementURL,
+                  pendingAppManagementWork != nil,
+                  Permissions.probeAppManagement(bundleURL: url) else { return }
+            resumePendingAppManagementWork()
+        }
         .task {
             guard apps.isEmpty else { return }
             // Fast metadata first (sub-second), sizes stream in after.
@@ -205,10 +232,10 @@ struct UninstallView: View {
                     .foregroundStyle(Airi.neutral500)
                     .animation(.spring(response: 0.4, dampingFraction: 0.9), value: progress.done)
                 }
-                if batchRunning, let progress = batchProgress {
+                if batchRunning, let progress = batch, let count = progress.countText {
                     HStack(spacing: 4) {
                         ProgressView().controlSize(.small)
-                        Text("\(progress.done)/\(progress.total)")
+                        Text(count)
                             .font(Airi.caption2Font)
                             .foregroundStyle(Airi.neutral500)
                             .monospacedDigit()
@@ -231,11 +258,14 @@ struct UninstallView: View {
                         Text("✓ \(L("Deleted")): \(outcome.trashed.map(\.name).joined(separator: ", "))")
                             .font(Airi.caption2Font)
                             .foregroundStyle(Airi.success)
-                        if !outcome.failed.isEmpty {
-                            Text("✗ \(outcome.failed.map { "\($0.name): \($0.reason)" }.joined(separator: "; "))")
-                                .font(Airi.caption2Font)
-                                .foregroundStyle(Airi.danger)
-                        }
+            if !outcome.failed.isEmpty {
+                Text("✗ \(outcome.failed.map { "\($0.name): \($0.reason)" }.joined(separator: "; "))")
+                    .font(Airi.caption2Font)
+                    .foregroundStyle(Airi.danger)
+            }
+            if outcome.failed.contains(where: { UninstallEngine.isAppManagementHint($0.reason) }) {
+                appManagementCard
+            }
                         Text(String(format: L("%1$@ apps · %2$@ data"),
                                     outcome.freedBytes.bytesFormatted,
                                     outcome.relatedBytes.bytesFormatted)
@@ -255,7 +285,8 @@ struct UninstallView: View {
         let picked = pickedApps
         let currentSizes = sizes
         batchRunning = true
-        batchProgress = (0, picked.count)
+        batch = BatchProgress(title: L("Uninstalling…"), done: 0, total: picked.count)
+        let startedAt = Date()
         Task {
             // Make sure every app has a real size BEFORE trashing so the one
             // aggregated record carries correct per-path bytes.
@@ -273,7 +304,8 @@ struct UninstallView: View {
                 // keep their footprint (and reappear with old state on
                 // reinstall) — the behaviour users reported as a bug.
                 let single = await UninstallEngine.batchUninstall(
-                    apps: [app], sizes: effectiveSizes, withData: true, appendRecord: false)
+                    apps: [app], sizes: effectiveSizes, withData: true,
+                    appendRecord: false, fallback: true)
                 outcome.trashed += single.trashed
                 outcome.freedBytes += single.freedBytes
                 outcome.failed += single.failed
@@ -291,9 +323,9 @@ struct UninstallView: View {
                                         mode: .permanent, success: true, error: nil)
                     }
                 }
-                batchProgress = (index + 1, picked.count)
-            }
-            // ONE audit record for the whole batch — previously every app
+                batch?.done = index + 1
+                batch?.total = picked.count
+            }            // ONE audit record for the whole batch — previously every app
             // produced its own row, so a 5-app uninstall spammed History with
             // five 1-path entries at the same timestamp.
             if !outcome.trashed.isEmpty {
@@ -320,11 +352,23 @@ struct UninstallView: View {
             selectedApps.subtract(trashedIDs)
             withAnimation { batchResult = outcome }
             batchRunning = false
-            batchProgress = nil
+            // Hold the ring long enough to register (small batches finish
+            // inside one frame, which reads as a glitch without this).
+            await BatchProgressHold.until(startedAt)
+            batch = nil
             UXFeedback.success()
             PetBus.shared.say(
                 String(format: L("Uninstalled %lld apps 🗑"), outcome.trashed.count),
                 state: .celebrating)
+            // Batch rows refused by App Management: same recovery pipeline —
+            // probe with the first picked bundle (the TCC decision is
+            // process-wide) and redo the whole batch once granted.
+            if outcome.failed.contains(where: { UninstallEngine.isAppManagementHint($0.reason) }),
+               let first = picked.first {
+                handleAppManagementDenial(bundleURL: first.url) {
+                    runBatch()
+                }
+            }
         }
     }
 
@@ -476,6 +520,8 @@ struct UninstallView: View {
                         }
                     }
 
+                    if showAppManagementHint { appManagementCard }
+
                     HStack {
                         AiriButton(title: L("Uninstall (app only)"), icon: "trash",
                                    variant: .secondary, disabled: busy) {
@@ -495,6 +541,66 @@ struct UninstallView: View {
                 }
             }
             .padding(Airi.space3)
+        }
+    }
+
+    /// App Management recovery pipeline, run whenever a delete is refused
+    /// with the App Management hint:
+    /// 1. The refused attempt itself raises the TCC prompt IF the decision
+    ///    was never made — give that ~20 s: the moment the probe succeeds
+    ///    the original uninstall resumes on its own.
+    /// 2. No prompt came (a recorded deny never re-prompts) → jump straight
+    ///    to System Settings → App Management, once.
+    /// 3. Either way, returning to the app re-probes and resumes the
+    ///    pending work automatically (see the didBecomeActive handler).
+    private func handleAppManagementDenial(bundleURL: URL, retry: @escaping () -> Void) {
+        showAppManagementHint = true
+        pendingAppManagementURL = bundleURL
+        pendingAppManagementWork = retry
+        Task {
+            let deadline = Date().addingTimeInterval(20)
+            while Date() < deadline {
+                if Permissions.probeAppManagement(bundleURL: bundleURL) {
+                    await MainActor.run { resumePendingAppManagementWork() }
+                    return
+                }
+                try? await Task.sleep(nanoseconds: 500_000_000)
+            }
+            await MainActor.run {
+                guard !openedAppManagementSettings else { return }
+                openedAppManagementSettings = true
+                Permissions.openAppManagementSettings()
+            }
+        }
+    }
+
+    private func resumePendingAppManagementWork() {
+        let work = pendingAppManagementWork
+        pendingAppManagementWork = nil
+        pendingAppManagementURL = nil
+        work?()
+    }
+
+    /// Explains the macOS 15+ split: FDA is read-only, deleting other apps'
+    /// bundles is gated by a separate TCC permission, and deep-links to it.
+    private var appManagementCard: some View {
+        SettingsCard(padding: 10) {
+            VStack(alignment: .leading, spacing: 6) {
+                Label(L("App Management permission required"),
+                      systemImage: "lock.shield")
+                    .font(Airi.captionFont.weight(.medium))
+                    .foregroundStyle(Airi.warning)
+                Text(L("On macOS 15+, deleting other apps requires the App Management permission. Full Disk Access only grants read access and is not enough."))
+                    .font(Airi.caption2Font)
+                    .foregroundStyle(Airi.neutral700)
+                Text(L("If you previously clicked Don't Allow, macOS will not show the prompt again — turn it on in System Settings."))
+                    .font(Airi.caption2Font)
+                    .foregroundStyle(Airi.neutral500)
+                AiriButton(title: L("Grant App Management…"),
+                           icon: "lock.open", variant: .secondary) {
+                    Task { @MainActor in Permissions.openAppManagementSettings() }
+                }
+            }
         }
     }
 
@@ -536,6 +642,7 @@ struct UninstallView: View {
         related = []
         selectedRelated = []
         resultText = nil
+        showAppManagementHint = false
         loadingRelated = true
         let name = app.name
         let bundleID = app.bundleID
@@ -590,7 +697,16 @@ struct UninstallView: View {
             var sizeByPath: [String: Int64] = [appCopy.url.path: appBytes]
             for file in files { sizeByPath[file.url.path] = file.bytes }
 
-            let result = await UninstallEngine.uninstall(app: appCopy, files: files, removeData: removeData)
+            let result = await UninstallEngine.uninstall(
+                app: appCopy, files: files, removeData: removeData, fallback: true)
+            if result.failed.contains(where: { UninstallEngine.isAppManagementHint($0.1) }) {
+                // The failed removeItem itself is what raises the TCC prompt
+                // (undecided state) — the recovery pipeline waits for that
+                // grant, or jumps to Settings when it never comes.
+                handleAppManagementDenial(bundleURL: appCopy.url) {
+                    uninstall(removeData: removeData)
+                }
+            }
             // Only what actually left the disk counts; per-item bytes are real
             // now so the History detail shows sizes instead of "—".
             let freed = result.removedFiles.reduce(0) { $0 + (sizeByPath[$1] ?? 0) }
