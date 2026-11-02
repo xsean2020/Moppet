@@ -245,7 +245,7 @@ enum HistoryStore {
 // MARK: - Disk info
 
 enum DiskInfo {
-    struct Snapshot {
+    struct Snapshot: Equatable {
         let volumeName: String
         let totalBytes: Int64
         let freeBytes: Int64

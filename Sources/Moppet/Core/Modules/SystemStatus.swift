@@ -5,28 +5,39 @@ import IOKit.ps
 /// Live system metrics — SwiftUI cousin of `mo status` (gopsutil → Mach/sysctl/IOKit).
 enum SystemStatus {
 
-    struct CPU {
+    struct CPU: Equatable {
         let usage: Double          // 0…1 all cores
         let cores: Int
+        /// Share of BUSY time (user / (user+system+nice)) over the same
+        /// delta window as `usage` — the detail panel's 用户态/系统态 split.
+        let userShare: Double      // 0…1
+        let systemShare: Double    // 0…1
     }
 
-    struct Memory {
+    struct Memory: Equatable {
         let totalBytes: Int64
         let usedBytes: Int64
         let freeBytes: Int64
-        let pressure: Double       // 0…1
+        let pressure: Double       // 0…1 (= used/total, 口径见 memory)
+        let compressedBytes: Int64 // compressor pages — 匿名页被压缩后的驻留
     }
 
-    struct Network {
+    struct Network: Equatable {
         let bytesIn: Int64         // cumulative
         let bytesOut: Int64
         let rateIn: Double         // bytes/sec since last sample
         let rateOut: Double
     }
 
-    struct Battery {
+    struct Battery: Equatable {
         let percentage: Double
+        /// On AC power (kIOPSACPowerValue) — the plug, not the charge flow.
+        let plugged: Bool
+        /// Charge is actively flowing IN (kIOPSIsChargingKey). A full pack
+        /// on AC is plugged but NOT charging.
         let charging: Bool
+        /// kIOPSIsChargedKey — at 100% and off the charger's fill cycle.
+        let full: Bool
         let present: Bool
     }
 
@@ -40,7 +51,7 @@ enum SystemStatus {
 
     // MARK: - CPU (delta between samples)
 
-    private static var lastTicks: (user: Double, system: Double, idle: Double, total: Double)?
+    private static var lastTicks: (user: Double, system: Double, idle: Double, nice: Double)?
     private static var lastSampleTime = Date()
     /// The status view and the MCP system_status tool sample concurrently —
     /// torn reads of the delta state produced negative/spiky numbers.
@@ -62,25 +73,46 @@ enum SystemStatus {
                                 loadPointer, countPointer)
             }
         }
-        guard result == KERN_SUCCESS else { return CPU(usage: 0, cores: ProcessInfo.processInfo.activeProcessorCount) }
+        guard result == KERN_SUCCESS else {
+            return CPU(usage: 0, cores: ProcessInfo.processInfo.activeProcessorCount,
+                       userShare: 0, systemShare: 0)
+        }
 
         let user = Double(cpuLoad[0].cpu_ticks.0)      // TICKS_USER
         let system = Double(cpuLoad[0].cpu_ticks.1)    // TICKS_SYSTEM
         let idle = Double(cpuLoad[0].cpu_ticks.2)      // TICKS_IDLE
-        let total = user + system + idle + Double(cpuLoad[0].cpu_ticks.3)
+        let nice = Double(cpuLoad[0].cpu_ticks.3)
+        let total = user + system + idle + nice
 
         var usage: Double = 0
+        var userShare = 0.0
+        var systemShare = 0.0
         if let last = lastTicks {
             let idleDelta = idle - last.idle
-            let totalDelta = total - last.total
+            let totalDelta = total - (last.user + last.system + last.idle + last.nice)
             if totalDelta > 0 { usage = 1 - (idleDelta / totalDelta) }
+            // Busy-time split over the SAME window as `usage`.
+            let userDelta = max(0, user - last.user)
+            let systemDelta = max(0, (system + nice) - (last.system + last.nice))
+            let busyDelta = userDelta + systemDelta
+            if busyDelta > 0 {
+                userShare = userDelta / busyDelta
+                systemShare = systemDelta / busyDelta
+            }
         } else {
             // First sample: usage since boot.
             if total > 0 { usage = 1 - (idle / total) }
+            let busy = user + system + nice
+            if busy > 0 {
+                userShare = user / busy
+                systemShare = (system + nice) / busy
+            }
         }
-        lastTicks = (user, system, idle, total)
+        lastTicks = (user, system, idle, nice)
         lastSampleTime = Date()
-        return CPU(usage: max(0, min(1, usage)), cores: ProcessInfo.processInfo.activeProcessorCount)
+        return CPU(usage: max(0, min(1, usage)), cores: ProcessInfo.processInfo.activeProcessorCount,
+                   userShare: max(0, min(1, userShare)),
+                   systemShare: max(0, min(1, systemShare)))
     }
 
     // MARK: - Memory
@@ -98,7 +130,7 @@ enum SystemStatus {
             }
         }
         guard result == KERN_SUCCESS else {
-            return Memory(totalBytes: total, usedBytes: 0, freeBytes: total, pressure: 0)
+            return Memory(totalBytes: total, usedBytes: 0, freeBytes: total, pressure: 0, compressedBytes: 0)
         }
         let pageSize = Int64(vm_kernel_page_size)
         let freePages: Int64 = Int64(vmStats.free_count) + Int64(vmStats.inactive_count)
@@ -107,7 +139,8 @@ enum SystemStatus {
         let free = freePages * pageSize
         let used = max(0, usedPages * pageSize)
         let pressure: Double = total > 0 ? Double(used) / Double(total) : 0
-        return Memory(totalBytes: total, usedBytes: used, freeBytes: free, pressure: pressure)
+        return Memory(totalBytes: total, usedBytes: used, freeBytes: free, pressure: pressure,
+                      compressedBytes: max(0, Int64(vmStats.compressor_page_count) * pageSize))
     }
 
     // MARK: - Network (getifaddrs deltas)
@@ -156,20 +189,76 @@ enum SystemStatus {
     static var battery: Battery {
         guard let snapshot = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
               let sources = IOPSCopyPowerSourcesList(snapshot)?.takeRetainedValue() as? [CFTypeRef]
-        else { return Battery(percentage: 0, charging: false, present: false) }
+        else { return Battery(percentage: 0, plugged: false, charging: false, full: false, present: false) }
         for source in sources {
             guard let desc = IOPSGetPowerSourceDescription(snapshot, source)?
                 .takeUnretainedValue() as? [String: Any] else { continue }
             let current = desc[kIOPSCurrentCapacityKey] as? Int ?? 0
             let max = desc[kIOPSMaxCapacityKey] as? Int ?? 100
             let state = desc[kIOPSPowerSourceStateKey] as? String ?? ""
+            let plugged = state == kIOPSACPowerValue
+            // "Charging" is the charge FLOW, not the plug: a full pack on AC
+            // reads charged-not-charging. Never conflate the two — the status
+            // sub-caption says "充电中" only while current actually flows.
+            let charging = (desc[kIOPSIsChargingKey] as? Bool) ?? false
+            let full = (desc[kIOPSIsChargedKey] as? Bool) ?? false
             return Battery(
                 percentage: max > 0 ? Double(current) / Double(max) : 0,
-                charging: state == kIOPSACPowerValue,
+                plugged: plugged,
+                charging: charging,
+                full: full,
                 present: true
             )
         }
-        return Battery(percentage: 0, charging: false, present: false)
+        return Battery(percentage: 0, plugged: false, charging: false, full: false, present: false)
+    }
+
+    // MARK: - Disk I/O (IORegistry block-storage driver counters)
+
+    /// Machine-wide cumulative disk bytes, summed over the physical block
+    /// storage drivers only. Matching `IOBlockStorageDriver` — not `IOMedia`
+    /// — is what avoids double counting: the APFS container scheme and the
+    /// volume slices each carry their own mirrored `Statistics` dict (same
+    /// numbers as their parent driver), and summing all of them inflates the
+    /// total ~3×. Key names differ per driver generation: current NVMe
+    /// drivers publish `Bytes (Read)`/`Bytes (Write)`, older stacks
+    /// `Total Bytes (Read)`. Values may be String or Int depending on the
+    /// driver. Callers derive rates from deltas (the provider holds the last
+    /// totals); counter reset on sleep/driver reload → negative delta → 0.
+    static func diskIOBytes() -> (read: Int64, write: Int64) {
+        var iterator: io_iterator_t = 0
+        guard IOServiceGetMatchingServices(kIOMainPortDefault,
+                                           IOServiceMatching("IOBlockStorageDriver"),
+                                           &iterator) == KERN_SUCCESS else {
+            return (0, 0)
+        }
+        defer { IOObjectRelease(iterator) }
+        var totalRead: Int64 = 0
+        var totalWrite: Int64 = 0
+        var service = IOIteratorNext(iterator)
+        while service != 0 {
+            defer { IOObjectRelease(service) }
+            if let raw = IORegistryEntrySearchCFProperty(
+                service, kIOServicePlane, "Statistics" as CFString,
+                kCFAllocatorDefault, 0),
+               let stats = raw as? [String: Any] {
+                totalRead += max(0, Self.registryInt(stats, ["Bytes (Read)", "Total Bytes (Read)"]))
+                totalWrite += max(0, Self.registryInt(stats, ["Bytes (Write)", "Total Bytes (Write)"]))
+            }
+            service = IOIteratorNext(iterator)
+        }
+        return (totalRead, totalWrite)
+    }
+
+    /// Registry numbers arrive as Int64, Int or String depending on the
+    /// driver — accept all three, missing/none counts as 0.
+    private static func registryInt(_ dict: [String: Any], _ keys: [String]) -> Int64 {
+        for key in keys {
+            if let value = dict[key] as? Int64 { return value }
+            if let value = dict[key] as? Int { return Int64(value) }
+            if let text = dict[key] as? String, let value = Int64(text) { return value }
+        }
+        return 0
     }
 
     // MARK: - Top processes (libproc/sysctl — no external binary)

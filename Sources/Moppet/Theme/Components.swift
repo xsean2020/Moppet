@@ -190,6 +190,11 @@ struct AiriButton: View {
     @State private var presses = 0
 
     private var surface: Color {
+        // Disabled reads as a grey control, not a faded coloured one. The old
+        // `opacity(0.5)` treatment turned a disabled destructive button into
+        // white-on-pale-pink — effectively invisible (worst in light mode).
+        // `busy` stays coloured: a spinner on a grey slab looked switched off.
+        if disabled && !busy { return Airi.neutral200.opacity(0.55) }
         switch variant {
         case .primary: return Airi.primary.opacity(0.85)
         case .secondary: return Airi.neutral200.opacity(0.75)
@@ -197,7 +202,8 @@ struct AiriButton: View {
         }
     }
     private var foreground: Color {
-        variant == .secondary ? Airi.neutral900 : Color.white
+        if disabled && !busy { return Airi.neutral400 }
+        return variant == .secondary ? Airi.neutral900 : Color.white
     }
 
     var body: some View {
@@ -222,7 +228,6 @@ struct AiriButton: View {
                     .fill(surface)
                     .brightness(hovering && !disabled ? 0.08 : 0)
             )
-            .opacity(disabled ? 0.5 : 1)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -276,6 +281,63 @@ struct SettingsCard<Content: View>: View {
                 .clipShape(RoundedRectangle(cornerRadius: Airi.radiusCard, style: .continuous))
                 .allowsHitTesting(false)
         }
+    }
+}
+
+// MARK: - Grouped list card (System Settings style)
+
+/// One surface holding hairline-separated rows. Rows own their padding; the
+/// card owns surface, radius, border and sheen — so a grouped list can never
+/// drift away from the single-card look (SettingsCard) it sits next to.
+///
+/// Why it exists: pages that listed every entry as its own `SettingsCard`
+/// read as a stack of unrelated slabs — content pinned left, controls pinned
+/// right, a wide empty middle, and a page that scrolled forever.
+struct GroupedCard<Content: View>: View {
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(spacing: 0) { content }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            // Clip to the card's own shape. A row that appears/disappears (a
+            // section expanding) is laid out at its FINAL height on the first
+            // frame while the card's height is still springing towards it — so
+            // without this the inserted panel painted outside the card's bottom
+            // edge for a beat ("the inner box pops out before the card grows").
+            // Clipping makes the reveal follow the card's animated bounds.
+            .clipShape(RoundedRectangle(cornerRadius: Airi.radiusCard, style: .continuous))
+            .background(
+                RoundedRectangle(cornerRadius: Airi.radiusCard, style: .continuous)
+                    .fill(Airi.cardBackground)
+                    .shadow(color: .black.opacity(0.07), radius: 8, y: 3)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: Airi.radiusCard, style: .continuous)
+                    .strokeBorder(Airi.neutral200.opacity(0.9), lineWidth: 1)
+                    .allowsHitTesting(false)
+            )
+            .overlay(alignment: .top) {
+                LinearGradient(colors: [.white.opacity(0.10), .clear],
+                               startPoint: .top, endPoint: .bottom)
+                    .frame(height: 1)
+                    .clipShape(RoundedRectangle(cornerRadius: Airi.radiusCard, style: .continuous))
+                    .allowsHitTesting(false)
+            }
+    }
+}
+
+/// Hairline between rows of a `GroupedCard`. Inset so it starts under the
+/// row's text column instead of running to the card edge — that inset is what
+/// makes the seam read as "same list, next item" rather than "two cards".
+struct GroupedDivider: View {
+    var inset: CGFloat = 52
+
+    var body: some View {
+        Rectangle()
+            .fill(Airi.hairline)
+            .frame(height: 1)
+            .padding(.leading, inset)
+            .allowsHitTesting(false)
     }
 }
 

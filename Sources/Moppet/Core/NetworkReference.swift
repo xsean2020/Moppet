@@ -55,10 +55,17 @@ enum NetworkReference {
     ///
     /// Order matters: the sample-count check comes first, because with n < 5 a
     /// "significant" difference is usually one bad sample wearing a trend.
+    ///
+    /// `mddOverride` lets a caller substitute its own threshold — the unpaired
+    /// comparison uses a wider one (√(1/nb+1/na) instead of 1/√n). Without it
+    /// the printed MDD and the decision rule disagreed: a delta between the two
+    /// thresholds would print "improved" in a row whose own MDD column called
+    /// the delta undetectable.
     static func verdict(delta: Double, sigma: Double, n: Int, baseline: Double,
-                        lowerIsBetter: Bool = true, minimumSamples: Int = 5) -> Verdict {
+                        lowerIsBetter: Bool = true, minimumSamples: Int = 5,
+                        mddOverride: Double? = nil) -> Verdict {
         guard n >= minimumSamples, sigma.isFinite, sigma >= 0 else { return .inconclusive }
-        let mdd = 2.8 * sigma / Double(n).squareRoot()
+        let mdd = mddOverride ?? 2.8 * sigma / Double(n).squareRoot()
         guard abs(delta) > mdd else { return .unchanged }
         // Also require the change to clear the practical floor.
         guard baseline > 0, abs(delta) / baseline > practicalFloor else { return .unchanged }
@@ -137,7 +144,7 @@ enum NetworkReference {
             mdd: widened,
             n: n,
             verdict: verdict(delta: delta, sigma: sigma, n: n, baseline: beforeMedian,
-                             minimumSamples: minimumSamples)
+                             minimumSamples: minimumSamples, mddOverride: widened)
         )
     }
 

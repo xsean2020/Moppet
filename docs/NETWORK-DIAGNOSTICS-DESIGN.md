@@ -423,6 +423,20 @@ dns     106.7      99.4       -7.3       7.7       8.8       unchanged
 `--smoke` 里另有 10 条合成数据断言（清晰改善必须判 improved、噪声必须判 unchanged、
 n<5 必须 inconclusive、对照组同幅漂移必须把改善抵消掉），保证判定逻辑不靠现场数据也能验证。
 
+**P2/P3/P4 追加的 CLI（2026-10-31 实现）**：
+
+```bash
+Moppet --net-fix                          # 只读列当前状态（路由/DNS/PAC/MTU + 动作清单）
+Moppet --net-fix --action proxy-off --dry-run    # 只打印 plan（精确命令+回滚）
+Moppet --net-fix --action dns-switch --dns 1.1.1.1 --yes   # apply+测量+无改善自动回滚
+Moppet --net-probe --processes --app-path # L5 进程流量增量 + L4 应用路径（走系统代理，与直连对比）
+Moppet --net-trend                        # 采样历史按日中位数（趋势图的文字版）
+Moppet --net-report                       # 每周体检本体：probe + trend + findings
+Moppet --net-checkup install|uninstall|status    # 周检 LaunchAgent（周日 09:00，只读报告）
+```
+
+P3 的两个实测更正：`nettop -L` 在 macOS 26 上输出 **CSV 而非 JSON**（解析器按表头名定位列）；URLSessionTaskMetrics 探针**刻意保留系统代理路径**（P1 的教训是测量不能走隧道——但"app path vs direct 的差值"本身就是 PAC 代价的直接证据，两个都报）。
+
 ## 5. UI：三块，一屏看完
 
 1. **结论区**（最重要）：按严重度排序的 Finding 卡，每条一行标题 + 置信度点 + "查看证据"展开。没有问题时明确写"未发现明显瓶颈"，并给出实测数值，而不是空状态。
@@ -442,8 +456,8 @@ n<5 必须 inconclusive、对照组同幅漂移必须把改善抵消掉），保
 | **P0**（测量内核，2–3 天）✅ | `NetworkEngine` 四段分解 + 多流吞吐 + `Measurement` 模型；`NetworkView` 先只展示原始数值 | 同一端点连测 5 次，TTFB 中位数波动 < 15%；吞吐与 `networkQuality` 交叉验证误差 < 20% |
 | **P1**（参照系 + 规则，3–4 天）✅ 测量与判定已实现，规则表待接入 UI | `Baseline` 历史分桶、对照组校正、`ChangeReport` 三态判定；`NetworkDiagnostics` 规则表 + 证据行；`--smoke` 喂固定样本断言 | 能报出"DNS 配置与实际不一致""握手放大 400×"两条；对一次无效改动必须输出 `unchanged` 而不是假百分比 |
 | **P2**（可回滚优化，3–5 天） | `NetworkOptimizer` 4 个动作（刷新/切换 DNS/关 PAC/MTU）+ 配对测量 + 回滚 + 写 History | 每个动作都产出 `ChangeReport`；无效改动自动回滚；回滚后配置与执行前逐字节一致 |
-| **P3**（进程与 Wi-Fi） | `nettop` 增量、CoreWLAN RSSI/信道、`URLSessionTaskMetrics` 探针 | 进程流量 Top5 与活动监视器误差 < 5% |
-| **P4**（可选） | 每周体检（Scheduler，只出报告不改配置）、趋势图 | 不产生任何写操作 |
+| **P3**（进程与 Wi-Fi）✅ CLI | `nettop` 增量、CoreWLAN RSSI/信道、`URLSessionTaskMetrics` 探针 | 进程流量 Top5 与活动监视器误差 < 5% |
+| **P4**（可选）✅ CLI | 每周体检（Scheduler，只出报告不改配置）、趋势图 | 不产生任何写操作 |
 
 建议先做 **P0+P1**，因为它已经能回答用户 80% 的问题（"为什么慢"），且零风险、零权限。写操作放到 P2，是因为它需要提权、需要回滚、需要更多验证——收益却小于"告诉用户真相"。
 

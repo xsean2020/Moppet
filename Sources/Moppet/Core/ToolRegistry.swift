@@ -794,6 +794,89 @@ enum ToolRegistry {
                 + (outcomes.count == ok.count ? "" : " \(outcomes.count - ok.count) failed.")
         })
 
+        // ---- Network diagnostics & fixes (docs/NETWORK-DIAGNOSTICS-DESIGN.md) ----
+        list.append(Tool(
+            name: "network_diagnose",
+            description: "Layered network diagnosis: interface/path (L0), gateway & MTU (L1), cold DNS resolution (L2), per-phase TCP/TLS/TTFB handshake timings with amplification ratio (L3/L4) and rule-based findings. Optional: Wi-Fi quality (RSSI/noise/channel), per-process traffic over a sampling window, and the app path (URLSession, proxy-aware) vs the direct path. Read-only, records nothing. Sequential per host — 1–4 hosts at 3–15 samples runs ~5–30s; throughput is opt-in and moves real data.",
+            params: [
+                Param("hosts", "array", "1–4 hostnames to probe (default speed.cloudflare.com, www.apple.com, www.baidu.com)"),
+                Param("samples", "number", "Samples per phase, 3–15 (default 5)"),
+                Param("throughput", "boolean", "Also measure download throughput (~10–100 MB of traffic; opt-in)"),
+                Param("processes", "boolean", "Also sample per-process traffic (adds ~5s; the sampling window)"),
+                Param("app_path", "boolean", "Also measure the same hosts through URLSession — includes the system proxy/PAC; the gap vs the direct path is what the tunnel costs"),
+            ],
+            destructive: false
+        ) { args, _ in
+            let requested = (strArray(args, "hosts") ?? [])
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+            guard requested.count <= 4 else {
+                throw ToolError(message: "hosts takes at most 4 — probes are sequential and every host costs samples × ~2s")
+            }
+            let samples = min(max(Int((num(args, "samples") ?? 5).rounded()), 3), 15)
+            let report = await NetworkProbeCLI.collect(
+                hosts: requested.isEmpty
+                    ? ["speed.cloudflare.com", "www.apple.com", "www.baidu.com"]
+                    : requested,
+                samples: samples,
+                throughput: bool(args, "throughput") ?? false,
+                record: false,
+                processes: bool(args, "processes") ?? false,
+                appPath: bool(args, "app_path") ?? false)
+            return report.jsonString
+        })
+
+        list.append(Tool(
+            name: "network_optimize",
+            description: "Apply a network fix with a pre-flight plan, verification, before/after measurement and AUTOMATIC ROLLBACK when the measurement shows no improvement. Actions: dns-switch (needs dns=<ip,…>), dns-flush, proxy-off (stale PAC), mtu-fix (default 1400; admin), noop (self-test, changes nothing). Returns before/after per metric with improved/rolledBack — read it before claiming success.",
+            params: [
+                Param("action", "string", "Fix to apply", required: true,
+                      enums: ["dns-switch", "dns-flush", "proxy-off", "mtu-fix", "noop"]),
+                Param("dns", "string", "Comma-separated DNS server IPs for dns-switch (e.g. 1.1.1.1,8.8.8.8)"),
+                Param("mtu", "number", "Target MTU for mtu-fix (default 1400)"),
+                Param("host", "string", "Hostname the before/after measurement targets (default www.apple.com)"),
+                Param("rounds", "number", "Measurement rounds per side, 2–12 (default 6)"),
+                Param("dry_run", "boolean", "Build and return the plan without applying it"),
+            ],
+            destructive: true
+        ) { args, _ in
+            // Underscore aliases accepted: the design doc named the actions
+            // dns_switch/proxy_off/mtu_fix/dns_flush.
+            let raw = str(args, "action")?.replacingOccurrences(of: "_", with: "-")
+            guard let action = raw.flatMap(NetworkOptimizer.Action.init(rawValue:)) else {
+                throw ToolError(message: "action must be one of "
+                    + NetworkOptimizer.Action.allCases.map(\.rawValue).joined(separator: ", "))
+            }
+            let dnsTargets = (str(args, "dns") ?? "")
+                .split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+            if action == .dnsSwitch,
+               dnsTargets.isEmpty || !dnsTargets.allSatisfy(NetworkOptimizer.isValidAddress) {
+                throw ToolError(message: "dns-switch needs dns=<ip>[,<ip>…] with valid addresses")
+            }
+            let mtu = Int((num(args, "mtu") ?? 1400).rounded())
+            if action == .mtuFix, !(1...1500).contains(mtu) {
+                throw ToolError(message: "mtu must be 1…1500")
+            }
+            let host = str(args, "host") ?? "www.apple.com"
+            let rounds = min(max(Int((num(args, "rounds") ?? 6).rounded()), 2), 12)
+            let applying = !(bool(args, "dry_run") ?? false)
+            let privilege = NetworkFixCLI.privilegeForCurrentUser()
+
+            let report = await NetworkOptimizer.run(
+                action: action, target: dnsTargets, rounds: rounds, host: host,
+                apply: applying, privilege: privilege, desiredMTU: mtu)
+
+            if applying {
+                let applyFailed = report.notes.contains { $0.hasPrefix("apply failed") }
+                if !report.plan.isNoop, report.applied || applyFailed {
+                    NetworkFixCLI.writeHistory(report, action: action)
+                }
+            }
+            return NetworkFixCLI.fixJSON(report, action: action, applied: applying,
+                                         privilege: privilege, host: host, rounds: rounds)
+        })
+
         return list
     }
 

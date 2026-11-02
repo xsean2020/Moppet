@@ -255,8 +255,10 @@ enum NetworkOptimizer {
             }
             apply = ["networksetup -setautoproxystate \(svc) off"]
             // The URL is left in place, so turning it back on is the whole
-            // rollback — no need to re-enter the address.
-            rollback = ["networksetup -setautoproxystate \(svc) on"]
+            // rollback — but only if it was ON before. Generating "on"
+            // unconditionally would let a no-op apply + "no improvement"
+            // verdict silently re-enable a PAC the user had disabled.
+            rollback = pac.enabled ? ["networksetup -setautoproxystate \(svc) on"] : []
 
         case .mtuFix:
             guard !device.isEmpty else {
@@ -266,7 +268,10 @@ enum NetworkOptimizer {
             current = currentMTU.map { "\($0)" } ?? "unknown"
             goal = "\(desiredMTU)"
             if let currentMTU, currentMTU <= desiredMTU {
-                warnings.append("current MTU \(currentMTU) is already <= \(desiredMTU)")
+                // "Lower interface MTU" cannot lower what is already lower,
+                // and equal means there is nothing to change — either way the
+                // measurement loop below must not run.
+                warnings.append("already at or below the target MTU (\(currentMTU) ≤ \(desiredMTU))")
             }
             // MTU is set on the *device*, unlike DNS/PAC which take a service.
             apply = ["networksetup -setMTU \(device) \(desiredMTU)"]
@@ -371,7 +376,12 @@ enum NetworkOptimizer {
                     desiredMTU: Int = 1400) async -> FixReport {
         let services = await readServices()
         let route = await NetworkRouterInfo.current()
-        let service = services.first { $0.device == route.device && !$0.disabled }
+        // isSafeServiceName here too: the name is interpolated into
+        // networksetup commands by the read* helpers before plan() ever sees
+        // it, so the check cannot live only in the planner.
+        let service = services.first {
+            $0.device == route.device && !$0.disabled && isSafeServiceName($0.name)
+        }
         let device = route.device ?? ""
 
         // Pre-flight reads: these are what the rollback is built from, so they
@@ -398,6 +408,14 @@ enum NetworkOptimizer {
         }
         guard !plan.applyCommands.isEmpty else {
             report.notes.append("nothing to do")
+            return report
+        }
+        // "Already in the target state" warnings mean the apply would be an
+        // idempotent no-op and the measured delta would be pure noise — and
+        // for proxy-off, the rollback could even re-enable a disabled PAC.
+        // Refuse early instead of burning rounds proving nothing changed.
+        guard !plan.warnings.contains(where: { $0.hasPrefix("already") }) else {
+            report.notes.append("already in the target state — nothing changed, nothing measured")
             return report
         }
         guard !plan.warnings.contains(where: { $0.hasPrefix("no usable") }) else {
@@ -453,14 +471,22 @@ enum NetworkOptimizer {
 
         // Keep only a measured improvement. "unchanged" means we edited the
         // user's configuration and bought nothing — that gets rolled back too.
+        // The noop changes nothing, so it has nothing to roll back: it exists
+        // to prove the measurement can read "unchanged", not to fake a restore.
         let primary = report.changes.first { $0.metric == action.primaryMetric }
         report.kept = primary?.verdict == .improved
-        if !report.kept, !plan.rollbackCommands.isEmpty {
+        if !report.kept, plan.isNoop {
+            report.notes.append("self-test: no configuration change was made; "
+                                + "the primary verdict should read unchanged")
+        } else if !report.kept, !plan.rollbackCommands.isEmpty {
             _ = try? await execute(plan.rollbackCommands, as: privilege)
             report.rolledBack = true
             report.notes.append("no measured improvement — configuration restored")
         } else if report.kept {
             report.notes.append("kept: \(plan.rollbackCommands.joined(separator: "; ")) undoes it")
+        } else if plan.rollbackCommands.isEmpty {
+            report.notes.append("no measured improvement; this action has no inverse — "
+                                + "nothing to restore")
         }
         return report
     }

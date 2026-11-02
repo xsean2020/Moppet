@@ -357,6 +357,60 @@ enum SmokeTest {
         expect("status: top processes parse", !top.isEmpty && top.allSatisfy { $0.pid > 0 && $0.cpu >= 0 },
                "\(top.count) rows")
 
+        // MARK: Status gauge arc math (doc stage-5 verification: the four
+        // arcs must be exact at 0/1/25/50/75/99/100% and everything between)
+
+        func arcOK(_ progress: Double, _ expectedFraction: Double,
+                   _ label: String) -> Bool {
+            // Forward arc: lit length = progress × span, anchored at start.
+            let span = GaugeArc.span(start: 0.2625, end: 0.4875,
+                                     progress: progress, reversed: false)
+            let forwardOK = abs((span.upper - span.lower) - 0.225 * expectedFraction) < 1e-9
+            // Reversed arc: same length, anchored at the end.
+            let rev = GaugeArc.span(start: 0.5125, end: 0.7375,
+                                    progress: progress, reversed: true)
+            let reversedOK = abs((rev.upper - rev.lower) - 0.225 * expectedFraction) < 1e-9
+                && abs(rev.upper - 0.7375) < 1e-9
+            return forwardOK && reversedOK
+        }
+        for (value, label) in [(0.0, "0%"), (0.01, "1%"), (0.257, "25.7%"),
+                               (0.5, "50%"), (0.75, "75%"), (0.922, "92.2%"),
+                               (0.99, "99%"), (1.0, "100%"), (1.5, ">100 clamps"),
+                               (-0.1, "<0 clamps")] {
+            let fraction = min(max(value, 0), 1)
+            expect("gauge arc \(label) exact", arcOK(value, fraction, label))
+        }
+
+        // MARK: Status engine (providers, ring buffer, sampler state)
+
+        var ring = RingBuffer<Int>(capacity: 3)
+        for value in 1...5 { ring.append(value) }
+        expect("ring buffer keeps fixed capacity",
+               ring.count == 3 && ring.snapshot == [3, 4, 5],
+               "\(ring.snapshot)")
+
+        let mock = MockStatusProvider()
+        let mockSample = mock.sample()
+        expect("mock provider returns plausible sample",
+               mockSample.cpu.usage >= 0 && mockSample.cpu.usage <= 1
+                   && mockSample.memory.totalBytes > 0
+                   && mockSample.battery.present,
+               "cpu \(mockSample.cpu.usage)")
+        expect("mock provider is deterministic at one instant",
+               mock.sample().cpu.cores == mockSample.cpu.cores)
+
+        let diskIO = SystemStatus.diskIOBytes()
+        expect("disk I/O counters read", diskIO.read >= 0 && diskIO.write >= 0,
+               "\(diskIO.read) read / \(diskIO.write) write bytes")
+
+        // Battery semantics: charging implies plugged; the fields no longer
+        // conflate the plug with the charge flow.
+        let bat = SystemStatus.battery
+        expect("battery fields coherent",
+               !bat.present || (!bat.charging || bat.plugged),
+               bat.present ? "charging=\(bat.charging) plugged=\(bat.plugged) full=\(bat.full)"
+                           : "no battery")
+
         // MARK: MCP message handling
 
         if let mcpToolCount = mcpToolsListCount() {
@@ -1609,6 +1663,280 @@ enum SmokeTest {
                 .flatMap { try? decoder.decode(NetworkReference.StoredSample.self, from: $0) }
             expect("net ref: stored sample round-trips",
                    roundTripped?.ttfb == 4 && roundTripped?.hour == 3)
+
+            // 13. Optimizer parsers and plans (pure): the write path refuses
+            //     to run unless these build the exact command strings, so
+            //     they are pinned the same way the probe's parsers are. The
+            //     rollback is the dangerous half — a wrong restore edits the
+            //     user's DNS twice — hence the exact-string assertions.
+            let servicesSample = """
+               (1) Ethernet
+               (Hardware Port: Ethernet, Device: en0)
+
+               (2) Wi-Fi
+               (Hardware Port: Wi-Fi, Device: en11)
+
+               (*) USB 10/100/1000 LAN
+               (Hardware Port: USB 10/100/1000 LAN, Device: en5)
+               """
+            let parsedServices = NetworkOptimizer.parseServices(servicesSample)
+            expect("net fix: service parser reads names, devices and the (*) disabled mark",
+                   parsedServices.count == 3
+                   && parsedServices[1].name == "Wi-Fi" && parsedServices[1].device == "en11"
+                   && !parsedServices[1].disabled
+                   && parsedServices[2].name == "USB 10/100/1000 LAN" && parsedServices[2].disabled,
+                   "\(parsedServices.map { "\($0.name)/\($0.device)/\($0.disabled)" })")
+            expect("net fix: DNS parser reads a configured list",
+                   NetworkOptimizer.parseDNS("1.1.1.1\n8.8.8.8") == ["1.1.1.1", "8.8.8.8"])
+            // "There aren't any DNS Servers" means DHCP — a distinct state that
+            // the rollback must restore verbatim, so it decodes to empty.
+            expect("net fix: DNS parser maps 'no servers set' to DHCP-empty",
+                   NetworkOptimizer.parseDNS("There aren't any DNS Servers set on Wi-Fi.").isEmpty)
+            expect("net fix: PAC parser reads URL + enabled",
+                   NetworkOptimizer.parsePAC(
+                       "URL: http://127.0.0.1:1089/proxy.pac\nEnabled: Yes")
+                       == (url: "http://127.0.0.1:1089/proxy.pac", enabled: true))
+            expect("net fix: PAC parser reads the disabled state",
+                   NetworkOptimizer.parsePAC("URL: (null)\nEnabled: No").enabled == false)
+            expect("net fix: address validator accepts v4/v6, rejects junk and injection",
+                   NetworkOptimizer.isValidAddress("1.1.1.1")
+                   && NetworkOptimizer.isValidAddress("2606:4700:4700::1111")
+                   && !NetworkOptimizer.isValidAddress("999.1.1.1")
+                   && !NetworkOptimizer.isValidAddress("example.com")
+                   && !NetworkOptimizer.isValidAddress("1.1.1.1; rm -rf /"))
+            expect("net fix: service-name validator rejects quoting and empties",
+                   NetworkOptimizer.isSafeServiceName("Wi-Fi")
+                   && !NetworkOptimizer.isSafeServiceName("Wi\"Fi")
+                   && !NetworkOptimizer.isSafeServiceName("Wi\\Fi")
+                   && !NetworkOptimizer.isSafeServiceName(""))
+
+            let wifi = NetworkOptimizer.Service(name: "Wi-Fi", device: "en11", disabled: false)
+            let dhcpPlan = NetworkOptimizer.plan(action: .dnsSwitch, service: wifi,
+                                                 device: "en11", target: ["8.8.8.8"],
+                                                 currentDNS: [])
+            expect("net fix: dns plan applies the target servers",
+                   dhcpPlan.applyCommands == ["networksetup -setdnsservers \"Wi-Fi\" 8.8.8.8"],
+                   "\(dhcpPlan.applyCommands)")
+            expect("net fix: dns rollback restores Empty when state was DHCP",
+                   dhcpPlan.rollbackCommands == ["networksetup -setdnsservers \"Wi-Fi\" Empty"],
+                   "\(dhcpPlan.rollbackCommands)")
+            let staticPlan = NetworkOptimizer.plan(action: .dnsSwitch, service: wifi,
+                                                   device: "en11", target: ["8.8.8.8"],
+                                                   currentDNS: ["1.1.1.1"])
+            expect("net fix: dns rollback restores the previous servers, not Empty",
+                   staticPlan.rollbackCommands == ["networksetup -setdnsservers \"Wi-Fi\" 1.1.1.1"],
+                   "\(staticPlan.rollbackCommands)")
+            expect("net fix: dns plan warns when already at the target",
+                   !NetworkOptimizer.plan(action: .dnsSwitch, service: wifi, device: "en11",
+                                          target: ["1.1.1.1"],
+                                          currentDNS: ["1.1.1.1"]).warnings.isEmpty)
+            expect("net fix: dns plan rejects non-IP targets",
+                   !NetworkOptimizer.plan(action: .dnsSwitch, service: wifi, device: "en11",
+                                          target: ["example.com"],
+                                          currentDNS: []).warnings.isEmpty)
+            let proxyPlan = NetworkOptimizer.plan(action: .proxyOff, service: wifi,
+                                                  device: "en11", target: [], currentDNS: [],
+                                                  currentPAC: (url: "http://127.0.0.1:1089/proxy.pac",
+                                                               enabled: true))
+            expect("net fix: proxy plan turns PAC off and back on (URL survives)",
+                   proxyPlan.applyCommands == ["networksetup -setautoproxystate \"Wi-Fi\" off"]
+                   && proxyPlan.rollbackCommands == ["networksetup -setautoproxystate \"Wi-Fi\" on"],
+                   "\(proxyPlan.applyCommands) / \(proxyPlan.rollbackCommands)")
+            expect("net fix: proxy plan warns when PAC is already off",
+                   !NetworkOptimizer.plan(action: .proxyOff, service: wifi, device: "en11",
+                                          target: [], currentDNS: []).warnings.isEmpty)
+            let mtuPlan = NetworkOptimizer.plan(action: .mtuFix, service: wifi,
+                                                device: "en11", target: [], currentDNS: [],
+                                                currentMTU: 1500)
+            expect("net fix: mtu plan targets the device and rolls back to automatic",
+                   mtuPlan.applyCommands == ["networksetup -setMTU en11 1400"]
+                   && mtuPlan.rollbackCommands == ["networksetup -setMTUAndMediaAutomatically en11"],
+                   "\(mtuPlan.applyCommands) / \(mtuPlan.rollbackCommands)")
+            expect("net fix: mtu plan warns when current MTU is already at/below target",
+                   !NetworkOptimizer.plan(action: .mtuFix, service: wifi, device: "en11",
+                                          target: [], currentDNS: [], currentMTU: 1400)
+                       .warnings.isEmpty)
+            let noopPlan = NetworkOptimizer.plan(action: .noop, service: nil, device: "",
+                                                 target: [], currentDNS: [])
+            expect("net fix: noop plan changes nothing and needs no admin",
+                   noopPlan.isNoop && noopPlan.applyCommands == ["true"]
+                   && noopPlan.rollbackCommands == ["true"] && !noopPlan.requiresAdmin)
+
+            // 14. Bug-fix regressions, pinned so they cannot come back.
+            //
+            //     (a) unpaired verdict must obey the PRINTED (widened) MDD.
+            //     Before the fix the decision used the narrow paired formula:
+            //     this exact data printed "improved" in a row whose own MDD
+            //     column said the delta was undetectable. Δ=4.5 sits between
+            //     narrow 3.71 and widened 5.25.
+            let noisy = NetworkReference.unpaired(before: [100, 103, 97, 102, 98],
+                                                  after: [104.5, 107.5, 101.5, 106.5, 102.5],
+                                                  metric: "ttfb")
+            expect("net ref: unpaired verdict obeys the printed (widened) MDD",
+                   noisy?.verdict == .unchanged
+                   && (noisy.map { abs($0.delta) <= $0.mdd } == true),
+                   "verdict \(noisy?.verdict.rawValue ?? "?") Δ\(noisy?.delta ?? 0) "
+                   + "mdd \(noisy?.mdd ?? 0)")
+            //     (b) proxy-off with PAC already off must NOT carry a rollback:
+            //     "setautoproxystate on" as the inverse of a no-op apply would
+            //     re-enable a PAC the user had disabled.
+            let pacOffPlan = NetworkOptimizer.plan(action: .proxyOff, service: wifi,
+                                                   device: "en11", target: [],
+                                                   currentDNS: [])
+            expect("net fix: proxy plan with PAC already off has no rollback",
+                   pacOffPlan.rollbackCommands.isEmpty && !pacOffPlan.warnings.isEmpty,
+                   "\(pacOffPlan.rollbackCommands)")
+            expect("net fix: mtu plan below target warns with an already-prefixed warning",
+                   NetworkOptimizer.plan(action: .mtuFix, service: wifi, device: "en11",
+                                         target: [], currentDNS: [], currentMTU: 1400)
+                       .warnings.allSatisfy { $0.hasPrefix("already") })
+
+            // 15. The MCP tools are registered, and the optimize tool serves a
+            //     plan headless (noop + dry_run passes the destructive gate).
+            expect("net fix: diagnose/optimize tools registered",
+                   ToolRegistry.tool(named: "network_diagnose")?.destructive == false
+                   && ToolRegistry.tool(named: "network_optimize")?.destructive == true)
+            let optimizePlan = executeSync("network_optimize",
+                                           args: ["action": "noop", "dry_run": true,
+                                                  "confirmed": true])
+            expect("net fix: optimize tool dry-run returns the plan JSON",
+                   optimizePlan.contains("plan") && optimizePlan.contains("noop"),
+                   String(optimizePlan.prefix(120)))
+
+            // 16. P3 — nettop CSV parsing. macOS 26 emits CSV, not the JSON
+            //     the design doc assumed; the sample below is a captured real
+            //     header + rows. The parser must find columns by name, split
+            //     the pid after the LAST dot, and aggregate duplicate flows.
+            let nettopSample = """
+               ,bytes_in,bytes_out,
+               kernel_task.0,84567535382,237963299772,
+               com.apple.WebKit.Networking.1234,5000,9000,
+               com.apple.WebKit.Networking.1234,7000,1000,
+               remoted.129,9061717,12635831,
+               """
+            let flows = NetworkEngine.parseNettopCSV(nettopSample)
+            expect("net: nettop parser locates columns by header name and sums duplicate flows",
+                   flows.count == 3
+                   && flows.first { $0.name == "com.apple.WebKit.Networking" }?.pid == 1234
+                   && flows.first { $0.name == "com.apple.WebKit.Networking" }?.bytesIn == 12000
+                   && flows.first { $0.name == "com.apple.WebKit.Networking" }?.bytesOut == 10000
+                   && flows.contains { $0.name == "kernel_task" && $0.pid == 0 },
+                   "\(flows.map { "\($0.name).\($0.pid)=\($0.totalBytes)" })")
+            expect("net: nettop parser sorts by total bytes",
+                   flows.map(\.totalBytes) == flows.map(\.totalBytes).sorted(by: >))
+            expect("net: nettop parser survives an empty body",
+                   NetworkEngine.parseNettopCSV(",bytes_in,bytes_out,\n").isEmpty)
+
+            // 17. P4 — daily trend aggregation: bucket by local day, filter by
+            //     host, newest first, medians not means.
+            var trendSamples: [NetworkReference.StoredSample] = []
+            let dayFormatter = DateFormatter()
+            dayFormatter.dateFormat = "yyyy-MM-dd"
+            dayFormatter.locale = Locale(identifier: "en_US_POSIX")
+            dayFormatter.timeZone = TimeZone.current
+            for (offset, ttfb) in [(0, 100.0), (0, 300.0), (1, 50.0)] {
+                let day = Calendar.current.date(byAdding: .day, value: -offset, to: Date())!
+                trendSamples.append(NetworkReference.StoredSample(
+                    at: day, interface: "en0", ssid: nil, hour: 9,
+                    host: "trend.test", dns: Double(10 + offset), tcp: 5, tls: 40,
+                    ttfb: ttfb))
+                if offset == 0 {
+                    // A different host on the same day must not leak in.
+                    trendSamples.append(NetworkReference.StoredSample(
+                        at: day, interface: "en0", ssid: nil, hour: 9,
+                        host: "other.test", dns: 999, tcp: 999, tls: 999, ttfb: 999))
+                }
+            }
+            let trend = NetworkReference.dailyTrend(from: trendSamples, host: "trend.test",
+                                                    days: 7)
+            expect("net: daily trend buckets by day, filters host, medians (not means), newest first",
+                   trend.count == 2
+                   && trend[0].day == dayFormatter.string(from: Date())
+                   && trend[0].n == 2 && trend[0].ttfbP50 == 200
+                   && trend[1].n == 1 && trend[1].ttfbP50 == 50,
+                   "\(trend.map { "\($0.day) n=\($0.n) ttfb=\($0.ttfbP50)" })")
+            expect("net: daily trend caps the day window",
+                   NetworkReference.dailyTrend(from: trendSamples, host: "trend.test",
+                                               days: 1).count == 1)
+
+            // 18. P4 — checkup plist: launchd wants XML, the report entry point,
+            //     and clamped calendar fields.
+            let checkupPlist = NetworkCheckup.plistXML(
+                executablePath: "/Applications/Moppet.app/Moppet", weekday: 1, hour: 9)
+            expect("net: checkup plist carries --net-report and the log path",
+                   checkupPlist.contains("--net-report")
+                   && checkupPlist.contains(NetworkCheckup.logURL.path)
+                   && checkupPlist.contains("<string>com.moppet.netcheckup</string>"))
+            expect("net: checkup plist clamps weekday/hour",
+                   NetworkCheckup.plistXML(executablePath: "/x", weekday: 99, hour: 40)
+                       .contains("<integer>7</integer>")
+                   && NetworkCheckup.plistXML(executablePath: "/x", weekday: 99, hour: 40)
+                       .contains("<integer>23</integer>"))
+
+            // 19. L4 — pure phase extraction from URLSessionTaskMetrics pairs
+            //     (the metric types themselves cannot be constructed).
+            let base = Date(timeIntervalSince1970: 1_700_000_000)
+            let appPhases = NetworkEngine.appPhases(
+                lookupStart: base, lookupEnd: base.addingTimeInterval(0.010),
+                connectStart: base.addingTimeInterval(0.010),
+                connectEnd: base.addingTimeInterval(0.012),
+                secureStart: base.addingTimeInterval(0.012),
+                secureEnd: base.addingTimeInterval(0.030),
+                requestStart: base.addingTimeInterval(0.030),
+                responseStart: base.addingTimeInterval(0.045))
+            expect("net: app-path phase extraction reads dns/tcp/tls/ttfb",
+                   abs(appPhases.dns! - 10) < 0.01 && abs(appPhases.tcp! - 2) < 0.01
+                   && abs(appPhases.tls! - 18) < 0.01 && abs(appPhases.ttfb! - 15) < 0.01,
+                   "\(appPhases)")
+            expect("net: app-path extraction returns nil for missing segments",
+                   NetworkEngine.appPhases(lookupStart: nil, lookupEnd: nil,
+                                           connectStart: nil, connectEnd: nil,
+                                           secureStart: nil, secureEnd: nil,
+                                           requestStart: nil, responseStart: nil)
+                       .dns == nil)
+
+            // 20. New rules in the findings engine, fed synthetic data.
+            let weakRow = NetworkProbeCLI.TargetRow(
+                host: "x.test", n: 5, failures: 0,
+                dns: NetworkProbeCLI.StatsRow(n: 1, median: 10, mad: 0, p95: 10),
+                tcp: NetworkProbeCLI.StatsRow(n: 5, median: 20, mad: 1, p95: 22),
+                tls: NetworkProbeCLI.StatsRow(n: 5, median: 40, mad: 2, p95: 44),
+                ttfb: NetworkProbeCLI.StatsRow(n: 5, median: 60, mad: 2, p95: 65),
+                amplification: 2.0, proto: "h1.1")
+            let weakFindings = NetworkProbeCLI.findings(
+                rows: [weakRow], control: nil, coldDNS: nil,
+                wifi: NetworkEngine.WiFiInfo(interface: "en0", ssid: nil, rssi: -75,
+                                             noise: -80, channel: 6, band5GHz: false,
+                                             txRate: nil))
+            expect("net: wifi.weak fires on RSSI < -70 and noise > -85",
+                   weakFindings.contains { $0.contains("-75 dBm") }
+                   && weakFindings.contains { $0.contains("noise -80") },
+                   weakFindings.joined(separator: " | "))
+            let hogFindings = NetworkProbeCLI.findings(
+                rows: [weakRow], control: nil, coldDNS: nil,
+                processes: [NetworkEngine.ProcFlow(name: "Sync", pid: 42, bytesIn: 0,
+                                                   bytesOut: 4_000_000),
+                            NetworkEngine.ProcFlow(name: "Idle", pid: 43, bytesIn: 0,
+                                                   bytesOut: 100_000)])
+            expect("net: process.hog fires above 60% of uplink with real volume",
+                   hogFindings.contains { $0.contains("Sync (pid 42)") },
+                   hogFindings.joined(separator: " | "))
+            expect("net: process.hog stays quiet on small traffic",
+                   !NetworkProbeCLI.findings(
+                    rows: [weakRow], control: nil, coldDNS: nil,
+                    processes: [NetworkEngine.ProcFlow(name: "Pings", pid: 7, bytesIn: 0,
+                                                       bytesOut: 60_000)]).contains {
+                        $0.contains("hog") || $0.contains("uplink")
+                    })
+            let divergeFindings = NetworkProbeCLI.findings(
+                rows: [weakRow], control: nil, coldDNS: nil,
+                appPath: [NetworkEngine.AppPathProbe(
+                    host: "x.test", dnsMs: 10, tcpMs: 200, tlsMs: 500,
+                    ttfbMs: 400, proxy: true, reused: false,
+                    protocolName: "h2", seconds: 1)])
+            expect("net: proxy divergence fires when the app path is far slower",
+                   divergeFindings.contains { $0.contains("proxy/PAC") },
+                   divergeFindings.joined(separator: " | "))
         }
 
         // if/else rather than a ternary: the ternary form made the compiler

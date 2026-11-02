@@ -21,10 +21,14 @@ struct MoppetApp: App {
                                        "--brain-exec", "--yes", "--probe-floater",
                                        "--probe-models", "--probe-pet-bubble",
                                        "--probe-pet-panel", "--probe-imk", "--probe-analyze",
-                                       "--probe-analyze-render", "--probe-sidebar", "--probe-home",
+                                       "--probe-analyze-render", "--probe-render", "--probe-sidebar", "--probe-home",
                                        "--net-probe",
                                        "--samples", "--hosts", "--json", "--throughput",
                                        "--compare", "--run", "--rounds", "--control-ip", "--no-record",
+                                       "--net-fix", "--action", "--dns", "--mtu", "--dry-run", "--host",
+                                       "--net-report", "--net-trend", "--net-checkup",
+                                       "--processes", "--interval", "--app-path",
+                                       "--weekday", "--hour",
                                        "--route-perf", "--win-debug", "--scheduled-clean"]
         let args = CommandLine.arguments
         // A bare "--" is the conventional separator (`swift run Moppet -- --smoke`)
@@ -41,6 +45,32 @@ struct MoppetApp: App {
         if args.contains("--smoke") {
             SmokeTest.run()
         }
+        // Page layout render: `--probe-render <clean|optimize> <png>
+        // [light|dark] [expanded]` writes a PNG offscreen (no real scan, no
+        // deletion) so a layout can be checked without screen recording.
+        if let index = args.firstIndex(of: "--probe-render") {
+            guard args.count > index + 2 else {
+                FileHandle.standardError.write(
+                    Data("error: --probe-render needs <page> <png>\n".utf8))
+                exit(2)
+            }
+            let page = args[index + 1]
+            let output = args[index + 2]
+            let appearance = args.count > index + 3 ? args[index + 3] : "dark"
+            let expand = args.contains("expanded")
+            // `h=1400` renders a taller viewport — long pages (Space Hogs,
+            // Status) are clipped by the default 860pt window, and checking
+            // only the top half is how a broken bottom half ships.
+            let height = args.compactMap { arg -> CGFloat? in
+                guard arg.hasPrefix("h=") else { return nil }
+                return CGFloat(Double(arg.dropFirst(2)) ?? 0)
+            }.first ?? 860
+            Task { @MainActor in
+                PageRenderProbe.run(page: page, outputPath: output,
+                                    appearance: appearance, expandFirst: expand,
+                                    height: height)
+            }
+        }
         // Analyze ring render: writes a PNG of the page with a synthetic
         // in-flight delete, so the overlay can be checked without screen
         // recording permission and without deleting real files.
@@ -53,6 +83,26 @@ struct MoppetApp: App {
         // terminal before any UI exists. `Moppet --net-probe [--json]`.
         if args.contains("--net-probe") {
             NetworkProbeCLI.run()
+        }
+        // Headless network fix: the optimizer's write path (plan → apply →
+        // verify → measure → keep or roll back). Without `--yes` it only
+        // prints the plan, so the default run changes nothing.
+        // `Moppet --net-fix [--action dns-switch --dns 1.1.1.1 --yes]`
+        if args.contains("--net-fix") {
+            NetworkFixCLI.run()
+        }
+        // P4 weekly checkup: probe → trend → findings, printed. The
+        // LaunchAgent runs exactly this; it never writes network config.
+        if args.contains("--net-report") {
+            NetworkProbeCLI.runReport()
+        }
+        // Sample history by day — the textual trend chart.
+        if args.contains("--net-trend") {
+            NetworkProbeCLI.runTrend()
+        }
+        // Weekly checkup agent: `--net-checkup install|uninstall|status`.
+        if args.contains("--net-checkup") {
+            NetworkCheckupCLI.run()
         }
         // Sidebar render: writes a PNG of the nav panel so its spacing and
         // icon work can be checked without a screen-recording grant.

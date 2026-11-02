@@ -29,13 +29,13 @@ struct SettingsView: View {
     @FocusState private var focusedField: Field?
 
     /// Section filter — the page used to be one 1200-line scroll through
-    /// ten cards; the segmented filter keeps every card reachable in one hop.
+    /// ten cards. There is deliberately NO "All" tab: it re-created that same
+    /// endless scroll behind a tab, so every tab now shows one focused group.
     private enum Section: String, CaseIterable, Identifiable {
-        case all, general, ai, growth, data, about
+        case general, ai, growth, data, about
         var id: String { rawValue }
         var label: String {
             switch self {
-            case .all: L("All")
             case .general: L("General")
             case .ai: L("AI")
             case .growth: L("Growth")
@@ -44,7 +44,7 @@ struct SettingsView: View {
             }
         }
     }
-    @State private var section: Section = .all
+    @State private var section: Section = .general
 
     var body: some View {
         VStack(spacing: 0) {
@@ -63,29 +63,29 @@ struct SettingsView: View {
                 // Lazy: ten stacked cards cost ~0.9s to build eagerly in
                 // debug; only the visible ones need to exist at first paint.
                 LazyVStack(spacing: Airi.space3) {
-                    if section == .all || section == .general {
+                    if section == .general {
                         identityCard
                         languageCard
                         scheduledCleanCard
                         petCard
                     }
-                    if section == .all || section == .ai {
+                    if section == .ai {
                         codexSubscriptionCard
                         aiCard
                     }
                     // Brain Growth has its own tab: its toggles and the
                     // learning table are what people come here to flip, and
                     // burying them under "AI" cost two clicks every time.
-                    if section == .all || section == .growth {
+                    if section == .growth {
                         BrainGrowthCard()
                     }
-                    if section == .all || section == .data {
+                    if section == .data {
                         whitelistCard
                         mcpCard
                         cacheCard
                         protectionCard
                     }
-                    if section == .all || section == .about {
+                    if section == .about {
                         aboutCard
                     }
                 }

@@ -9,7 +9,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%2014%2B-lightgrey.svg?style=flat-square)](#要求)
 [![Swift](https://img.shields.io/badge/swift-6.0%2B-orange.svg?style=flat-square)](#要求)
-[![Tools](https://img.shields.io/badge/MCP%20tools-29-8a2be2.svg?style=flat-square)](#内置工具与-mcp29-个)
+[![Tools](https://img.shields.io/badge/MCP%20tools-31-8a2be2.svg?style=flat-square)](#内置工具与-mcp31-个)
 [![Tests](https://img.shields.io/badge/tests-237%20%2B%20226%20passing-brightgreen.svg?style=flat-square)](#验证)
 [![Deps](https://img.shields.io/badge/dependencies-4-informational.svg?style=flat-square)](#许可与致谢)
 
@@ -32,7 +32,7 @@
 - [桌宠](#桌宠)
 - [Brain：Codex 能力对齐](#braincodex-能力对齐)
 - [审批与沙箱决策表](#审批与沙箱决策表)
-- [内置工具与 MCP（29 个）](#内置工具与-mcp29-个)
+- [内置工具与 MCP（31 个）](#内置工具与-mcp31-个)
 - [AI 供应商](#ai-供应商)
 - [安全模型](#安全模型)
 - [扫描范围 = 你的勾选](#扫描范围--你的勾选)
@@ -56,7 +56,7 @@
 | 谁来做决定 | 你逐项勾选 | 你可以勾选，也可以**用自然语言让 agent 干活**——它先 dry-run 给你看，再等你批准 |
 | 删除安全性 | "点一下就好" | 只删家目录、25 类保护路径、白名单永远优先、删除前二次校验、逐路径审计；**任何删除（含 AI、含补丁）都要审批** |
 | AI 的形态 | 侧边栏聊天窗口 | 宠物本身就是对话入口：单击说话、双击开完整聊天窗、结果回到头顶气泡 |
-| 可被外部驱动 | 无 | 内置 **MCP 服务器**（stdio + 回环 HTTP，29 个工具），Claude Code / Cursor / Codex 可以直接调用同一套清理能力 |
+| 可被外部驱动 | 无 | 内置 **MCP 服务器**（stdio + 回环 HTTP，31 个工具），Claude Code / Cursor / Codex 可以直接调用同一套清理能力 |
 | 技术栈 | Electron / 大量框架 | 单进程 SwiftUI + SceneKit；4 个依赖；debug 二进制 74 MB，`--smoke` 全量自测约 3 秒 |
 
 **它适合谁**：想要一个能真正解释"为什么删这个"的清理工具的人；愿意把删除权限交给一个有护栏的 agent 的人；喜欢桌宠作为交互层的人。
@@ -85,7 +85,7 @@
 ┌───────────────────────────────┐            │  Moppet：先扫描 → 报结果       │
 │  外部 MCP 客户端                │            │        → 等你批准 → 执行       │
 │  Claude Code / Cursor / Codex  │──┐         └──────────────────────────────┘
-└───────────────────────────────┘  └────────▶ 同一套 29 个工具、同一套安全门控
+└───────────────────────────────┘  └────────▶ 同一套 31 个工具、同一套安全门控
 ```
 
 界面设计遵循三条硬规则：**跟随系统外观**（不钉浅色/深色，靠动态 token 保证两种模式都可读）、**卡片式分区**（12pt 圆角 + 1px 描边 + 柔和投影）、**数字与进度都有动效**（环形进度弹簧插值、数字滚动）。
@@ -145,6 +145,7 @@ swift run Moppet --brain-exec "清理浏览器缓存并报告" --yes  # 自动�
 |---|---|
 | `--probe-models` | 用当前订阅 token 拉取模型目录，打印 HTTP 状态与原始响应 |
 | `--probe-floater` | 离屏渲染浮层配色，验证动态 token 在无边框面板里的解析结果 |
+| `--probe-render` | 离屏渲染页面为 PNG（`--probe-render clean\|optimize\|status\|spacehogs\|startup\|settings <png> [light\|dark] [expanded] [h=1500]`），无录屏权限也能检查布局；`h=` 用于渲染长页面（默认 860 会裁掉下半截） |
 | `--route-perf` | 依次切换全部路由，打印每次提交/渲染耗时（排查卡顿） |
 | `--win-debug` | 每 4 秒输出窗口 frame / visible / occlusion / key / firstResponder |
 
@@ -229,7 +230,7 @@ flowchart LR
     A -->|streamTurn| M["模型<br/>swift-ai-sdk 9 家 / Responses"]
     M -->|toolCall| D{工具分发}
     D -->|"shell / exec / apply_patch / read_file"| S["BrainSandbox<br/>Seatbelt profile"]
-    D -->|"清理 / 卸载 / 瘦身 / 启动项"| T["ToolRegistry<br/>29 个工具"]
+    D -->|"清理 / 卸载 / 瘦身 / 启动项"| T["ToolRegistry<br/>31 个工具"]
     D -->|"mcp__server__tool"| C["BrainMCPClient<br/>外部 MCP 服务器"]
     S --> G{{审批门 + 删除检测}}
     T --> G
@@ -275,7 +276,7 @@ flowchart LR
 
 ---
 
-## 内置工具与 MCP（29 个）
+## 内置工具与 MCP（31 个）
 
 `ToolRegistry` 是唯一工具源：**App 内 agent 与外部 MCP 客户端调用同一实现、同一安全门控**。
 
@@ -291,6 +292,7 @@ flowchart LR
 | 空间大户 | `scan_space_hogs`（快照/Docker/brew/备份只读报告）`delete_local_snapshots` `docker_prune` `brew_cleanup` |
 | 孤立残留 | `scan_orphans` `clean_orphans` |
 | 优化 | `optimize_catalog` `run_optimize`（admin 任务只允许在 App 内跑） |
+| 网络 | `network_diagnose`（只读分层诊断）`network_optimize`（plan→apply→测量→无改善自动回滚） |
 | 历史 | `clean_history` |
 | 白名单 | `whitelist_list` `whitelist_add` `whitelist_remove` |
 | 安全 | `safety_check` |
@@ -472,7 +474,7 @@ Sources/Moppet/                     93 个 Swift 文件 / ~33k 行
 │   ├── BrainTypes.swift            事件、策略、会话项类型
 │   └── BrainSmokeTest.swift        --brain-smoke
 ├── Core/
-│   ├── ToolRegistry.swift          29 个工具 + JSON Schema + 门控 + 确认 token
+│   ├── ToolRegistry.swift          31 个工具 + JSON Schema + 门控 + 确认 token
 │   ├── SafetyGuard.swift           保护路径、白名单、glob
 │   ├── ScanEngine.swift            pattern 展开、并行测量、缓存接入
 │   ├── BatchDeleter.swift          分层批量删除（直删/展开两层 + 白名单子树保护）

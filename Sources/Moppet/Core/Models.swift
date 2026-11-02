@@ -89,6 +89,7 @@ enum RecordSource: String, Codable, CaseIterable {
     case orphans        // orphan residue cleanup
     case hogs           // system hogs (snapshots / Docker / Homebrew)
     case scheduled      // the LaunchAgent's --scheduled-clean run
+    case network        // network fixes (--net-fix: DNS / PAC / MTU)
 
     var icon: String {
         switch self {
@@ -105,6 +106,7 @@ enum RecordSource: String, Codable, CaseIterable {
         case .orphans: "tray.full"
         case .hogs: "internaldrive"
         case .scheduled: "clock.badge.checkmark"
+        case .network: "wifi"
         }
     }
 
@@ -124,6 +126,7 @@ enum RecordSource: String, Codable, CaseIterable {
         case .orphans: L("Orphans")
         case .hogs: L("Space Hogs")
         case .scheduled: L("Scheduled")
+        case .network: L("Network")
         }
     }
 }

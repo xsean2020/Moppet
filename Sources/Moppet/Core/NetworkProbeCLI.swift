@@ -31,6 +31,9 @@ enum NetworkProbeCLI {
         let samples = intValue(args, "--samples") ?? 5
         let wantJSON = args.contains("--json")
         let wantThroughput = args.contains("--throughput")
+        let wantProcesses = args.contains("--processes")
+        let wantAppPath = args.contains("--app-path")
+        let procInterval = max(2, min(intValue(args, "--interval") ?? 5, 30))
         let hosts = stringValue(args, "--hosts")?
             .split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
@@ -51,11 +54,14 @@ enum NetworkProbeCLI {
                 print(text)
             } else {
                 let report = await collect(hosts: hosts, samples: samples,
-                                           throughput: wantThroughput, record: record)
+                                           throughput: wantThroughput, record: record,
+                                           processes: wantProcesses,
+                                           procInterval: procInterval,
+                                           appPath: wantAppPath)
                 if wantJSON {
                     print(report.jsonString)
                 } else {
-                    print(render(report))
+                    print(render(report, requestedThroughput: wantThroughput))
                 }
             }
             semaphore.signal()
@@ -87,10 +93,13 @@ enum NetworkProbeCLI {
         }
 
         var environment: Environment
+        var wifi: NetworkEngine.WiFiInfo?
         var targets: [TargetRow]
         var control: ControlRow?
         var coldDNS: StatsRow?
         var throughput: ThroughputResult?
+        var processes: [NetworkEngine.ProcFlow]?
+        var appPath: [NetworkEngine.AppPathProbe]?
         var history: HistoryRow?
         var findings: [String]
     }
@@ -130,8 +139,12 @@ enum NetworkProbeCLI {
         var synRetries: Int
     }
 
-    private static func collect(hosts: [String], samples: Int,
-                                throughput: Bool, record: Bool) async -> Report {
+    /// Shared with the `network_diagnose` MCP tool — one collection pass,
+    /// no printing, fully Codable.
+    static func collect(hosts: [String], samples: Int,
+                        throughput: Bool, record: Bool,
+                        processes: Bool = false, procInterval: Int = 5,
+                        appPath: Bool = false) async -> Report {
         let path = await currentPath()
         let route = await defaultRoute()
         let proxy = await systemProxy()
@@ -161,13 +174,14 @@ enum NetworkProbeCLI {
             // DNS once per name, not per sample: the resolver caches after the
             // first lookup, so a per-sample median would always read ~0 and
             // hide the cold cost entirely.
-            let dnsOnce = NetworkEngine.resolveMilliseconds(host: host)
-            let ip = NetworkEngine.resolveIPv4(host)
+            let dnsOnce = await NetworkEngine.resolveMillisecondsAsync(host: host)
+            let ip = await NetworkEngine.resolveIPv4Async(host)
 
             var phases: [NetworkEngine.PhaseSample] = []
             var failures = 0
             for _ in 0..<samples {
-                let tcp = ip.flatMap { NetworkEngine.tcpConnectMilliseconds(ip: $0) }
+                var tcp: Double?
+                if let ip { tcp = await NetworkEngine.tcpConnectMillisecondsAsync(ip: ip) }
                 let (ready, ttfb, version) = await NetworkEngine.measureHandshake(host: host)
                 guard ready > 0 else { failures += 1; continue }
                 // TLS is the difference, not the whole handshake: `ready`
@@ -199,10 +213,12 @@ enum NetworkProbeCLI {
 
         // 2. Control: same measurement with DNS removed from the equation.
         var control: ControlRow?
-        if let host = hosts.first, let ip = NetworkEngine.resolveIPv4(host) {
+        if let host = hosts.first, let ip = await NetworkEngine.resolveIPv4Async(host) {
             var handshakes: [Double] = []
             for _ in 0..<samples {
-                if let ms = NetworkEngine.tcpConnectMilliseconds(ip: ip) { handshakes.append(ms) }
+                if let ms = await NetworkEngine.tcpConnectMillisecondsAsync(ip: ip) {
+                    handshakes.append(ms)
+                }
             }
             control = ControlRow(ip: ip,
                                  tcp: stats(handshakes),
@@ -213,7 +229,9 @@ enum NetworkProbeCLI {
         //    mDNSResponder's memory.
         var coldSamples: [Double] = []
         for _ in 0..<samples {
-            if let ms = NetworkEngine.coldDNSMilliseconds() { coldSamples.append(ms) }
+            if let ms = await NetworkEngine.coldDNSMillisecondsAsync() {
+                coldSamples.append(ms)
+            }
         }
         let coldDNS = stats(coldSamples)
 
@@ -225,6 +243,31 @@ enum NetworkProbeCLI {
             throughputResult = Report.ThroughputResult(
                 mbps: result.mbps, bytes: result.bytes, seconds: result.seconds,
                 streams: result.streams, endpoint: result.endpoint)
+        }
+
+        // L0.5 — Wi-Fi quality: one CoreWLAN read, no permission beyond what
+        // the app already has. SSID may be nil (no location grant) by design.
+        let wifi = await NetworkEngine.wifiSnapshot()
+
+        // L5 — per-process interval traffic: opt-in because it costs the
+        // sampling interval in wall time (two nettop passes).
+        var procFlows: [NetworkEngine.ProcFlow]?
+        if processes {
+            procFlows = await NetworkEngine.procFlowDeltas(interval: TimeInterval(procInterval))
+        }
+
+        // L4 — the app path: same hosts through URLSession, which DOES use
+        // the system proxy/PAC. Read next to the direct rows, the difference
+        // is what the tunnel costs.
+        var appRows: [NetworkEngine.AppPathProbe]?
+        if appPath {
+            var probes: [NetworkEngine.AppPathProbe] = []
+            for host in hosts.prefix(3) {
+                if let probe = await NetworkEngine.appPathProbe(host: host) {
+                    probes.append(probe)
+                }
+            }
+            appRows = probes.isEmpty ? nil : probes
         }
 
         // Historical reference: what this interface looked like at this hour.
@@ -253,10 +296,13 @@ enum NetworkProbeCLI {
             }
         }
 
-        return Report(environment: environment, targets: rows, control: control,
+        return Report(environment: environment, wifi: wifi, targets: rows, control: control,
                       coldDNS: coldDNS, throughput: throughputResult,
+                      processes: procFlows, appPath: appRows,
                       history: history,
-                      findings: findings(rows: rows, control: control, coldDNS: coldDNS))
+                      findings: findings(rows: rows, control: control, coldDNS: coldDNS,
+                                         wifi: wifi, processes: procFlows,
+                                         appPath: appRows))
     }
 
     // MARK: - Comparison (the reference frame)
@@ -266,7 +312,7 @@ enum NetworkProbeCLI {
     /// MDD, and labelled as the weaker test it is.
     private static func runComparison(host: String, rounds: Int, command: String?,
                                       controlIP: String?) async -> String {
-        guard let ip = NetworkEngine.resolveIPv4(host) else {
+        guard let ip = await NetworkEngine.resolveIPv4Async(host) else {
             return "cannot resolve \(host)"
         }
         // Control defaults to the gateway: no DNS, no WAN, nothing a resolver
@@ -279,6 +325,9 @@ enum NetworkProbeCLI {
         var before: [NetworkEngine.RoundSample] = []
         var after: [NetworkEngine.RoundSample] = []
         let paired = command == nil
+        // A failed command must not pass silently: the A/B that follows then
+        // compares pure noise, and the only defence is saying so.
+        var runFailure: String?
 
         if paired {
             for _ in 0..<rounds {
@@ -296,7 +345,8 @@ enum NetworkProbeCLI {
                 }
             }
             if let command {
-                _ = try? await OptimizeEngine.shell(command, timeout: 120)
+                do { _ = try await OptimizeEngine.shell(command, timeout: 120) }
+                catch { runFailure = error.localizedDescription }
             }
             for _ in 0..<rounds {
                 if let b = await NetworkEngine.sampleRound(host: host, ip: ip, controlIP: control) {
@@ -306,7 +356,9 @@ enum NetworkProbeCLI {
         }
 
         guard before.count >= 2, after.count >= 2 else {
-            return "not enough samples (before \(before.count), after \(after.count))"
+            var text = "not enough samples (before \(before.count), after \(after.count))"
+            if let runFailure { text += "\nthe between-rounds command failed: \(runFailure)" }
+            return text
         }
 
         let metrics: [(String, (NetworkEngine.RoundSample) -> Double)] = [
@@ -328,12 +380,13 @@ enum NetworkProbeCLI {
 
         return renderComparison(host: host, control: control, paired: paired,
                                 command: command, rounds: before.count,
-                                changes: changes)
+                                changes: changes, runFailure: runFailure)
     }
 
     private static func renderComparison(host: String, control: String?, paired: Bool,
                                          command: String?, rounds: Int,
-                                         changes: [NetworkReference.MetricChange]) -> String {
+                                         changes: [NetworkReference.MetricChange],
+                                         runFailure: String? = nil) -> String {
         var lines: [String] = []
         if paired {
             lines.append("A/A reference test · \(rounds) paired rounds · \(host)"
@@ -342,6 +395,10 @@ enum NetworkProbeCLI {
         } else {
             lines.append("A/B test · \(rounds) rounds per side · \(host)")
             lines.append("between rounds: \(command ?? "—")")
+        }
+        if let runFailure {
+            lines.append("⚠ the between-rounds command FAILED — \(runFailure)")
+            lines.append("  the A/B below compares noise; do not read it as a verdict")
         }
         lines.append("")
         lines.append(pad("metric", 8) + pad("before", 11) + pad("after", 11)
@@ -377,9 +434,15 @@ enum NetworkProbeCLI {
     }
 
     // MARK: - Interpretation (kept deliberately small)
-
-    private static func findings(rows: [TargetRow], control: ControlRow?,
-                                 coldDNS: StatsRow?) -> [String] {
+    //
+    // Internal, not private: `--smoke` feeds synthetic samples and asserts
+    // the rules fire (and don't fire) without touching a socket.
+    static func findings(rows: [TargetRow], control: ControlRow?,
+                         coldDNS: StatsRow?,
+                         wifi: NetworkEngine.WiFiInfo? = nil,
+                         processes: [NetworkEngine.ProcFlow]? = nil,
+                         appPath: [NetworkEngine.AppPathProbe]? = nil,
+                         procInterval: Int = 5) -> [String] {
         var out: [String] = []
         for row in rows {
             // Ratio alone over-triggers on fast hosts: TCP 4ms → TLS 100ms is
@@ -407,13 +470,52 @@ enum NetworkProbeCLI {
             let dns = cold.median
             out.append("⚠ cold DNS \(Int(dns))ms — resolver is slow; a DNS change is worth measuring")
         }
+        // wifi.weak — design rule table. RSSI/noise alone are a weak signal on
+        // their own, but under -70 dBm every other number in this report is
+        // suspect, so it is worth saying first-class.
+        if let wifi, let rssi = wifi.rssi, rssi < -70 {
+            out.append("⚠ Wi-Fi signal \(rssi) dBm — below the -70 dBm threshold; "
+                       + "move closer to the AP or change channel before blaming anything else")
+        }
+        if let wifi, let noise = wifi.noise, noise > -85 {
+            out.append("⚠ Wi-Fi noise \(noise) dBm — above the -85 dBm threshold "
+                       + "(interference); the link is noisy, not just far")
+        }
+        // process.hog — one process carrying most of the interval's uplink.
+        // Requires an absolute floor (1 MB out) so an idle machine's 60 KB
+        // heartbeat does not read as "hogging the line".
+        if let processes, !processes.isEmpty {
+            let totalOut = processes.reduce(Int64(0)) { $0 + $1.bytesOut }
+            if totalOut > 1_000_000, let top = processes.first,
+               Double(top.bytesOut) / Double(totalOut) > 0.6 {
+                out.append("⚠ \(top.name) (pid \(top.pid)) sent "
+                           + "\(String(format: "%.1f", Double(top.bytesOut) / 1_000_000)) MB "
+                           + "uplink in \(procInterval)s — \(Int(Double(top.bytesOut) / Double(totalOut) * 100))% "
+                           + "of all traffic; stop it before changing any setting")
+            }
+        }
+        // proxy divergence — the app path (URLSession, proxy-aware) vs the
+        // direct path (Network.framework). A large, consistent gap is the
+        // tunnel's cost, and it localises "everything is slow" to the proxy.
+        if let appPath, !appPath.isEmpty {
+            for probe in appPath {
+                guard let row = rows.first(where: { $0.host == probe.host }),
+                      let directTTFB = row.ttfb?.median,
+                      let appTTFB = probe.ttfbMs,
+                      appTTFB > directTTFB * 3, appTTFB - directTTFB > 100 else { continue }
+                out.append("⚠ \(probe.host): app path TTFB \(Int(appTTFB))ms vs direct "
+                           + "\(Int(directTTFB))ms"
+                           + (probe.proxy ? " (proxy connection)" : "")
+                           + " — the system proxy/PAC is adding latency")
+            }
+        }
         if out.isEmpty { out.append("no conclusive finding — every phase is within normal range") }
         return out
     }
 
     // MARK: - Rendering
 
-    private static func render(_ report: Report) -> String {
+    static func render(_ report: Report, requestedThroughput: Bool = false) -> String {
         var lines: [String] = []
         let env = report.environment
         lines.append("Moppet network probe · \(env.startedAt)")
@@ -423,6 +525,19 @@ enum NetworkProbeCLI {
         lines.append("  gateway    \(env.gateway ?? "?")   mtu \(env.mtu.map(String.init) ?? "?")")
         if let proxy = env.proxy {
             lines.append("  proxy      \(proxy)")
+        }
+        if let wifi = report.wifi {
+            var parts: [String] = []
+            if let rssi = wifi.rssi { parts.append("rssi \(rssi) dBm") }
+            if let noise = wifi.noise { parts.append("noise \(noise) dBm") }
+            if let channel = wifi.channel {
+                parts.append("ch \(channel)\(wifi.band5GHz == true ? " (5G)" : "")")
+            }
+            if let tx = wifi.txRate { parts.append("tx \(String(format: "%.0f", tx)) Mbps") }
+            if !parts.isEmpty {
+                let ssid = wifi.ssid ?? "current network"
+                lines.append("  wi-fi      \(ssid) · \(parts.joined(separator: " · "))")
+            }
         }
         lines.append("")
 
@@ -467,12 +582,63 @@ enum NetworkProbeCLI {
             lines.append("throughput                     : \(String(format: "%.1f", tp.mbps)) Mbps"
                          + "  (\(String(format: "%.1f", Double(tp.bytes) / 1_000_000)) MB"
                          + " over \(String(format: "%.1f", tp.seconds))s, \(tp.streams) streams)")
+        } else if requestedThroughput {
+            // A silent "no throughput line" would look like a parsing bug. The
+            // only way looping requests produce zero counted bytes is that no
+            // data arrived inside the window at all — the handshakes alone
+            // outlasted it, which is itself a finding about this link.
+            lines.append("throughput                     : not measurable this run —"
+                         + " no data arrived inside the \(8)s window"
+                         + " (handshakes alone exceeded it; see the tls column)")
+        }
+
+        if let processes = report.processes, !processes.isEmpty {
+            lines.append("")
+            lines.append("process traffic (interval deltas, top 5)")
+            let header = pad("process", 36) + pad("pid", 8) + pad("down", 12) + "up"
+            lines.append(header)
+            lines.append(String(repeating: "─", count: 66))
+            for flow in processes.prefix(5) {
+                lines.append(
+                    pad(flow.name, 36)
+                    + pad("\(flow.pid)", 8)
+                    + pad(mb(flow.bytesIn), 12)
+                    + mb(flow.bytesOut))
+            }
+        }
+        if let appPath = report.appPath, !appPath.isEmpty {
+            lines.append("")
+            lines.append("app path (URLSession — includes system proxy/PAC)")
+            let header = pad("host", 26) + pad("dns", 9) + pad("tcp", 9)
+                + pad("tls", 11) + pad("ttfb", 11) + pad("proxy", 7) + "proto"
+            lines.append(header)
+            lines.append(String(repeating: "─", count: 86))
+            for probe in appPath {
+                lines.append(
+                    pad(probe.host, 26)
+                    + pad(optMs(probe.dnsMs), 9) + pad(optMs(probe.tcpMs), 9)
+                    + pad(optMs(probe.tlsMs), 11) + pad(optMs(probe.ttfbMs), 11)
+                    + pad(probe.proxy ? "yes" : "no", 7)
+                    + (probe.protocolName ?? "—"))
+            }
+            lines.append("  compare with the direct rows above: the gap is what the tunnel costs.")
         }
 
         lines.append("")
         lines.append("findings")
         for finding in report.findings { lines.append("  \(finding)") }
         return lines.joined(separator: "\n")
+    }
+
+    private static func mb(_ bytes: Int64) -> String {
+        bytes >= 1_000_000
+            ? String(format: "%.1f MB", Double(bytes) / 1_000_000)
+            : String(format: "%.0f KB", Double(bytes) / 1_000)
+    }
+
+    private static func optMs(_ value: Double?) -> String {
+        guard let value else { return "—" }
+        return String(format: "%.1f", value)
     }
 
     /// `Int(0.99)` printed "0×", which reads as "no TLS at all". Under 10 the
@@ -491,12 +657,17 @@ enum NetworkProbeCLI {
         return String(format: "%.1f", stats.median)
     }
 
-    private static func fmt(_ value: Double?) -> String {
+    static func fmt(_ value: Double?) -> String {
         guard let value else { return "—" }
         return String(format: "%.1f", value)
     }
 
-    private static func pad(_ text: String, _ width: Int) -> String {
+    /// Unwrapped variant for values known non-nil (trend rows).
+    static func fmt(_ value: Double) -> String {
+        String(format: "%.1f", value)
+    }
+
+    static func pad(_ text: String, _ width: Int) -> String {
         // Count characters, not bytes: host names are ASCII but the labels are
         // not, and a byte-count pad would misalign the header row.
         let count = text.count
@@ -704,6 +875,10 @@ enum NetworkProbeCLI {
         guard let index = args.firstIndex(of: flag), index + 1 < args.count else { return nil }
         return args[index + 1]
     }
+
+    /// Internal for the checkup CLI's flag reads — same parsing, one source.
+    static func flagInt(_ args: [String], _ flag: String) -> Int? { intValue(args, flag) }
+    static func flagString(_ args: [String], _ flag: String) -> String? { stringValue(args, flag) }
 }
 
 extension NetworkProbeCLI.Report {

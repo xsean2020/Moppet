@@ -93,6 +93,11 @@ struct CleanView: View {
             Text(L("Browser caches can only be cleared while the browser is closed — a running browser keeps rewriting them. Unsaved tabs/forms may be lost (most browsers restore tabs on relaunch)."))
         }
         .onAppear {
+            // Offscreen probe hook (`--probe-clean-render … expanded`): opens
+            // the first section so the expanded row body is inspectable.
+            if Self.debugExpandFirstSection, let first = viewModel.sections.first {
+                first.expanded = true
+            }
             // Dashboard CTA: start the same scan the page's Scan button runs,
             // but only when there is a selection to measure.
             guard CleanLaunch.consumeScanRequest(),
@@ -167,65 +172,274 @@ struct CleanView: View {
                     if !Permissions.hasFullDiskAccess {
                         fdaBanner
                     }
-                    ForEach(viewModel.sections) { section in
-                        sectionCard(section)
-                    }
+                    scopeSummaryCard
+                    sectionGroupCard
+                    // One quiet reassurance line under the list — it fills the
+                    // dead space a short page always had and repeats the
+                    // page's contract where the eye lands after scanning rows.
+                    Text(L("Read-only scan — files are removed only after you confirm"))
+                        .font(Airi.caption2Font)
+                        .foregroundStyle(Airi.neutral400)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 2)
                 }
-                .padding(Airi.space4)
-                .frame(maxWidth: 680)
+                .padding(.horizontal, Airi.space4)
+                .padding(.top, Airi.space3)
+                .padding(.bottom, Airi.space4)
+                .frame(maxWidth: 720)
                 .frame(maxWidth: .infinity)
             }
-            bottomBar {
-                // Scope preview: named chips of every section that has ticked
-                // items, so "what will Scan cover" is on screen BEFORE the
-                // click — the "selected installers, browsers got scanned"
-                // report came from invisible scope.
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) {
-                        ForEach(viewModel.sections.filter { $0.items.contains(where: \.selected) }) { section in
-                            HStack(spacing: 4) {
-                                Image(systemName: section.section.icon)
-                                    .font(.system(size: 9, weight: .medium))
-                                Text(String(format: L("%1$@ (%2$lld/%3$lld)"),
-                                            section.section.title,
-                                            section.items.filter(\.selected).count,
-                                            section.items.count))
-                                    .font(Airi.caption2Font)
-                                    .lineLimit(1)
-                            }
-                            .foregroundStyle(Airi.neutral700)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(Capsule().fill(Airi.neutral100.opacity(0.8)))
-                            .overlay(Capsule().strokeBorder(Airi.neutral200.opacity(0.7), lineWidth: 1))
-                        }
-                    }
+            configureBar
+        }
+    }
+
+    // MARK: Configure — coverage summary
+
+    /// Coverage summary: the page's single focal point. Four identical slabs
+    /// gave the eye nowhere to start and left the counts/checks stranded at
+    /// the far right edge of a mostly empty row; a ring + rule count + the two
+    /// bulk actions answers "what will Scan cover" before any scrolling.
+    private var scopeSummaryCard: some View {
+        let totalRules = viewModel.sections.reduce(0) { $0 + $1.items.count }
+        let pickedRules = viewModel.selectedItems.count
+        let pickedSections = viewModel.sections.filter { $0.items.contains(where: \.selected) }.count
+        let fraction = totalRules > 0 ? Double(pickedRules) / Double(totalRules) : 0
+        return SettingsCard(padding: 14) {
+            HStack(spacing: Airi.space3) {
+                ProgressRing(progress: fraction,
+                             lineWidth: 4,
+                             showValue: true,
+                             valueText: "\(Int((fraction * 100).rounded()))%",
+                             valueFontSize: 10)
+                    .frame(width: 40, height: 40)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(String(format: L("%1$lld of %2$lld rules selected"),
+                                pickedRules, totalRules))
+                        .font(Airi.emphasisFont)
+                        .foregroundStyle(Airi.neutral950)
+                        .monospacedDigit()
+                    Text(String(format: L("%1$lld of %2$lld categories selected"),
+                                pickedSections, viewModel.sections.count))
+                        .font(Airi.captionFont)
+                        .foregroundStyle(Airi.neutral500)
+                        .monospacedDigit()
                 }
-                Text(String(format: L("%1$lld of %2$lld categories selected"),
-                            viewModel.selectedItems.count,
-                            viewModel.sections.reduce(0) { $0 + $1.items.count }))
-                    .font(Airi.captionFont)
-                    .foregroundStyle(Airi.neutral500)
-                    .monospacedDigit()
+                Spacer(minLength: Airi.space2)
                 // Global select-all / clear-all — the section tri-state only
                 // acted on one section, so "scan everything" needed N taps.
-                Button(L("Select all")) { viewModel.selectAll() }
-                    .buttonStyle(.plain)
-                    .font(Airi.captionFont.weight(.medium))
-                    .foregroundStyle(Airi.primary)
-                    .accessibilityLabel(Text(L("Select all")))
-                Button(L("Deselect all")) { viewModel.deselectAll() }
-                    .buttonStyle(.plain)
-                    .font(Airi.captionFont)
-                    .foregroundStyle(Airi.neutral500)
-                    .accessibilityLabel(Text(L("Deselect all")))
-                Spacer()
-                AiriButton(title: L("Scan"), icon: "magnifyingglass") {
-                    viewModel.startScan()
-                }
-                .disabled(viewModel.selectedItems.isEmpty)
+                bulkChip(L("Select all"), tint: Airi.primary) { viewModel.selectAll() }
+                bulkChip(L("Deselect all"), tint: Airi.neutral500) { viewModel.deselectAll() }
             }
         }
+    }
+
+    private func bulkChip(_ title: String, tint: Color, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(Airi.captionFont.weight(.medium))
+                .foregroundStyle(tint)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(Capsule().fill(Airi.neutral100.opacity(0.9)))
+                .overlay(Capsule().strokeBorder(Airi.neutral200.opacity(0.8), lineWidth: 1))
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(Text(title))
+    }
+
+    // MARK: Configure — grouped section list
+
+    /// All sections in ONE grouped card with hairline seams (System Settings
+    /// style). Separate cards read as four unrelated slabs, each with a wide
+    /// empty middle; a single list makes the group a unit and lets the row
+    /// controls sit right after the copy instead of at the window edge.
+    private var sectionGroupCard: some View {
+        GroupedCard {
+            ForEach(Array(viewModel.sections.enumerated()), id: \.element.id) { index, section in
+                if index > 0 { GroupedDivider() }
+                sectionRow(section)
+            }
+        }
+    }
+
+    /// One section row: icon chip · title/subtitle · count pill · tri-state
+    /// check · disclosure. Order runs left→right from "what is this" to "is it
+    /// in scope" to "open it" — the old chevron-then-count-then-check order
+    /// read backwards and floated the chevron in empty space.
+    private func sectionRow(_ section: CleanViewModel.SectionState) -> some View {
+        let ticked = section.items.filter(\.selected).count
+        let total = section.items.count
+        return VStack(spacing: 0) {
+            HStack(spacing: Airi.space2) {
+                Button {
+                    withAnimation(Airi.controlAnimation) { section.expanded.toggle() }
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: section.section.icon)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(Airi.primary)
+                            .frame(width: 28, height: 28)
+                            .background(
+                                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                    .fill(Airi.primary.opacity(0.12))
+                            )
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(section.section.title)
+                                .font(Airi.cardTitleFont)
+                                .foregroundStyle(Airi.neutral950)
+                                .lineLimit(1)
+                            Text(section.section.subtitle)
+                                .font(Airi.captionFont)
+                                .foregroundStyle(Airi.neutral500)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                        }
+                        Spacer(minLength: Airi.space2)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                Text("\(ticked)/\(total)")
+                    .font(Airi.caption2Font.weight(.medium))
+                    .monospacedDigit()
+                    .foregroundStyle(ticked == 0 ? Airi.neutral500 : Airi.primary)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2)
+                    .background(Capsule().fill(Airi.neutral100.opacity(0.9)))
+                    .overlay(Capsule().strokeBorder(Airi.neutral200.opacity(0.7), lineWidth: 1))
+
+                SectionTriState(section: section) { section.selected = $0 }
+
+                Button {
+                    withAnimation(Airi.controlAnimation) { section.expanded.toggle() }
+                } label: {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Airi.neutral400)
+                        // Rotate instead of swapping up/down — the glyph swap
+                        // was abrupt; rotation animates with the same spring.
+                        .rotationEffect(.degrees(section.expanded ? 180 : 0))
+                        .frame(width: 22, height: 22)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 11)
+
+            if section.expanded {
+                VStack(spacing: 2) {
+                    ForEach(section.items) { itemState in
+                        itemRow(itemState)
+                    }
+                }
+                .padding(8)
+                // Inset panel: the expanded rules read as a sub-list of THIS
+                // section instead of floating loose between two hairlines.
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Airi.neutral50.opacity(0.35))
+                )
+                .padding(.leading, 52)
+                .padding(.trailing, 14)
+                .padding(.bottom, 12)
+                // Fade only. The card clips its rows (Components.GroupedCard),
+                // so the panel is revealed by the card's own height animation;
+                // the extra `.scale(anchor: .top)` fought that clip and made the
+                // panel look like it slid out ahead of the card.
+                .transition(.opacity)
+            }
+        }
+    }
+
+    /// One rule inside an expanded section. A checkbox, not a switch: this is
+    /// a multi-select list (switches read as settings that apply immediately),
+    /// and it matches the review page's per-path checkboxes.
+    private func itemRow(_ itemState: CleanViewModel.ItemState) -> some View {
+        HStack(spacing: Airi.space2) {
+            Toggle("", isOn: Binding(
+                get: { itemState.selected },
+                set: { itemState.selected = $0 }
+            ))
+            .toggleStyle(.checkbox)
+            .controlSize(.small)
+            .labelsHidden()
+            VStack(alignment: .leading, spacing: 1) {
+                Text(itemState.item.name)
+                    .font(Airi.captionFont)
+                    .foregroundStyle(Airi.neutral900)
+                    .lineLimit(1)
+                Text(itemState.item.detail)
+                    .font(Airi.caption2Font)
+                    .foregroundStyle(Airi.neutral500)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            Spacer(minLength: Airi.space2)
+            if let warning = itemState.item.warning {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(Airi.caption2Font)
+                    .foregroundStyle(Airi.warning)
+                    .help(warning)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        // Out-of-scope rules recede instead of looking equally armed — but
+        // stay legible: below ~0.7 the 10pt detail line disappears entirely.
+        .opacity(itemState.selected ? 1 : 0.7)
+        .animation(Airi.hoverAnimation, value: itemState.selected)
+    }
+
+    // MARK: Configure — action bar
+
+    /// Scope chips on the left (what Scan covers), one primary action on the
+    /// right. The bulk actions moved up into the summary card so this bar
+    /// holds exactly one decision.
+    private var configureBar: some View {
+        HStack(spacing: Airi.space2) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(viewModel.sections.filter { $0.items.contains(where: \.selected) }) { section in
+                        HStack(spacing: 4) {
+                            Image(systemName: section.section.icon)
+                                .font(.system(size: 9, weight: .medium))
+                            Text(String(format: L("%1$@ (%2$lld/%3$lld)"),
+                                        section.section.title,
+                                        section.items.filter(\.selected).count,
+                                        section.items.count))
+                                .font(Airi.caption2Font)
+                                .lineLimit(1)
+                        }
+                        .foregroundStyle(Airi.neutral700)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Capsule().fill(Airi.neutral100.opacity(0.8)))
+                        .overlay(Capsule().strokeBorder(Airi.neutral200.opacity(0.7), lineWidth: 1))
+                    }
+                }
+                .padding(.vertical, 1)
+            }
+            Spacer(minLength: Airi.space2)
+            AiriButton(title: scanButtonTitle, icon: "magnifyingglass") {
+                viewModel.startScan()
+            }
+            .disabled(viewModel.selectedItems.isEmpty)
+        }
+        .padding(.horizontal, Airi.space4)
+        .padding(.vertical, 12)
+        .background(.ultraThinMaterial)
+        .overlay(alignment: .top) { Divider().overlay(Airi.neutral200.opacity(0.5)) }
+    }
+
+    /// Count in the action label: "Scan 12 rules" tells the user the scope of
+    /// the click without reading the chips first.
+    private var scanButtonTitle: String {
+        let count = viewModel.selectedItems.count
+        return count == 0 ? L("Scan") : String(format: L("Scan %lld rules"), count)
     }
 
     /// Full Disk Access guidance (gap-analysis P0): without FDA the TCC-
@@ -251,85 +465,6 @@ struct CleanView: View {
                 AiriButton(title: L("Open Settings"), icon: "arrow.up.right.square") {
                     Task { @MainActor in Permissions.openFullDiskAccessSettings() }
                 }
-            }
-        }
-    }
-
-    private func sectionCard(_ section: CleanViewModel.SectionState) -> some View {
-        SettingsCard {
-            HStack(spacing: Airi.space3) {
-                Image(systemName: section.section.icon)
-                    .font(.system(size: 18, weight: .light))
-                    .symbolRenderingMode(.hierarchical)
-                    .foregroundStyle(Airi.primary)
-                    .frame(width: 36, height: 36)
-                    .background(RoundedRectangle(cornerRadius: Airi.radiusControl).fill(Airi.neutral100))
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(section.section.title).font(Airi.cardTitleFont).foregroundStyle(Airi.neutral950)
-                    Text(section.section.subtitle).font(Airi.captionFont).foregroundStyle(Airi.neutral500)
-                }
-                Spacer()
-                Button {
-                    withAnimation(Airi.controlAnimation) { section.expanded.toggle() }
-                } label: {
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(Airi.neutral500)
-                        // Rotate instead of swapping up/down — the glyph swap
-                        // was abrupt; rotation animates with the same spring.
-                        .rotationEffect(.degrees(section.expanded ? 180 : 0))
-                        // A 10pt glyph was a 10pt hit target — "insensitive"
-                        // on macOS 26. Pad it to a comfortable square.
-                        .frame(width: 30, height: 30)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                // Counts + tristate master check: a partially-ticked section
-                // used to render its Toggle as OFF (allSatisfy), so "Browsers
-                // off + Installers on" scanned the browsers anyway.
-                Text(String(format: L("%1$lld / %2$lld"),
-                            section.items.filter(\.selected).count,
-                            section.items.count))
-                    .font(Airi.caption2Font)
-                    .foregroundStyle(Airi.neutral500)
-                    .monospacedDigit()
-                SectionTriState(section: section) { newValue in
-                    section.selected = newValue
-                }
-            }
-
-            if section.expanded {
-                VStack(spacing: Airi.space2) {
-                    ForEach(section.items) { itemState in
-                        let binding = Binding(
-                            get: { itemState.selected },
-                            set: { itemState.selected = $0 }
-                        )
-                        ToggleRow(
-                            title: itemState.item.name,
-                            subtitle: itemState.item.detail,
-                            isOn: binding
-                        )
-                        .padding(.horizontal, Airi.space1)
-                        .padding(.vertical, 4)
-                        .background(
-                            RoundedRectangle(cornerRadius: Airi.radiusControl)
-                                .fill(Airi.neutral50.opacity(0.6))
-                        )
-                        if itemState.item.warning != nil {
-                            Text(itemState.item.warning!)
-                                .font(Airi.caption2Font)
-                                .foregroundStyle(Airi.warning)
-                                .padding(.leading, Airi.space1)
-                        }
-                    }
-                }
-                .padding(.top, Airi.space1)
-                // Fade + a subtle top-anchored scale. The old
-                // `.move(edge: .top)` slid the body in from ABOVE its slot, so
-                // it overlapped the header while the card height sprang —
-                // that was the "broken" expand animation.
-                .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .top)))
             }
         }
     }
@@ -454,7 +589,7 @@ struct CleanView: View {
                     }
                 }
                 .padding(Airi.space4)
-                .frame(maxWidth: 680)
+                .frame(maxWidth: 720)
                 .frame(maxWidth: .infinity)
             }
             bottomBar {
@@ -635,6 +770,10 @@ struct CleanView: View {
     /// Review-tree page size (see `itemTree` for the disclosure row).
     static let findingCap = 30
 
+    /// Offscreen render probe (`--probe-clean-render … expanded`): start with
+    /// the first section open so the row-body layout can be inspected.
+    static var debugExpandFirstSection = false
+
     /// One finding row: include/exclude checkbox + name + size.
     private func findingRow(_ finding: Finding, itemState: CleanViewModel.ItemState) -> some View {
         HStack(spacing: Airi.space2) {
@@ -741,7 +880,7 @@ struct CleanView: View {
                     }
                 }
                 .padding(Airi.space4)
-                .frame(maxWidth: 680)
+                .frame(maxWidth: 720)
                 .frame(maxWidth: .infinity)
             }
             bottomBar {

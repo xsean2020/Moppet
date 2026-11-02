@@ -67,6 +67,19 @@ enum Airi {
     static let chartPurple = dynamicColor(light: "#8B5CF6", dark: "#A78BFA")
     static let chartAmber = dynamicColor(light: "#F59E0B", dark: "#FBBF24")
     static let chartGreen = dynamicColor(light: "#22C55E", dark: "#4ADE80")
+    /// Former upload trace on the network dial — round 4 moved that dashed
+    /// line to `chartAmber`, so this is currently unused but kept for the
+    /// next dual-series chart (lime kept the two series distinct where they
+    /// cross; dark #BEF264 = Tailwind lime-300).
+    static let chartLime = dynamicColor(light: "#84CC16", dark: "#BEF264")
+
+    /// Glyph colour for icons sitting ON a saturated tint chip (the status
+    /// quadrant badges): near-black in BOTH appearances. The chip carries the
+    /// hue, so the appearance-flipping neutral scale must not be used here.
+    static let onTintGlyph = dynamicColor(
+        light: NSColor.black.withAlphaComponent(0.70),
+        dark: NSColor.black.withAlphaComponent(0.70)
+    )
 
     // MARK: - Radius ladder
 
@@ -209,6 +222,8 @@ extension Int64 {
     /// built from background sizing/audit code.
     private static let byteFormatter: ByteCountFormatter = {
         let formatter = ByteCountFormatter()
+        // `.file` = decimal 1000 basis, same as Finder — the explicit unit
+        // basis the status dashboard's network rates and capacities report in.
         formatter.countStyle = .file
         return formatter
     }()

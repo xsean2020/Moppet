@@ -1,6 +1,7 @@
 import Foundation
 import Darwin
 import Network
+import CoreWLAN
 
 /// Network measurement kernel.
 ///
@@ -287,6 +288,33 @@ enum NetworkEngine {
 
     // MARK: - One measurement round
 
+    // Async bridges for the blocking probes below. `getaddrinfo` and
+    // `connect(2)` have no cancellation and can block for seconds (DNS alone
+    // up to 30s). On the cooperative pool that stalls every other task in the
+    // process — tolerable in the headless CLI, unacceptable once an MCP tool
+    // calls this from the app — so the async path hops to the global queue.
+
+    static func coldDNSMillisecondsAsync() async -> Double? {
+        await Task.detached(priority: .utility) { Self.coldDNSMilliseconds() }.value
+    }
+
+    static func resolveMillisecondsAsync(host: String) async -> Double? {
+        await Task.detached(priority: .utility) { Self.resolveMilliseconds(host: host) }.value
+    }
+
+    static func resolveIPv4Async(_ host: String) async -> String? {
+        await Task.detached(priority: .utility) { Self.resolveIPv4(host) }.value
+    }
+
+    static func tcpConnectMillisecondsAsync(ip: String, port: UInt16 = 443,
+                                            timeout: TimeInterval = 5,
+                                            countRefused: Bool = false) async -> Double? {
+        await Task.detached(priority: .utility) {
+            Self.tcpConnectMilliseconds(ip: ip, port: port, timeout: timeout,
+                                        countRefused: countRefused)
+        }.value
+    }
+
     /// One round of every metric, measured back to back so a pair sees the
     /// same network weather. Shared by `--net-probe --compare` and the
     /// optimiser's before/after loop.
@@ -305,10 +333,12 @@ enum NetworkEngine {
         // Cold DNS per round: the resolver caches after the first lookup, so a
         // warm reading would report 0.1ms no matter what DNS server is set —
         // and DNS is precisely what a resolver change targets.
-        let dns = coldDNSMilliseconds() ?? 0
-        let tcp = ip.flatMap { tcpConnectMilliseconds(ip: $0) }
-        let control = controlIP.flatMap {
-            tcpConnectMilliseconds(ip: $0, countRefused: true)
+        let dns = await coldDNSMillisecondsAsync() ?? 0
+        var tcp: Double?
+        if let ip { tcp = await tcpConnectMillisecondsAsync(ip: ip) }
+        var control: Double?
+        if let controlIP {
+            control = await tcpConnectMillisecondsAsync(ip: controlIP, countRefused: true)
         }
         let (ready, ttfb, _) = await measureHandshake(host: host)
         guard ready > 0, let ttfb, let tcp else { return nil }
@@ -333,8 +363,14 @@ enum NetworkEngine {
     ///   reports 30–50% below link capacity.
     /// - **Discard the warm-up.** TCP slow start makes the first 1–2s
     ///   unrepresentative; only bytes arriving after `warmup` count.
-    /// - **A fresh connection per stream.** Otherwise a CDN edge cache answers
-    ///   from memory and the "speed" is the loopback.
+    /// - **A fresh connection and a unique URL per request, repeated until the
+    ///   deadline.** The first version sent one request per stream: a 2MB file
+    ///   on a 100 Mbps link finished inside the warm-up, and dividing its
+    ///   bytes by the nominal 6.5s window reported ~2 Mbps. Looping keeps the
+    ///   pipe full for the whole window and defeats edge caches.
+    ///
+    /// The rate divides by the window the bytes actually covered, not the
+    /// nominal one, so an early-ending endpoint still reports honestly.
     static func measureDownload(host: String, path: String, streams: Int = 4,
                                 seconds: Double = 8, warmup: Double = 1.5,
                                 timeout: Double = 30) async -> Throughput? {
@@ -346,31 +382,74 @@ enum NetworkEngine {
         await withTaskGroup(of: Void.self) { group in
             for _ in 0..<streams {
                 group.addTask {
-                    await streamBytes(host: host, path: path,
-                                      windowStart: windowStart, deadline: deadline,
-                                      timeout: timeout, counter: counter)
+                    await streamRequests(host: host, path: path,
+                                         windowStart: windowStart, deadline: deadline,
+                                         timeout: timeout, counter: counter)
                 }
             }
             await group.waitForAll()
         }
 
-        let steady = seconds - warmup
-        let bytes = await counter.value
-        guard steady > 0, bytes > 0 else { return nil }
-        return Throughput(mbps: Double(bytes) * 8 / steady / 1_000_000,
-                          bytes: bytes, seconds: steady, streams: streams,
+        guard let window = counter.window(from: windowStart, closingAt: deadline),
+              let bytes = counter.bytes, bytes > 0 else { return nil }
+        return Throughput(mbps: Double(bytes) * 8 / window / 1_000_000,
+                          bytes: bytes, seconds: window, streams: streams,
                           endpoint: "https://\(host)\(path)")
     }
 
-    /// One stream: connect, request, then count bytes until the deadline.
+    /// One stream = repeated requests until the deadline, a fresh connection
+    /// each time. Returns after the first request that fails to start (a
+    /// refused or reset connection will not improve by hammering it).
+    private static func streamRequests(host: String, path: String,
+                                       windowStart: Date, deadline: Date,
+                                       timeout: Double, counter: ByteCounter) async {
+        while Date() < deadline {
+            // Unique query parameter per request: a CDN answering the second
+            // identical GET from edge cache is measuring its memory.
+            let separator = path.contains("?") ? "&" : "?"
+            let unique = path + separator + "r=" + UUID().uuidString.prefix(8).lowercased()
+            let progressed = await StreamReader.run(host: host, path: unique,
+                                                    windowStart: windowStart,
+                                                    deadline: deadline,
+                                                    timeout: timeout, counter: counter)
+            if !progressed { return }
+        }
+    }
+
+    /// One request over a fresh connection: connect, send, receive until the
+    /// response completes, the deadline, or a failure.
     ///
     /// This is a class rather than a local closure because the receive loop is
     /// recursive and gets called from three places (state handler, receive
     /// callback, timeout). Written as nested local functions, the compiler
     /// flags each of them as concurrently-executed and non-`@Sendable`.
     private final class StreamReader: @unchecked Sendable {
+        /// `true` = the link moved at least one byte (the request completed,
+        /// or the deadline cut it mid-stream); `false` = the connection failed
+        /// before any byte arrived, so the caller's request loop should stop.
+        static func run(host: String, path: String, windowStart: Date, deadline: Date,
+                        timeout: Double, counter: ByteCounter) async -> Bool {
+            let tlsOptions = NWProtocolTLS.Options()
+            sec_protocol_options_add_tls_application_protocol(
+                tlsOptions.securityProtocolOptions, "http/1.1")
+            let parameters = NWParameters(tls: tlsOptions, tcp: NWProtocolTCP.Options())
+            guard let port = NWEndpoint.Port(rawValue: 443) else { return false }
+            let connection = NWConnection(host: NWEndpoint.Host(host), port: port,
+                                          using: parameters)
+
+            return await withCheckedContinuation {
+                (continuation: CheckedContinuation<Bool, Never>) in
+                let reader = StreamReader(connection: connection,
+                                          continuation: continuation,
+                                          counter: counter, windowStart: windowStart,
+                                          deadline: deadline, host: host, path: path)
+                reader.start(on: DispatchQueue(label: "moppet.netprobe.stream"),
+                             timeout: timeout)
+            }
+        }
+
         private let connection: NWConnection
-        private let continuation: CheckedContinuation<Void, Never>
+        private let continuation: CheckedContinuation<Bool, Never>
         private let counter: ByteCounter
         private let windowStart: Date
         private let deadline: Date
@@ -378,8 +457,12 @@ enum NetworkEngine {
         private let path: String
         private let lock = NSLock()
         private var finished = false
+        /// Any byte at all — including warm-up bytes outside the counting
+        /// window. A request that completes entirely during warm-up still
+        /// proves the link works and the next request is worth making.
+        private var receivedAny = false
 
-        init(connection: NWConnection, continuation: CheckedContinuation<Void, Never>,
+        init(connection: NWConnection, continuation: CheckedContinuation<Bool, Never>,
              counter: ByteCounter, windowStart: Date, deadline: Date,
              host: String, path: String) {
             self.connection = connection
@@ -419,12 +502,24 @@ enum NetworkEngine {
         }
 
         private func receiveNext() {
-            guard Date() < deadline else { finish(); return }
+            // No deadline guard here on purpose: a request whose handshake is
+            // still in flight when the window closes must run to completion
+            // (its own timeout bounds it). Aborting mid-handshake made the
+            // whole measurement give up on links where TLS alone outlasts the
+            // window. Bytes outside [windowStart, deadline) are simply not
+            // counted, so the rate stays honest.
             connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) {
                 data, _, isComplete, error in
-                if let data, !data.isEmpty, Date() >= self.windowStart {
-                    let count = data.count
-                    Task { await self.counter.add(count) }
+                if let data, !data.isEmpty {
+                    self.receivedAny = true
+                    let now = Date()
+                    if now >= self.windowStart, now < self.deadline {
+                        // Synchronous add: this callback is not async, and a
+                        // spawned Task could race the continuation that ends
+                        // the measurement — the final chunks would land after
+                        // the rate was computed (observed as an empty result).
+                        self.counter.add(data.count, at: now)
+                    }
                 }
                 if error != nil || isComplete { self.finish() } else { self.receiveNext() }
             }
@@ -437,34 +532,294 @@ enum NetworkEngine {
             lock.unlock()
             connection.stateUpdateHandler = nil
             connection.cancel()
-            continuation.resume()
+            continuation.resume(returning: receivedAny)
         }
     }
 
-    private static func streamBytes(host: String, path: String,
-                                    windowStart: Date, deadline: Date,
-                                    timeout: Double, counter: ByteCounter) async {
-        let tlsOptions = NWProtocolTLS.Options()
-        sec_protocol_options_add_tls_application_protocol(
-            tlsOptions.securityProtocolOptions, "http/1.1")
-        let parameters = NWParameters(tls: tlsOptions, tcp: NWProtocolTCP.Options())
-        guard let port = NWEndpoint.Port(rawValue: 443) else { return }
-        let connection = NWConnection(host: NWEndpoint.Host(host), port: port, using: parameters)
+    /// Bytes counted, with when the last one landed — the window the rate
+    /// divides by is what the bytes actually covered, not the nominal plan.
+    /// A lock, not an actor: the add comes from NWConnection's receive
+    /// callback, which is not async, and a spawned `Task` could race the
+    /// continuation that ends the measurement (reads could miss final chunks).
+    private final class ByteCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: Int64 = 0
+        private var lastCountedAt: Date?
 
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            let reader = StreamReader(connection: connection, continuation: continuation,
-                                      counter: counter, windowStart: windowStart,
-                                      deadline: deadline, host: host, path: path)
-            reader.start(on: DispatchQueue(label: "moppet.netprobe.stream"), timeout: timeout)
+        func add(_ n: Int, at date: Date) {
+            lock.lock(); defer { lock.unlock() }
+            value += Int64(n)
+            lastCountedAt = date
+        }
+
+        func window(from windowStart: Date, closingAt deadline: Date) -> Double? {
+            lock.lock(); defer { lock.unlock() }
+            guard let last = lastCountedAt else { return nil }
+            return max(0.001, min(last, deadline).timeIntervalSince(windowStart))
+        }
+
+        var bytes: Int64? {
+            lock.lock(); defer { lock.unlock() }
+            return value > 0 ? value : nil
         }
     }
 
-    private actor ByteCounter {
-        private(set) var value: Int64 = 0
-        func add(_ n: Int) { value += Int64(n) }
+    // MARK: - L5 per-process flows (nettop)
+
+    /// Per-process traffic delta over one sampling interval.
+    struct ProcFlow: Sendable, Codable {
+        var name: String
+        var pid: Int
+        var bytesIn: Int64
+        var bytesOut: Int64
+
+        var totalBytes: Int64 { bytesIn + bytesOut }
     }
 
-    // MARK: - Statistics
+    /// Pure parser for `nettop -P -L 1 -x -J bytes_in,bytes_out`.
+    ///
+    /// **macOS 26 reality check:** the design doc assumed `-L` emits JSON; on
+    /// this machine it emits CSV (verified live):
+    ///
+    ///     ,bytes_in,bytes_out,
+    ///     kernel_task.0,84567535382,237963299772,
+    ///     remoted.129,9061717,12635831,
+    ///
+    /// Columns are located by header name, not position. Process names may
+    /// carry dots (`com.apple.WebKit.Networking.1234`) — the pid is everything
+    /// after the LAST dot. Duplicate `name.pid` rows (one per interface) are
+    /// summed. Counters are cumulative since boot, so the caller subtracts
+    /// two snapshots to get interval traffic.
+    static func parseNettopCSV(_ output: String) -> [ProcFlow] {
+        var columns: [String] = []
+        var flows: [String: ProcFlow] = [:]
+        for raw in output.split(separator: "\n") {
+            let fields = raw.split(separator: ",", omittingEmptySubsequences: false)
+                .map(String.init)
+            guard !fields.isEmpty else { continue }
+            // Header rows start with an empty field (the process column).
+            if fields[0].isEmpty {
+                columns = fields
+                continue
+            }
+            guard !columns.isEmpty, fields.count > 1 else { continue }
+            let key = fields[0]
+            guard let lastDot = key.lastIndex(of: ".") else { continue }
+            let name = String(key[key.startIndex..<lastDot])
+            let pid = Int(String(key[key.index(after: lastDot)...])) ?? -1
+            guard !name.isEmpty else { continue }
+            // Out-of-range or unparseable numbers → treat as 0, the row still
+            // exists so the delta against a later snapshot stays balanced.
+            func count(_ column: String) -> Int64 {
+                guard let index = columns.firstIndex(of: column),
+                      index < fields.count, let value = Int64(fields[index])
+                else { return 0 }
+                return value
+            }
+            let flow = ProcFlow(name: name, pid: pid,
+                                bytesIn: count("bytes_in"), bytesOut: count("bytes_out"))
+            flows[key, default: ProcFlow(name: name, pid: pid, bytesIn: 0, bytesOut: 0)].bytesIn += flow.bytesIn
+            flows[key]?.bytesOut += flow.bytesOut
+        }
+        return flows.values.sorted { $0.totalBytes > $1.totalBytes }
+    }
+
+    /// One cumulative snapshot of per-process byte counters.
+    static func procFlowSnapshot() async -> [ProcFlow]? {
+        guard let output = try? await OptimizeEngine.shell(
+            "/usr/bin/nettop -P -L 1 -x -J bytes_in,bytes_out", timeout: 30)
+        else { return nil }
+        let flows = parseNettopCSV(output)
+        return flows.isEmpty ? nil : flows
+    }
+
+    /// Interval traffic per process: two cumulative snapshots, subtracted.
+    /// This is the only way to answer "what is eating the uplink *right now*"
+    /// — `nettop` counters alone say nothing about the present.
+    static func procFlowDeltas(interval: TimeInterval = 5) async -> [ProcFlow]? {
+        guard let first = await procFlowSnapshot() else { return nil }
+        try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+        guard let second = await procFlowSnapshot() else { return nil }
+        var before: [String: ProcFlow] = [:]
+        for flow in first { before["\(flow.name).\(flow.pid)"] = flow }
+        var deltas: [ProcFlow] = []
+        for flow in second {
+            guard let previous = before["\(flow.name).\(flow.pid)"] else { continue }
+            let inDelta = flow.bytesIn - previous.bytesIn
+            let outDelta = flow.bytesOut - previous.bytesOut
+            // A negative value means the counter was reset (restart) — not
+            // traffic; skip rather than report a phantom download.
+            guard inDelta >= 0, outDelta >= 0, inDelta > 0 || outDelta > 0 else { continue }
+            deltas.append(ProcFlow(name: flow.name, pid: flow.pid,
+                                   bytesIn: inDelta, bytesOut: outDelta))
+        }
+        return deltas.sorted { $0.totalBytes > $1.totalBytes }
+    }
+
+    // MARK: - Wi-Fi snapshot (CoreWLAN)
+
+    struct WiFiInfo: Sendable, Codable {
+        var interface: String?
+        /// nil without location permission on macOS 14+ — degrade to "current
+        /// network" (design §7); RSSI/noise/channel need no permission.
+        var ssid: String?
+        var rssi: Int?
+        var noise: Int?
+        var channel: Int?
+        var band5GHz: Bool?
+        var txRate: Double?
+    }
+
+    /// Read-only Wi-Fi quality snapshot. Never configures anything.
+    static func wifiSnapshot() async -> WiFiInfo? {
+        let info: WiFiInfo? = await Task.detached(priority: .utility) { () -> WiFiInfo? in
+            guard let iface = CWWiFiClient.shared().interface() else { return nil }
+            let channel = iface.wlanChannel()?.channelNumber
+            return WiFiInfo(
+                interface: iface.interfaceName,
+                ssid: iface.ssid(),
+                // rssiValue()/noiseMeasurement() are methods, not properties —
+                // and a fresh interface can answer 0, which means "unknown",
+                // not "perfect signal".
+                rssi: { let v = iface.rssiValue(); return v < 0 ? v : nil }(),
+                noise: { let v = iface.noiseMeasurement(); return v <= 0 ? v : nil }(),
+                channel: channel,
+                // CWChannelBand's Swift-imported case names don't compile as
+                // documented; the channel number is the reliable band signal
+                // for display (>14 = 5/6 GHz).
+                band5GHz: channel.map { $0 > 14 },
+                txRate: { let v = iface.transmitRate(); return v > 0 ? v : nil }())
+        }.value
+        return info
+    }
+
+    // MARK: - L4 app-path probe (URLSessionTaskMetrics)
+
+    /// One request measured the way apps actually make it — through
+    /// URLSession, which DOES consult the system proxy/PAC. Deliberately
+    /// different from `measureHandshake` (Network.framework, proxy-free):
+    /// the *difference* between the two is what the tunnel costs.
+    struct AppPathProbe: Sendable, Codable {
+        var host: String
+        var dnsMs: Double?
+        var tcpMs: Double?
+        var tlsMs: Double?
+        var ttfbMs: Double?
+        /// True when the system proxy carried the request (expected with a
+        /// PAC configured — this is the "what the tunnel adds" signal).
+        var proxy: Bool
+        var reused: Bool
+        var protocolName: String?
+        var seconds: Double
+    }
+
+    /// Pure extraction from the metric's date pairs — smoke-testable without
+    /// constructing (unconstructible) URLSessionTaskMetric instances.
+    static func appPhases(lookupStart: Date?, lookupEnd: Date?,
+                          connectStart: Date?, connectEnd: Date?,
+                          secureStart: Date?, secureEnd: Date?,
+                          requestStart: Date?, responseStart: Date?)
+        -> (dns: Double?, tcp: Double?, tls: Double?, ttfb: Double?) {
+        func ms(_ a: Date?, _ b: Date?) -> Double? {
+            guard let a, let b else { return nil }
+            let value = b.timeIntervalSince(a) * 1000
+            return value.isFinite && value >= 0 ? value : nil
+        }
+        return (ms(lookupStart, lookupEnd), ms(connectStart, connectEnd),
+                ms(secureStart, secureEnd), ms(requestStart, responseStart))
+    }
+
+    static func appPathProbe(host: String, timeout: TimeInterval = 15) async -> AppPathProbe? {
+        // URLSessionTaskMetrics is not Sendable, so the delegate reduces it to
+        // a Sendable value tuple ON the delegate queue before anything hops.
+        final class Collector: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+            struct Reduced: Sendable {
+                var lookupStart: Date?, lookupEnd: Date?
+                var connectStart: Date?, connectEnd: Date?
+                var secureStart: Date?, secureEnd: Date?
+                var requestStart: Date?, responseStart: Date?
+                var proxy: Bool, reused: Bool
+                var proto: String?
+            }
+            let onMetrics: @Sendable (Reduced) -> Void
+            init(onMetrics: @escaping @Sendable (Reduced) -> Void) { self.onMetrics = onMetrics }
+
+            func urlSession(_ session: URLSession, task: URLSessionTask,
+                            didFinishCollecting metrics: URLSessionTaskMetrics) {
+                guard let t = metrics.transactionMetrics.last else { return }
+                onMetrics(Reduced(
+                    lookupStart: t.domainLookupStartDate, lookupEnd: t.domainLookupEndDate,
+                    connectStart: t.connectStartDate, connectEnd: t.connectEndDate,
+                    secureStart: t.secureConnectionStartDate, secureEnd: t.secureConnectionEndDate,
+                    requestStart: t.requestStartDate, responseStart: t.responseStartDate,
+                    proxy: t.isProxyConnection, reused: t.isReusedConnection,
+                    proto: t.networkProtocolName))
+            }
+        }
+
+        let start = Date()
+        // Single-shot gate: whichever of the three paths lands first resumes;
+        // everyone else is a no-op (same shape as the probe's ResumeGate).
+        let gate = ProbeGate()
+        return await withCheckedContinuation {
+            (continuation: CheckedContinuation<AppPathProbe?, Never>) in
+            // Called from three escaping closures — the @Sendable marking is
+            // what keeps Swift 6 mode happy; the gate makes double-resume a
+            // no-op rather than a crash.
+            @Sendable func complete(_ probe: AppPathProbe?) {
+                guard gate.claim() else { return }
+                continuation.resume(returning: probe)
+            }
+
+            let cfg = URLSessionConfiguration.ephemeral
+            cfg.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+            cfg.timeoutIntervalForRequest = timeout
+            cfg.timeoutIntervalForResource = timeout
+            let delegate = Collector { reduced in
+                let phases = appPhases(lookupStart: reduced.lookupStart,
+                                       lookupEnd: reduced.lookupEnd,
+                                       connectStart: reduced.connectStart,
+                                       connectEnd: reduced.connectEnd,
+                                       secureStart: reduced.secureStart,
+                                       secureEnd: reduced.secureEnd,
+                                       requestStart: reduced.requestStart,
+                                       responseStart: reduced.responseStart)
+                complete(AppPathProbe(
+                    host: host, dnsMs: phases.dns, tcpMs: phases.tcp,
+                    tlsMs: phases.tls, ttfbMs: phases.ttfb,
+                    proxy: reduced.proxy, reused: reduced.reused,
+                    protocolName: reduced.proto,
+                    seconds: Date().timeIntervalSince(start)))
+            }
+            let session = URLSession(configuration: cfg, delegate: delegate, delegateQueue: nil)
+            var request = URLRequest(url: URL(string: "https://\(host)/")!)
+            request.timeoutInterval = timeout
+            let task = session.dataTask(with: request) { _, _, _ in
+                // didFinishCollecting fires before the completion handler, so
+                // this only wins when the task failed with no metrics at all.
+                complete(nil)
+            }
+            task.resume()
+            // Holds the session (and with it the delegate and task) alive for
+            // the whole flight; also the hard ceiling if neither path fires.
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout + 2) {
+                _ = session
+                complete(nil)
+            }
+        }
+    }
+
+    /// Single-shot claim gate shared by the app-path probe's three finishers.
+    private final class ProbeGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var claimed = false
+        func claim() -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            if claimed { return false }
+            claimed = true
+            return true
+        }
+    }
 
     static func median(_ sorted: [Double]) -> Double {
         guard !sorted.isEmpty else { return 0 }

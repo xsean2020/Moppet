@@ -810,13 +810,20 @@ struct PetBubbleCard: View {
 /// gets. Short text must hug its content; long text must stop at the cap.
 /// The second pass mirrors the REAL layout chain (card + reserved mole strip)
 /// and asserts the mole keeps its height — the "pet disappeared behind a wide
-/// answer" regression.
+/// answer" regression — and that card and mole strip share a center line:
+/// the pet must sit mid-bubble, left-right symmetric.
 @MainActor
 enum PetBubbleProbe {
+    /// Named coordinate space the card/mole centers are measured in (the
+    /// probe's panel-sized VStack).
+    static let chainSpace = "petBubbleProbeChain"
+
     private final class Store {
         var heights: [String: CGFloat] = [:]
         var moleHeights: [String: CGFloat] = [:]
         var natural: [String: CGFloat] = [:]
+        var cardCenterX: [String: CGFloat] = [:]
+        var moleCenterX: [String: CGFloat] = [:]
     }
 
     static func run() -> Never {
@@ -867,17 +874,29 @@ enum PetBubbleProbe {
                 let fullHost = NSHostingView(rootView:
                     VStack(spacing: 4) {
                         PetBubbleCard(message: text, width: width, maxHeight: cardH)
+                            .background(GeometryReader { g in
+                                Color.clear.onAppear {
+                                    store.heights[key] = g.size.height
+                                    store.cardCenterX[key] =
+                                        g.frame(in: .named(Self.chainSpace)).midX
+                                }
+                            })
                         Color.clear
                             .aspectRatio(230.0 / 270.0, contentMode: .fit)
                             .frame(maxWidth: max(120, panelW - 20),
                                    maxHeight: max(120, panelH - 130))
-                            .frame(maxWidth: .infinity, alignment: .trailing)
-                            .padding(.trailing, 10)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                            .padding(.horizontal, 10)
                             .layoutPriority(-1)
                             .background(GeometryReader { g in
-                                Color.clear.onAppear { store.moleHeights[key] = g.size.height }
+                                Color.clear.onAppear {
+                                    store.moleHeights[key] = g.size.height
+                                    store.moleCenterX[key] =
+                                        g.frame(in: .named(Self.chainSpace)).midX
+                                }
                             })
                     }
+                    .coordinateSpace(name: Self.chainSpace)
                     .frame(width: panelW, height: targetH)
                 )
                 fullHost.frame = NSRect(x: 0, y: 0, width: panelW, height: targetH)
@@ -885,14 +904,21 @@ enum PetBubbleProbe {
                 RunLoop.main.run(until: Date().addingTimeInterval(0.15))
                 let mole = store.moleHeights[key] ?? -1
                 let estimate = PetView.bubbleHeight(for: text, width: width)
+                let drift = abs((store.cardCenterX[key] ?? -1) - (store.moleCenterX[key] ?? -2))
                 print("probe \(key): cardH=\(Int(cardH)) panelH=\(Int(targetH)) "
                       + "moleH=\(Int(mole)) moleKept=\(mole >= moleH - 2) "
-                      + "natural=\(Int(natural)) estimate=\(Int(estimate))")
+                      + "natural=\(Int(natural)) estimate=\(Int(estimate)) "
+                      + "centerDrift=\(String(format: "%.1f", drift)) symmetric=\(drift < 0.5)")
             }
         }
-        let ok = store.heights.count == cases.count * texts.count
-            && store.moleHeights.values.allSatisfy { $0 >= 118 }
-        exit(ok ? 0 : 2)
+        let allHeights = store.heights.count == cases.count * texts.count
+        let moleKept = store.moleHeights.values.allSatisfy { $0 >= 118 }
+        var allSymmetric = true
+        for (key, cardX) in store.cardCenterX {
+            let moleX = store.moleCenterX[key] ?? cardX - 10
+            if abs(cardX - moleX) >= 0.5 { allSymmetric = false }
+        }
+        exit(allHeights && moleKept && allSymmetric ? 0 : 2)
     }
 }
 
@@ -956,12 +982,14 @@ struct PetView: View {
             .aspectRatio(230.0 / 270.0, contentMode: .fit)
             .frame(maxWidth: max(120, PetSettings.currentSize.width - 20),
                    maxHeight: max(120, PetSettings.currentSize.height - 130))
-            // The panel widens LEFTWARD while a wide answer is showing; the
-            // mole must stay pinned at the panel's trailing edge (10pt margin,
-            // matching the old centered 230-in-250 layout) so the pet itself
-            // never moves on screen.
-            .frame(maxWidth: .infinity, alignment: .trailing)
-            .padding(.trailing, 10)
+            // The bubble card is centered in the panel, so the mole rides the
+            // panel's center too (symmetric 10pt side margins — the hidden
+            // 230-in-250 layout keeps its exact position): the pet sits in
+            // the MIDDLE of the bubble, left-right symmetric. The panel still
+            // widens LEFTWARD (right edge pinned), so a wide answer glides
+            // the pet left to stay centered instead of pushing it off-screen.
+            .frame(maxWidth: .infinity, alignment: .center)
+            .padding(.horizontal, 10)
             // The bubble/approval card win the vertical budget first; the
             // mole flexes shorter while a long answer is up (fixed 270 +
             // a tall bubble overflowed the 400pt panel).
@@ -1157,8 +1185,10 @@ struct PetView: View {
     }
 
     /// Resize the hosting panel so the layout's target size becomes real. The
-    /// RIGHT edge and BOTTOM stay pinned — the pet never moves; the bubble
-    /// grows leftward and upward, into the empty desktop area.
+    /// RIGHT edge and BOTTOM stay pinned — the panel grows leftward and
+    /// upward, into the empty desktop area. Horizontally the pet rides the
+    /// panel's center (it must sit mid-bubble), so a wide answer glides it
+    /// left; the pinned right edge keeps the whole bubble on screen.
     ///
     /// The frame change is ANIMATED: an instant snap shrinks the window before
     /// the bubble's fade-out has played, clipping the card mid-animation —
@@ -1215,11 +1245,11 @@ struct PetView: View {
             }
         }
         // Dissolve toward the pet: the card fades while shrinking slightly
-        // into the corner above the mole's head (the panel widens leftward,
-        // so the pet owns the trailing edge). A bare removal just blinks —
-        // with no anchor the collapse reads as the bubble being sucked
-        // sideways by the window resize.
-        .transition(.opacity.combined(with: .scale(scale: 0.92, anchor: .bottomTrailing)))
+        // into the center bottom, where the mole's head is (the pet is
+        // centered under the bubble). A bare removal just blinks — with no
+        // anchor the collapse reads as the bubble being sucked sideways by
+        // the window resize.
+        .transition(.opacity.combined(with: .scale(scale: 0.92, anchor: .bottom)))
         .animation(Airi.controlAnimation, value: bubbleVisible)
     }
 

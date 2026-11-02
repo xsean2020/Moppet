@@ -112,6 +112,13 @@ private let zh: [String: String] = [
     "No items selected — click to select all": "未选——点击全选",
     "Scanned %1$lld categories · found %2$lld paths (%3$@)": "已扫描 %1$lld 个类别 · 找到 %2$lld 个路径(%3$@)",
     "%1$lld of %2$lld categories selected": "已选 %1$lld / %2$lld 个类别",
+    // clean-configure layout round (coverage summary + grouped list)
+    "%1$lld of %2$lld rules selected": "已选 %1$lld / %2$lld 条规则",
+    "Scan %lld rules": "扫描 %lld 条规则",
+    "Read-only scan — files are removed only after you confirm": "只读扫描——确认后才会删除文件",
+    // optimize page layout round (grouped list + task summary)
+    "%1$lld tasks · %2$lld need an admin password": "共 %1$lld 个任务 · %2$lld 个需要管理员密码",
+    "Asks for your administrator password": "运行时会要求输入管理员密码",
     "Nothing selected — open Clean and pick what to scan.": "没有选中任何项目——请到「清理」页勾选要扫描的内容。",
     // audit-round additions (agent/Brain + status + slim)
     "Uninstall %1$lld apps (%2$@)": "卸载 %1$lld 个应用(%2$@)",
@@ -313,10 +320,47 @@ private let zh: [String: String] = [
     "Browser opened — finish signing in, then come back…": "已打开浏览器——请在页面完成登录后回来…",
     // status / optimize / purge
     "Output": "输出", "Disk · %@": "磁盘 · %@", "Top processes": "进程资源占用",
+    // status dashboard round (metric cards + disk scale + process legend)
+    "CPU": "CPU", "Memory": "内存", "Network": "网络", "Battery": "电池",
+    "Charging": "充电中", "On battery": "使用电池", "Process": "进程",
+    "Last 2 minutes": "近 2 分钟",
+    "%1$@ used · %2$@ total": "%1$@ 已用 · 共 %2$@",
     "Scanning project folders…": "正在扫描项目目录…", "Search roots": "搜索根目录",
     "Restore default folders": "恢复默认目录",
     "%@ free": "%@ 可用",
     "Process data unavailable": "暂时拿不到进程数据",
+    // ring dashboard round: disk became a quadrant, so it needs its own label
+    "Disk": "磁盘",
+    "Sorted by CPU · refreshed every 2 seconds": "按 CPU 排序 · 每 2 秒刷新",
+    "No battery": "无电池",
+    // status engine round: quadrant curves + click-through detail panel
+    "Disk I/O": "磁盘 I/O",
+    "Waiting for samples…": "等待采样…",
+    "Current usage": "当前使用率",
+    "User share": "用户态",
+    "System share": "系统态",
+    "Cores": "核心数",
+    "Used memory": "已用内存",
+    "Available memory": "可用内存",
+    "Compressed memory": "压缩内存",
+    "Memory pressure": "内存压力",
+    "Basis": "口径",
+    "Used = active + wired + compressed − purgeable": "已用 = 活跃 + 联动 + 压缩 − 可清除",
+    "Volume": "卷",
+    "Total capacity": "总容量",
+    "Used capacity": "已用容量",
+    "Available capacity": "可用容量",
+    "read": "读", "write": "写",
+    "Current charge": "当前电量",
+    "Charge state": "充电状态",
+    "Fully charged": "已充满",
+    "Discharging": "放电中",
+    "Power source": "电源状态",
+    "AC power": "电源适配器",
+    "Battery power": "电池供电",
+    "This Mac has no battery": "这台 Mac 没有电池",
+    "Click the quadrant again to collapse": "再次点击象限收起",
+    "avg": "平均",
     "%1$lld active · %2$lld disabled": "%1$lld 个启用 · %2$lld 个已禁用",
     "%lld Apple system items hidden": "已隐藏 %lld 个 Apple 系统项",
     "newer apps may register via System Settings → Login Items": "新应用可能通过 系统设置 → 登录项 注册",
@@ -481,6 +525,12 @@ private let zh: [String: String] = [
         "把宠物移到主窗口或聊天窗口所在的显示器——关闭后手动摆放的宠物会留在原地。",
     // MARK: v15.32 startup-items round
     "Disabled": "已禁用", "Enabled": "已启用",
+    // Switch round: the row's switch replaces the old status pill + hover
+    // buttons, so the page needs one line that says what "off" actually does.
+    "Turning one off unloads it now and keeps it off — reversible, nothing is deleted.":
+        "关闭会立即卸载并保持禁用——完全可逆，不会删除任何东西。",
+    "Nothing registers itself at login right now — apps you install later will appear here.":
+        "当前没有第三方登录项——之后安装的应用会自动出现在这里。",
     "Kill": "结束进程",
     "Kill process (SIGTERM)": "结束进程（SIGTERM）",
     "Sent TERM to %@ (pid %lld)": "已向 %1$@（pid %2$lld）发送 TERM",
@@ -539,6 +589,11 @@ private let zh: [String: String] = [
     "%@ across images, containers, volumes and build cache": "镜像、容器、卷与构建缓存共 %@",
     "Images": "镜像", "Containers": "容器", "Volumes": "卷", "Build cache": "构建缓存",
     "Prune Unused": "清理未使用",
+    // Space Hogs row actions — the size lives in the row's subtitle, so the
+    // button only has to name the verb ("Prune Unused" overflowed its column).
+    "Prune": "清理",
+    "Clean up": "清理旧版本",
+    "Reclaimable now": "可立即回收",
     "Prune removes STOPPED containers, unused networks, dangling images and build cache. Running containers and volume data are never touched.":
         "清理会删除已停止的容器、未使用的网络、悬空镜像与构建缓存。运行中的容器和卷数据绝不触碰。",
     "Run docker system prune?": "运行 docker system prune？",
