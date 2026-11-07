@@ -7,12 +7,43 @@ struct HomeView: View {
     var navigate: (Route) -> Void
     var openChat: () -> Void
 
+    /// Offscreen probe hook (`--probe-home`): `.task` never fires in the
+    /// probe's invisible window, so the dashboard would render stuck on
+    /// 「正在读取历史…」. Pre-load the two async numbers synchronously instead —
+    /// the same pattern StatusView/SystemHogsView use for `--probe-render`.
+    static var debugSeed = false
+    /// Probe identity override: a published screenshot must not leak the
+    /// local account name, so the probe swaps the greeting for a placeholder.
+    static var debugUserName: String?
+
     @State private var disk = DiskInfo.snapshot()
     @State private var ai = AISettings.load()
     @State private var recentSessions = 0
     /// Lifetime cleanup totals from the audit log (nil until loaded).
     @State private var totals: HistoryStore.Totals?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    init(navigate: @escaping (Route) -> Void, openChat: @escaping () -> Void) {
+        self.navigate = navigate
+        self.openChat = openChat
+        if Self.debugSeed {
+            // Demo data, not the local machine's: identity, provider roster
+            // and audit log never enter a published screenshot.
+            _recentSessions = State(initialValue: 6)
+            var demo = AISettings()
+            demo.apiKey = "demo"
+            _ai = State(initialValue: demo)
+            let now = Date()
+            let spark: [(date: Date, bytes: Int64)] = (0..<6).map { i in
+                (now.addingTimeInterval(Double(i - 6) * 43_200),
+                 Int64([2.1, 0.4, 3.4, 1.2, 0.8, 4.8][i] * 1_000_000_000))
+            }
+            _totals = State(initialValue: HistoryStore.Totals(
+                runs: 12, permanentBytes: 38_400_000_000, trashBytes: 1_200_000_000,
+                itemCount: 214, lastRun: now.addingTimeInterval(-3600 * 5),
+                recentRuns: spark))
+        }
+    }
 
     var body: some View {
         ScrollView {
@@ -35,7 +66,10 @@ struct HomeView: View {
         .background(Airi.pageBackground.opacity(0.001))
         .onAppear {
             disk = DiskInfo.snapshot()
-            ai = AISettings.load()
+            // Probe renders keep the demo provider — the real roster (and
+            // whatever custom endpoint is configured) must not ship in a
+            // screenshot.
+            if !Self.debugSeed { ai = AISettings.load() }
         }
         // Rollout enumeration reads every session file — keep it off the
         // main thread so the dashboard appears instantly.
@@ -96,7 +130,9 @@ struct HomeView: View {
     /// Time-of-day greeting over the user's macOS account name — the old
     /// "Hi Sean" was hardcoded to one user (and ignored renames of the pet).
     private var greeting: String {
-        let userName = NSFullUserName().split(separator: " ").first.map(String.init) ?? "there"
+        let userName = Self.debugUserName
+            ?? NSFullUserName().split(separator: " ").first.map(String.init)
+            ?? "there"
         let hour = Calendar.current.component(.hour, from: Date())
         let timeKey: String
         switch hour {

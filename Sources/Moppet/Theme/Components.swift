@@ -554,10 +554,16 @@ struct ToggleRow: View {
                 }
             }
             Spacer()
-            Toggle("", isOn: $isOn)
-                .toggleStyle(.switch)
-                .controlSize(.small)
-                .labelsHidden()
+            if ProbeRendering.enabled {
+                // macOS 26 NSSwitch paints no ON fill into an offscreen layer
+                // tree — draw the stand-in so probe renders read truthfully.
+                ProbeSwitch(isOn: isOn, tint: Airi.primary)
+            } else {
+                Toggle("", isOn: $isOn)
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .labelsHidden()
+            }
         }
         .padding(.horizontal, 6)
         .padding(.vertical, 4)

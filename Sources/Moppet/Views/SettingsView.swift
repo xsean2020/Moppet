@@ -133,7 +133,7 @@ struct SettingsView: View {
                                 .strokeBorder(Airi.neutral200, lineWidth: 2)
                         )
                     Text(String(format: L("Written to %@. Prepend-style: it becomes the first section of the agent's system prompt on every turn. Markdown supported."),
-                                PetIdentity.personaFile.path))
+                                PetIdentity.personaFile.path.replacingOccurrences(of: NSHomeDirectory(), with: "~")))
                         .font(Airi.caption2Font)
                         .foregroundStyle(Airi.neutral400)
                         .textSelection(.enabled)

@@ -67,26 +67,26 @@
 
 ## 界面一览
 
-```
-┌───────────────────────────────┐            ┌──────────────────────────────┐
-│  Moppet                       │            │  桌宠（透明置顶浮层，右下角）  │
-│  ┌─────────┬─────────────────┐│            │                              │
-│  │ 侧栏     │  磁盘环          ││            │      「找到 612 MB 🧹」       │
-│  │          │                 ││            │        ╭──────╮              │
-│  │ 总览      │  快捷卡 × 4      ││            │        │ (◍˃ᗜ˂◍) │ ← 3D 角色   │
-│  │ 清理      │                 ││            │        ╰──────╯              │
-│  │ 卸载      │  状态胶囊        ││            │                              │
-│  │ 优化      │                 ││            │  单击=快捷输入条  双击=聊天窗  │
-│  │ 启动项    │                 ││            └──────────────────────────────┘
-│  │ 分析 …    │                 ││
-│  └─────────┴─────────────────┘│            ┌──────────────────────────────┐
-└───────────────────────────────┘            │  聊天窗 = 桌宠的完整对话       │
-                                             │  你：帮我看看什么占了空间        │
-┌───────────────────────────────┐            │  Moppet：先扫描 → 报结果       │
-│  外部 MCP 客户端                │            │        → 等你批准 → 执行       │
-│  Claude Code / Cursor / Codex  │──┐         └──────────────────────────────┘
-└───────────────────────────────┘  └────────▶ 同一套 31 个工具、同一套安全门控
-```
+以下截图由 `--probe-window` / `--probe-pet-shot` 离屏渲染探针直接从真实视图生成（深色外观、中文界面；账户名、AI 供应商、清理统计与启动项列表为演示数据，磁盘与系统指标为本机实况），构建即可复现：
+
+| ![总览](assets/screenshots/dashboard.png) | ![缓存清理](assets/screenshots/clean.png) |
+|:---:|:---:|
+| **总览** — 磁盘环、快捷卡、累计清理统计 | **缓存清理** — 4 分区 24 条规则，勾选即扫描范围 |
+| ![状态](assets/screenshots/status.png) | ![空间大户](assets/screenshots/spacehogs.png) |
+| **状态** — CPU/内存/磁盘/电池四象限，点象限看详情 | **空间大户** — APFS 快照 / Docker / Homebrew，只读项不删 |
+| ![启动项](assets/screenshots/startup.png) | ![优化](assets/screenshots/optimize.png) |
+| **启动项** — 开关式启停，可逆、不删文件 | **优化** — 8 项维护任务，管理员项带锁标 |
+
+<p align="center">
+  <img src="assets/screenshots/settings.png" width="440" alt="设置" /><br/>
+  <b>设置</b> — 宠物身份 / 语言 / 定时清理 / 桌宠偏好
+</p>
+
+<p align="center">
+  <img src="assets/screenshots/pet.png" width="150" alt="桌宠" /><br/>
+  <b>桌宠 Moley</b> — 程序化 SceneKit 3D 角色（不依赖任何模型文件），蹲在桌面右下角，
+  单击说话、双击开聊天窗、AI 删除前头顶弹审批卡
+</p>
 
 界面设计遵循三条硬规则：**跟随系统外观**（不钉浅色/深色，靠动态 token 保证两种模式都可读）、**卡片式分区**（12pt 圆角 + 1px 描边 + 柔和投影）、**数字与进度都有动效**（环形进度弹簧插值、数字滚动）。
 
@@ -146,6 +146,8 @@ swift run Moppet --brain-exec "清理浏览器缓存并报告" --yes  # 自动�
 | `--probe-models` | 用当前订阅 token 拉取模型目录，打印 HTTP 状态与原始响应 |
 | `--probe-floater` | 离屏渲染浮层配色，验证动态 token 在无边框面板里的解析结果 |
 | `--probe-render` | 离屏渲染页面为 PNG（`--probe-render clean\|optimize\|status\|spacehogs\|startup\|settings <png> [light\|dark] [expanded] [h=1500]`），无录屏权限也能检查布局；`h=` 用于渲染长页面（默认 860 会裁掉下半截） |
+| `--probe-window` | 离屏渲染**完整窗口**为 PNG（`--probe-window dashboard\|clean\|optimize\|status\|spacehogs\|startup\|settings <png> [light\|dark] [expanded] [h=N]`）：真实侧栏 + 真实页面组合，README 截图即出自它 |
+| `--probe-pet-shot` | 离屏渲染程序化桌宠为透明 PNG（`--probe-pet-shot <png> [width height]`），`SCNView.snapshot()` 直出，无需录屏权限 |
 | `--route-perf` | 依次切换全部路由，打印每次提交/渲染耗时（排查卡顿） |
 | `--win-debug` | 每 4 秒输出窗口 frame / visible / occlusion / key / firstResponder |
 
@@ -460,7 +462,8 @@ Sources/Moppet/                     93 个 Swift 文件 / ~33k 行
 │   ├── QuickChat.swift             快捷输入面板（一次性 agent 会话）
 │   ├── ScrollbarTuner.swift        全应用极细滚动条（hover/滚动淡入）
 │   ├── TextFocus.swift             输入焦点时序助手（IME 安全）
-│   └── AnalyzeRenderProbe.swift    --render-probe 离屏渲染自检
+│   ├── AnalyzeRenderProbe.swift    --render-probe 离屏渲染自检
+│   └── PetShotProbe.swift          --probe-pet-shot 桌宠离屏渲染
 ├── Brain/
 │   ├── BrainAgent.swift            循环、压缩、会话、MCP 连接、事件广播
 │   ├── BrainTools.swift            shell / read_file / apply_patch / exec / plan / 提问 + 清理工具桥接
@@ -533,8 +536,8 @@ $ swift run Moppet --brain-smoke
 |---|---|
 | `--smoke`（237） | 安全判定与 glob、规则库完整性、JSON 往返、磁盘/系统指标、工具注册表与破坏性门控、确认 token、缓存失效、补丁边界（删工作区根 / 无锚点 hunk / 两阶段）、勾选持久化与扫描范围、压缩配对安全、快照/Docker/brew 解析器、孤残分类规则、定时 LaunchAgent plist、CSV/JSON 导出、分层批量删除（直删/展开两层、符号链接目标不受伤、白名单子树保护） |
 | `--brain-smoke`（226） | apply_patch 真实文件操作、Seatbelt 沙箱三档、脚本化模型驱动的多轮循环、rollout 恢复、MCP 客户端往返、exec 会话 stdin、图片项、无头提问回落、斜杠命令 |
-| MCP | `initialize` → `tools/list`（29）→ `scan_clean` 真实结果 → 无 `confirmed` 被拒 → `safety_check` DENIED |
-| HTTP | 只监听 `127.0.0.1`，`tools/list` 返回 29 |
+| MCP | `initialize` → `tools/list`（31）→ `scan_clean` 真实结果 → 无 `confirmed` 被拒 → `safety_check` DENIED |
+| HTTP | 只监听 `127.0.0.1`，`tools/list` 返回 31 |
 | 架构 | `swift build --triple arm64-apple-macosx14.0` 与 `x86_64-apple-macosx14.0` 均全量交叉编译通过 |
 
 ---
@@ -554,7 +557,7 @@ $ swift run Moppet --brain-smoke
 
 - [x] 14 个清理模块（含启动项、瘦身、孤立残留、空间大户、大文件）
 - [x] Codex agent 能力移植（循环/沙箱/审批/补丁/会话/压缩/MCP）
-- [x] MCP 服务器（stdio + 回环 HTTP，29 工具）
+- [x] MCP 服务器（stdio + 回环 HTTP，31 工具）
 - [x] 扫描范围持久化（Clean / 快速扫描 / AI 三入口一致）
 - [x] ChatGPT 订阅登录 + token 自动续期
 - [x] 大文件专用 UI（Top N + 最小体积/范围筛选 + 受保护标记）
@@ -611,7 +614,7 @@ swift run Moppet --smoke && swift run Moppet --brain-smoke
 
 ### Moppet
 
-A native macOS cleaner that also talks. **14 cleaning modules** (dashboard, clean, orphans, uninstall, purge, slim, space hogs, large files, optimize, startup items, status, analyze, history, settings) plus a **Codex-class coding agent** living in a 3D desktop pet, plus a **29-tool MCP server** so Claude Code / Cursor / Codex can drive the same cleaning engine.
+A native macOS cleaner that also talks. **14 cleaning modules** (dashboard, clean, orphans, uninstall, purge, slim, space hogs, large files, optimize, startup items, status, analyze, history, settings) plus a **Codex-class coding agent** living in a 3D desktop pet, plus a **31-tool MCP server** so Claude Code / Cursor / Codex can drive the same cleaning engine.
 
 Zero WebView, zero Electron, zero cloud: it cleans fine offline; AI only joins when you configure a provider.
 

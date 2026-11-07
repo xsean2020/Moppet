@@ -29,7 +29,8 @@ struct MoppetApp: App {
                                        "--net-report", "--net-trend", "--net-checkup",
                                        "--processes", "--interval", "--app-path",
                                        "--weekday", "--hour",
-                                       "--route-perf", "--win-debug", "--scheduled-clean"]
+                                       "--route-perf", "--win-debug", "--scheduled-clean",
+                                       "--probe-pet-shot", "--probe-window"]
         let args = CommandLine.arguments
         // A bare "--" is the conventional separator (`swift run Moppet -- --smoke`)
         // and must not count as an unknown flag.
@@ -178,6 +179,40 @@ struct MoppetApp: App {
         // Floater color diagnostics: see Airi.probeFloaterColors.
         if args.contains("--probe-floater") {
             Airi.probeFloaterColors()
+        }
+        // Pet character render: `--probe-pet-shot <png> [width height]` writes
+        // a transparent PNG of the procedural SceneKit pet offscreen (no
+        // screen-recording grant; see PetShotProbe).
+        if let index = args.firstIndex(of: "--probe-pet-shot") {
+            let output = args.count > index + 1 ? args[index + 1] : "/tmp/moppet-pet.png"
+            let width = args.count > index + 2 ? (CGFloat(Double(args[index + 2]) ?? 460)) : 460
+            let height = args.count > index + 3 ? (CGFloat(Double(args[index + 3]) ?? 540)) : 540
+            Task { @MainActor in
+                PetShotProbe.run(outputPath: output, width: width, height: height)
+            }
+        }
+        // Full-window render: `--probe-window <page> <png> [light|dark] [h=N]`
+        // draws the real sidebar beside the real page — the README gallery
+        // format (see WindowRenderProbe).
+        if let index = args.firstIndex(of: "--probe-window") {
+            guard args.count > index + 2 else {
+                FileHandle.standardError.write(
+                    Data("error: --probe-window needs <page> <png>\n".utf8))
+                exit(2)
+            }
+            let page = args[index + 1]
+            let output = args[index + 2]
+            let appearance = args.count > index + 3 ? args[index + 3] : "light"
+            let height = args.compactMap { arg -> CGFloat? in
+                guard arg.hasPrefix("h=") else { return nil }
+                return CGFloat(Double(arg.dropFirst(2)) ?? 0)
+            }.first ?? 820
+            let expand = args.contains("expanded")
+            Task { @MainActor in
+                WindowRenderProbe.run(page: page, outputPath: output,
+                                      appearance: appearance, height: height,
+                                      expandFirst: expand)
+            }
         }
         // Subscription backend diagnostics: `Moppet --probe-models` dumps
         // GET {codex backend}/models with the stored token.

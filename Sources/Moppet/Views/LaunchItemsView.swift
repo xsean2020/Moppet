@@ -272,17 +272,14 @@ struct LaunchItemsView: View {
             make("com.docker.socket",
                  "/Applications/Docker.app/Contents/MacOS/com.docker.socket",
                  .globalDaemons),
-            make("com.google.keystone.agent",
-                 "/Users/sean/Library/Google/GoogleSoftwareUpdate/GoogleSoftwareUpdate.bundle/Contents/MacOS/GoogleSoftwareUpdate",
-                 .userAgents),
             make("com.microsoft.update.agent",
                  "/Library/Application Support/Microsoft/MAU2.0/Microsoft AutoUpdate.app",
                  .globalAgents, disabled: true),
-            make("com.qiuyuzhou.shadowsocksX-NG.http",
-                 "/Applications/ShadowsocksX-NG.app/Contents/MacOS/ShadowsocksX-NG",
+            make("com.jetbrains.toolbox",
+                 "/Applications/JetBrains Toolbox.app",
                  .userAgents),
-            make("com.qiuyuzhou.shadowsocksX-NG.local",
-                 "/Applications/ShadowsocksX-NG.app/Contents/MacOS/ShadowsocksX-NG",
+            make("com.dropbox.DropboxMacOffice.agent",
+                 "/Applications/Dropbox.app/Contents/MacOS/Dropbox",
                  .userAgents),
             make("com.apple.SafariHistoryServiceAgent",
                  "/System/Applications/Safari.app",
@@ -290,9 +287,6 @@ struct LaunchItemsView: View {
             make("homebrew.mxcl.dnsmasq",
                  "/opt/homebrew/opt/dnsmasq/bin/dnsmasq",
                  .globalDaemons, disabled: true, keepAlive: false),
-            make("com.jetbrains.toolbox",
-                 "/Applications/JetBrains Toolbox.app",
-                 .userAgents)
         ]
     }
 }
@@ -344,7 +338,7 @@ private struct LaunchItemRow: View {
                             .help(L("Needs an administrator password to change"))
                     }
                 }
-                Text("\(item.label) · \(item.path)")
+                Text("\(item.label) · \(item.path.replacingOccurrences(of: NSHomeDirectory(), with: "~"))")
                     .font(Airi.monoCaption2Font)
                     .foregroundStyle(Airi.neutral500)
                     .lineLimit(1)
@@ -358,13 +352,22 @@ private struct LaunchItemRow: View {
                 if isBusy {
                     ProgressView().controlSize(.small)
                 }
-                Toggle("", isOn: binding)
-                    .toggleStyle(.switch)
-                    .controlSize(.small)
-                    .labelsHidden()
-                    .tint(Airi.primary)
-                    .disabled(isBusy)
-                    .accessibilityLabel(Text(item.displayName))
+                if ProbeRendering.enabled {
+                    // macOS 26 NSSwitch paints no ON fill into an offscreen
+                    // layer tree — draw the stand-in so probe renders show
+                    // the real enabled/disabled state.
+                    ProbeSwitch(isOn: isOn, tint: Airi.primary)
+                        .opacity(isBusy ? 0.5 : 1)
+                        .accessibilityLabel(Text(item.displayName))
+                } else {
+                    Toggle("", isOn: binding)
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                        .labelsHidden()
+                        .tint(Airi.primary)
+                        .disabled(isBusy)
+                        .accessibilityLabel(Text(item.displayName))
+                }
             }
             .frame(width: 60, alignment: .trailing)
         }

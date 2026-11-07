@@ -544,7 +544,7 @@ struct SystemHogsView: View {
                     .lineLimit(1)
                 Text(report.needsFullDiskAccess
                      ? L("Needs Full Disk Access to measure")
-                     : report.path)
+                     : report.path.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
                     .font(Airi.caption2Font)
                     .foregroundStyle(report.needsFullDiskAccess ? Airi.warningStrong : Airi.neutral400)
                     .lineLimit(1)

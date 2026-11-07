@@ -13,6 +13,7 @@ enum HomeRenderProbe {
 
     static func run(outputPath: String, appearance: String = "light",
                     width: CGFloat = 780, height: CGFloat = 640) {
+        ProbeRendering.enabled = true   // NSSwitch paints no ON fill offscreen
         let size = NSSize(width: width, height: height)
         let window = NSWindow(
             contentRect: NSRect(origin: .zero, size: size),
@@ -23,6 +24,8 @@ enum HomeRenderProbe {
         // Real window: the glass sits on the app's page background. Offscreen
         // the NSWindow default is white, which made every dark-mode render
         // look washed out, so paint the page colour behind the dashboard.
+        HomeView.debugSeed = true   // .task never fires in an invisible window
+        HomeView.debugUserName = "Alex"  // never ship the local account name
         let host = NSHostingView(rootView: ZStack {
             Airi.pageBackground
             HomeView(navigate: { _ in }, openChat: {})
