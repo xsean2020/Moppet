@@ -1,0 +1,210 @@
+import Foundation
+import AISDKProvider
+import AISDKProviderUtils
+
+@usableFromInline
+@Sendable func defaultAnthropicId() -> String {
+    UUID().uuidString
+}
+
+private let anthropicHTTPSRegex: NSRegularExpression = {
+    try! NSRegularExpression(pattern: "^https?://.*$", options: [.caseInsensitive])
+}()
+
+private let anthropicAPIURL = "https://api.anthropic.com"
+private let anthropicVersionedAPIURL = "\(anthropicAPIURL)/v1"
+
+private func normalizeAnthropicBaseURL(_ baseURL: String?) -> String? {
+    let normalized = withoutTrailingSlash(baseURL)
+    return normalized == anthropicAPIURL ? anthropicVersionedAPIURL : normalized
+}
+
+public struct AnthropicProviderSettings: Sendable {
+    public var baseURL: String?
+    public var apiKey: String?
+    public var authToken: String?
+    public var headers: [String: String]?
+    public var fetch: FetchFunction?
+    public var generateId: @Sendable () -> String
+    public var name: String?
+
+    public init(
+        baseURL: String? = nil,
+        apiKey: String? = nil,
+        authToken: String? = nil,
+        headers: [String: String]? = nil,
+        fetch: FetchFunction? = nil,
+        generateId: @escaping @Sendable () -> String = defaultAnthropicId,
+        name: String? = nil
+    ) {
+        self.baseURL = baseURL
+        self.apiKey = apiKey
+        self.authToken = authToken
+        self.headers = headers
+        self.fetch = fetch
+        self.generateId = generateId
+        self.name = name
+    }
+}
+
+public final class AnthropicProvider: ProviderV4 {
+    private let makeMessagesModel: @Sendable (AnthropicMessagesModelId) -> AnthropicMessagesLanguageModel
+    private let makeFilesAPI: @Sendable () -> any FilesV4
+    private let makeSkillsAPI: @Sendable () -> any SkillsV4
+    public let tools: AnthropicTools
+
+    init(
+        makeMessagesModel: @escaping @Sendable (AnthropicMessagesModelId) -> AnthropicMessagesLanguageModel,
+        makeFilesAPI: @escaping @Sendable () -> any FilesV4,
+        makeSkillsAPI: @escaping @Sendable () -> any SkillsV4,
+        tools: AnthropicTools
+    ) {
+        self.makeMessagesModel = makeMessagesModel
+        self.makeFilesAPI = makeFilesAPI
+        self.makeSkillsAPI = makeSkillsAPI
+        self.tools = tools
+    }
+
+    public func languageModel(modelId: String) throws -> any LanguageModelV4 {
+        makeMessagesModel(AnthropicMessagesModelId(rawValue: modelId))
+    }
+
+    public func languageModel(_ modelId: String) throws -> any LanguageModelV4 {
+        try languageModel(modelId: modelId)
+    }
+
+    public func chat(_ modelId: String) -> AnthropicMessagesLanguageModel {
+        chat(modelId: AnthropicMessagesModelId(rawValue: modelId))
+    }
+
+    public func messages(_ modelId: String) -> AnthropicMessagesLanguageModel {
+        messages(modelId: AnthropicMessagesModelId(rawValue: modelId))
+    }
+
+    public func chatModel(modelId: String) throws -> any LanguageModelV4 {
+        makeMessagesModel(AnthropicMessagesModelId(rawValue: modelId))
+    }
+
+    public func chat(modelId: AnthropicMessagesModelId) -> AnthropicMessagesLanguageModel {
+        makeMessagesModel(modelId)
+    }
+
+    public func messages(modelId: AnthropicMessagesModelId) -> AnthropicMessagesLanguageModel {
+        makeMessagesModel(modelId)
+    }
+
+    public func embeddingModel(modelId: String) throws -> any EmbeddingModelV4 {
+        throw NoSuchModelError(modelId: modelId, modelType: .embeddingModel)
+    }
+
+    public func imageModel(modelId: String) throws -> any ImageModelV4 {
+        throw NoSuchModelError(modelId: modelId, modelType: .imageModel)
+    }
+
+    public func files() -> (any FilesV4)? {
+        makeFilesAPI()
+    }
+
+    public func skills() -> (any SkillsV4)? {
+        makeSkillsAPI()
+    }
+}
+
+public func createAnthropic(settings: AnthropicProviderSettings = .init()) -> AnthropicProvider {
+    let baseURL = normalizeAnthropicBaseURL(
+        loadOptionalSetting(settingValue: settings.baseURL, environmentVariableName: "ANTHROPIC_BASE_URL")
+    ) ?? anthropicVersionedAPIURL
+
+    let providerName = settings.name ?? "anthropic.messages"
+
+    let headersClosure: @Sendable () throws -> [String: String?] = {
+        if let apiKey = settings.apiKey, !apiKey.isEmpty,
+           let authToken = settings.authToken, !authToken.isEmpty {
+            throw InvalidArgumentError(
+                argument: "apiKey/authToken",
+                message: "Both apiKey and authToken were provided. Please use only one authentication method."
+            )
+        }
+
+        let authToken = settings.authToken.flatMap { $0.isEmpty ? nil : $0 }
+        _ = try validateBaseURL(baseURL)
+
+        var baseHeaders: [String: String?] = [
+            "anthropic-version": "2023-06-01"
+        ]
+
+        if let authToken {
+            baseHeaders["Authorization"] = "Bearer \(authToken)"
+        } else {
+            // Lazily load API key on first request to mirror upstream behavior.
+            let apiKey = try loadAPIKey(
+                apiKey: settings.apiKey,
+                environmentVariableName: "ANTHROPIC_API_KEY",
+                description: "Anthropic"
+            )
+            baseHeaders["x-api-key"] = apiKey
+        }
+
+        if let custom = settings.headers {
+            for (key, value) in custom {
+                baseHeaders[key] = value
+            }
+        }
+
+        let userAgentHeaders = withUserAgentSuffix(baseHeaders, "ai-sdk-anthropic/\(ANTHROPIC_VERSION)")
+        return userAgentHeaders.mapValues { Optional($0) }
+    }
+
+    let supportedURLs: @Sendable () -> [String: [NSRegularExpression]] = {
+        [
+            "image/*": [anthropicHTTPSRegex],
+            "application/pdf": [anthropicHTTPSRegex],
+        ]
+    }
+
+    let config = AnthropicMessagesConfig(
+        provider: providerName,
+        baseURL: baseURL,
+        headers: headersClosure,
+        fetch: settings.fetch,
+        supportedUrls: supportedURLs,
+        generateId: settings.generateId
+    )
+
+    let messagesFactory: @Sendable (AnthropicMessagesModelId) -> AnthropicMessagesLanguageModel = { modelId in
+        AnthropicMessagesLanguageModel(modelId: modelId, config: config)
+    }
+
+    let filesFactory: @Sendable () -> any FilesV4 = {
+        AnthropicFiles(config: .init(
+            provider: providerName,
+            baseURL: baseURL,
+            headers: headersClosure,
+            fetch: settings.fetch
+        ))
+    }
+
+    let skillsFactory: @Sendable () -> any SkillsV4 = {
+        AnthropicSkills(config: .init(
+            provider: providerName.replacingOccurrences(of: ".messages", with: "") + ".skills",
+            baseURL: baseURL,
+            headers: headersClosure,
+            fetch: settings.fetch
+        ))
+    }
+
+    return AnthropicProvider(
+        makeMessagesModel: messagesFactory,
+        makeFilesAPI: filesFactory,
+        makeSkillsAPI: skillsFactory,
+        tools: anthropicTools
+    )
+}
+
+public extension AnthropicProvider {
+    func callAsFunction(_ modelId: String) throws -> any LanguageModelV4 {
+        try languageModel(modelId: modelId)
+    }
+}
+
+public let anthropic = createAnthropic()

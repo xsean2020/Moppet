@@ -1,0 +1,267 @@
+import Foundation
+import AISDKProvider
+import AISDKProviderUtils
+import OpenAICompatibleProvider
+
+public typealias TogetherAIErrorData = OpenAICompatibleErrorData
+
+//===----------------------------------------------------------------------===//
+//=== Upstream Reference ====================================================//
+//===----------------------------------------------------------------------===//
+// Ported from packages/togetherai/src/togetherai-provider.ts
+// Upstream commit: f3a72bc2a
+//===----------------------------------------------------------------------===//
+
+public struct TogetherAIProviderSettings: Sendable {
+    public var apiKey: String?
+    public var baseURL: String?
+    public var headers: [String: String]?
+    public var fetch: FetchFunction?
+
+    public init(
+        apiKey: String? = nil,
+        baseURL: String? = nil,
+        headers: [String: String]? = nil,
+        fetch: FetchFunction? = nil
+    ) {
+        self.apiKey = apiKey
+        self.baseURL = baseURL
+        self.headers = headers
+        self.fetch = fetch
+    }
+}
+
+private func deprecatedTogetherAIKey() -> String? {
+    let environment = ProcessInfo.processInfo.environment
+    guard environment["TOGETHER_API_KEY"] == nil else { return nil }
+    let key = environment["TOGETHER_AI_API_KEY"]
+    if key != nil {
+        FileHandle.standardError.write(Data("TOGETHER_AI_API_KEY is deprecated and will be removed in a future release. Please use TOGETHER_API_KEY instead.\n".utf8))
+    }
+    return key
+}
+
+private func createTogetherAIAuthFetch(
+    apiKey: String?,
+    customFetch: FetchFunction?
+) -> FetchFunction {
+    let baseFetch = customFetch ?? defaultFetchFunction()
+
+    return { request in
+        var modified = request
+        var headers = modified.allHTTPHeaderFields ?? [:]
+
+        let resolved = try loadAPIKey(
+            apiKey: apiKey ?? deprecatedTogetherAIKey(),
+            environmentVariableName: "TOGETHER_API_KEY",
+            description: "TogetherAI"
+        )
+
+        let hasAuthorization = headers.keys.contains { $0.lowercased() == "authorization" }
+        if !hasAuthorization {
+            headers["Authorization"] = "Bearer \(resolved)"
+            modified.allHTTPHeaderFields = headers
+        }
+
+        return try await baseFetch(modified)
+    }
+}
+
+public final class TogetherAIProvider: ProviderV4 {
+    private let chatFactory: @Sendable (TogetherAIChatModelId) -> OpenAICompatibleChatLanguageModel
+    private let completionFactory: @Sendable (TogetherAICompletionModelId) -> OpenAICompatibleCompletionLanguageModel
+    private let embeddingFactory: @Sendable (TogetherAIEmbeddingModelId) -> OpenAICompatibleEmbeddingModel
+    private let imageFactory: @Sendable (TogetherAIImageModelId) -> TogetherAIImageModel
+    private let rerankingFactory: @Sendable (TogetherAIRerankingModelId) -> TogetherAIRerankingModel
+
+    init(
+        chatFactory: @escaping @Sendable (TogetherAIChatModelId) -> OpenAICompatibleChatLanguageModel,
+        completionFactory: @escaping @Sendable (TogetherAICompletionModelId) -> OpenAICompatibleCompletionLanguageModel,
+        embeddingFactory: @escaping @Sendable (TogetherAIEmbeddingModelId) -> OpenAICompatibleEmbeddingModel,
+        imageFactory: @escaping @Sendable (TogetherAIImageModelId) -> TogetherAIImageModel,
+        rerankingFactory: @escaping @Sendable (TogetherAIRerankingModelId) -> TogetherAIRerankingModel
+    ) {
+        self.chatFactory = chatFactory
+        self.completionFactory = completionFactory
+        self.embeddingFactory = embeddingFactory
+        self.imageFactory = imageFactory
+        self.rerankingFactory = rerankingFactory
+    }
+
+    public func languageModel(modelId: String) throws -> any LanguageModelV4 {
+        chatFactory(TogetherAIChatModelId(rawValue: modelId))
+    }
+
+    public func chatModel(modelId: String) throws -> any LanguageModelV4 {
+        try languageModel(modelId: modelId)
+    }
+
+    public func completionModel(modelId: String) throws -> any LanguageModelV4 {
+        completionFactory(TogetherAICompletionModelId(rawValue: modelId))
+    }
+
+    public func embeddingModel(modelId: String) throws -> any EmbeddingModelV4 {
+        embeddingFactory(TogetherAIEmbeddingModelId(rawValue: modelId))
+    }
+
+    public func imageModel(modelId: String) throws -> any ImageModelV4 {
+        imageFactory(TogetherAIImageModelId(rawValue: modelId))
+    }
+
+    public func rerankingModel(modelId: String) throws -> (any RerankingModelV4)? {
+        rerankingFactory(TogetherAIRerankingModelId(rawValue: modelId))
+    }
+
+    public func callAsFunction(_ modelId: String) throws -> any LanguageModelV4 {
+        try languageModel(modelId: modelId)
+    }
+
+    public func chat(modelId: TogetherAIChatModelId) -> OpenAICompatibleChatLanguageModel {
+        chatFactory(modelId)
+    }
+
+    public func chat(_ modelId: TogetherAIChatModelId) -> OpenAICompatibleChatLanguageModel {
+        chat(modelId: modelId)
+    }
+
+    public func completion(modelId: TogetherAICompletionModelId) -> OpenAICompatibleCompletionLanguageModel {
+        completionFactory(modelId)
+    }
+
+    public func completion(_ modelId: TogetherAICompletionModelId) -> OpenAICompatibleCompletionLanguageModel {
+        completion(modelId: modelId)
+    }
+
+    public func embedding(modelId: TogetherAIEmbeddingModelId) -> OpenAICompatibleEmbeddingModel {
+        embeddingFactory(modelId)
+    }
+
+    public func embedding(_ modelId: TogetherAIEmbeddingModelId) -> OpenAICompatibleEmbeddingModel {
+        embedding(modelId: modelId)
+    }
+
+    public func image(modelId: TogetherAIImageModelId) -> TogetherAIImageModel {
+        imageFactory(modelId)
+    }
+
+    public func image(_ modelId: TogetherAIImageModelId) -> TogetherAIImageModel {
+        image(modelId: modelId)
+    }
+
+    public func reranking(modelId: TogetherAIRerankingModelId) -> TogetherAIRerankingModel {
+        rerankingFactory(modelId)
+    }
+
+    public func reranking(_ modelId: TogetherAIRerankingModelId) -> TogetherAIRerankingModel {
+        reranking(modelId: modelId)
+    }
+}
+
+public func createTogetherAI(settings: TogetherAIProviderSettings = .init()) -> TogetherAIProvider {
+    let baseURL = withoutTrailingSlash(settings.baseURL) ?? "https://api.together.xyz/v1"
+
+    let headersClosure: @Sendable () -> [String: String] = {
+        var computed: [String: String?] = [:]
+
+        if let customHeaders = settings.headers {
+            for (key, value) in customHeaders {
+                computed[key] = value
+            }
+        }
+
+        return withUserAgentSuffix(
+            computed.compactMapValues { $0 },
+            "ai-sdk-togetherai/\(TOGETHERAI_VERSION)"
+        )
+    }
+
+    let optionalHeadersClosure: @Sendable () -> [String: String?] = {
+        headersClosure().mapValues { Optional($0) }
+    }
+
+    let fetch = createTogetherAIAuthFetch(
+        apiKey: settings.apiKey,
+        customFetch: settings.fetch
+    )
+
+    let urlBuilder: @Sendable (OpenAICompatibleURLOptions) -> String = { options in
+        "\(baseURL)\(options.path)"
+    }
+
+    let chatFactory: @Sendable (TogetherAIChatModelId) -> OpenAICompatibleChatLanguageModel = { modelId in
+        let config = OpenAICompatibleChatConfig(
+            provider: "togetherai.chat",
+            headers: headersClosure,
+            url: urlBuilder,
+            fetch: fetch,
+            includeUsage: true,
+            supportsStructuredOutputs: modelId.rawValue == "deepseek-ai/DeepSeek-V4-Flash-0731"
+        )
+        return OpenAICompatibleChatLanguageModel(
+            modelId: OpenAICompatibleChatModelId(rawValue: modelId.rawValue),
+            config: config
+        )
+    }
+
+    let completionFactory: @Sendable (TogetherAICompletionModelId) -> OpenAICompatibleCompletionLanguageModel = { modelId in
+        let config = OpenAICompatibleCompletionConfig(
+            provider: "togetherai.completion",
+            headers: headersClosure,
+            url: urlBuilder,
+            fetch: fetch,
+            includeUsage: true
+        )
+        return OpenAICompatibleCompletionLanguageModel(
+            modelId: OpenAICompatibleCompletionModelId(rawValue: modelId.rawValue),
+            config: config
+        )
+    }
+
+    let embeddingFactory: @Sendable (TogetherAIEmbeddingModelId) -> OpenAICompatibleEmbeddingModel = { modelId in
+        let config = OpenAICompatibleEmbeddingConfig(
+            provider: "togetherai.embedding",
+            url: urlBuilder,
+            headers: headersClosure,
+            fetch: fetch
+        )
+        return OpenAICompatibleEmbeddingModel(
+            modelId: OpenAICompatibleEmbeddingModelId(rawValue: modelId.rawValue),
+            config: config
+        )
+    }
+
+    let imageFactory: @Sendable (TogetherAIImageModelId) -> TogetherAIImageModel = { modelId in
+        TogetherAIImageModel(
+            modelId: modelId,
+            config: TogetherAIImageModelConfig(
+                provider: "togetherai.image",
+                baseURL: baseURL,
+                headers: optionalHeadersClosure,
+                fetch: fetch
+            )
+        )
+    }
+
+    let rerankingFactory: @Sendable (TogetherAIRerankingModelId) -> TogetherAIRerankingModel = { modelId in
+        TogetherAIRerankingModel(
+            modelId: modelId,
+            config: TogetherAIRerankingModel.Config(
+                provider: "togetherai.reranking",
+                baseURL: baseURL,
+                headers: optionalHeadersClosure,
+                fetch: fetch
+            )
+        )
+    }
+
+    return TogetherAIProvider(
+        chatFactory: chatFactory,
+        completionFactory: completionFactory,
+        embeddingFactory: embeddingFactory,
+        imageFactory: imageFactory,
+        rerankingFactory: rerankingFactory
+    )
+}
+
+
+public let togetherai = createTogetherAI()

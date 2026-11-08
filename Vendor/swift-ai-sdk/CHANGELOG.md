@@ -1,0 +1,563 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [0.20.0] - 2026-10-17
+
+Upstream parity release against Vercel AI SDK commit `8a5233b15b1e69573d63faee6cd0014559252ee4` (`ai@7.0.142`). Migration notes below cover changes since `v0.19.0`.
+
+### Breaking Changes
+- **Model inputs and provider contracts:** remove V2 and V3 protocols, model types, mocks, middleware, adapters, and overloads. All 36 provider modules now implement the current provider specification natively. Pass native models or string IDs directly, for example `model: openai("gpt-4o")` or `model: "openai/gpt-4o"`; versioned call-site wrappers are removed. Model/middleware authors still implement V4 protocols and use their concrete result types and fixtures such as `MockLanguageModelV4` and `MockImageModelV4`; embedding implementations use `EmbeddingModelV4` without a generic value type. User-facing helpers are unversioned: `customProvider`, `createProviderRegistry`, `globalDefaultProvider`, `withGlobalProvider`, `resolveLanguageModel` / `resolveEmbeddingModel` / the other `resolve*Model` functions, and `LanguageModelMiddlewareInput` replace their version-suffixed counterparts. Registry embedding lookup is `embeddingModel(id:)` instead of `textEmbeddingModel(id:)`. Low-level conversion helpers are `convertToLanguageModelPrompt`, `convertToLanguageModelMessage`, `prepareToolsAndToolChoice`, and `convertToFileData`; version-suffixed aliases are removed.
+- **Agents:** `Agent` is now a protocol. Replace `Agent(settings:)`, `AgentSettings`, and `BasicAgentSettings` with `ToolLoopAgent(...)` and `ToolLoopAgentSettings<CallOptions, OutputValue, PartialOutput>`. `BasicAgent` now means `ToolLoopAgent<Never, String, String>`. Use `id` instead of `name`, `instructions` instead of `system`, and the new lifecycle callbacks. `stream` and `respond` are `async throws`; agent calls take a string prompt, messages, or `AgentCallParameters` rather than `Prompt`. `respond(messages:options:ignoreIncompleteToolCalls:responseOptions:)` takes the agent's call options as `options` and the UI response options as `responseOptions`, and uses the input messages as `originalMessages` unless the stream options set them.
+- **Generation and prompts:** replace the removed `system:` argument/property with `instructions:` throughout text/object generation, prompts, step preparation, and tool-call repair. `instructions` uses the `Instructions` enum: string literals work directly, while computed `String` values require `.text(...)`; use `.messages(...)` for system-message arrays. System-role messages require `allowSystemInMessages: true`. `generateText` / `streamText` use `output`, `telemetry`, `activeTools`, `prepareStep`, `repairToolCall`, `download`, `transform`, and `include` instead of their former experimental labels. Replace `GenerateTextRequest` / `StreamTextRequest` and their request-object overloads with direct function arguments; replace `streamTextAsResponse` / `pipeStreamTextToResponse` with the corresponding methods on the stream result.
+- **Lifecycle and results:** replace `onStepFinish` with `onStepEnd` and `onFinish` with `onEnd`, including callback/event type names. UI message streams (`createUIMessageStream`, `handleUIMessageStreamFinish`, `UIMessageStreamOptions`) keep only `onStepEnd`/`onEnd` with `UIMessageStreamOnStepEndCallback`/`UIMessageStreamStepEndEvent` and `UIMessageStreamOnEndCallback`/`UIMessageStreamEndEvent`; the `onFinish`/`onStepFinish` parameters and `*Finish*` callback and event types are removed, and `createUIMessageStream` takes `generateId` after `onEnd`. Streaming `onEnd` receives one `StreamTextEndEvent` rather than four positional arguments; `onAbort` receives `GenerateTextAbortEvent`. Full-stream `finishStep` parts add performance data, and `toolInputStart` parts add input encoding/tool metadata; text content includes citations. Update associated-value patterns for these new fields. `onError` is an `async throws` closure returning `StreamTextOnErrorResult?`: observers must return `nil`, or return `.retry` to request a retry. `StreamTextTransform` now takes and returns `AsyncThrowingStream<TextStreamPart, Error>`, not `AsyncIterableStream`. The default unstructured output is now `String`; `output`, `partialOutputStream`, and `Output.text()` replace experimental output accessors, and `NoOutputSpecifiedError` is removed. Request bodies, request messages, response bodies, and raw stream chunks are retained only when requested through `include`; `includeRawChunks` is removed from text generation. Stop conditions are `async throws`; replace `stepCountIs` with `isStepCount`. `PreparedCallSettings` is replaced by `LanguageModelCallOptions`; `TimeoutConfiguration.configuration` adds first-chunk, tool, and per-tool timeouts, so exhaustive associated-value patterns must be updated.
+- **Multi-step results:** `generateText` and `streamText` now aggregate `content`, `files`, `sources`, tool calls/results (including their static/dynamic subsets), and `warnings` across all steps; `usage` equals `totalUsage`. For final-step data, use `result.finalStep.*` (`try await result.finalStep` when streaming). Text and reasoning still come from the final step.
+- **HTTP stream adapters:** `StreamTextResponseWriter` conformances must implement `isClosed`, `onClose(_:)` returning a listener-removal closure, and `write(_:) async throws` that awaits flush/drain and respects cancellation. Observe disconnects and propagate write failures. `createUIMessageStreamResponse` and `result.toUIMessageStreamResponse` now throw; call them with `try` and supply a concrete UI message type for their generic options.
+- **Streaming transcription ownership:** `fullStream` is a throwing, single-access property. Obtain and save it once with `try` before reading result properties, consume that saved stream, then await results; alternatively, read only the result properties and let them drain the stream. Accessing `fullStream` again throws `fullStreamAlreadyAccessed`; accessing it after any result property throws `resultAlreadyAccessed`.
+- **Removed text-stream helpers:** `collectText`, `readAllText`, `waitForFinish`, `stop`, `fullStreamIterable`, `textStreamIterable`, and `collectFullStream` are removed. Use `try await result.text`, `steps`, `totalUsage`, or `finalStep` for completed results; iterate `fullStream` / `textStream` directly or call `await result.consumeStream()` to drain. Cancel generation through the `abortSignal` passed in `CallSettings`, rather than `result.stop()`.
+- **Tools and approvals:** replace `ToolCallOptions` with `ToolExecutionOptions`. Tool descriptions use `ToolDescription`, and `toModelOutput` is now an `async throws` closure receiving `ToolModelOutputOptions` (or `TypedToolModelOutputOptions` for typed tools), not the output alone. Replace `experimentalContext` with `runtimeContext` / per-tool `toolsContext`; tool execution reads `options.context`. Replace `experimentalApprove` / `ApprovalAction` with `toolApproval` or each tool's `needsApproval`. Approval requests carry tool fingerprints and optional signatures (`toolApprovalSecret`); removed tool-result `title` fields are no longer serialized. `ToolResultOutput` now uses V4 content: replace `.media` with `.file(data:mediaType:filename:providerOptions:)` and move content-level provider options onto individual file/text parts. Provider tool factories are split into `createProviderDefinedToolFactory`, `createProviderDefinedToolFactoryWithOutputSchema`, and `createProviderExecutedToolFactory`, with matching option types.
+- **Telemetry:** remove `TelemetrySettings`, `LegacyOpenTelemetry`, and the old core span helpers. Implement the lifecycle-based `Telemetry` protocol, register integrations with `registerTelemetry(...)`, or pass `TelemetryOptions(integrations:)`. `OpenTelemetry(tracer:)` records GenAI semantic-convention spans and `gen_ai.*` attributes instead of the previous `ai.*` schema; dashboards and exporters must migrate. An available integration enables telemetry by default; per-call integrations replace global ones, `isEnabled: false` opts out, and runtime/tool context keys require explicit inclusion.
+- **Numeric contracts:** usage counters are `Int`, including `EmbeddingModelUsage.tokens`; a fractional or unrepresentable provider value leaves the normalized field `nil` (for embeddings, 0 tokens, as when usage is not reported) and the response still parses. Counters in requests (limits, dimensions, seed, `n`) are `Int`. Raw provider usage, provider metadata and continuous quantities keep numbers as received. Deprecated `LanguageModelUsage.reasoningTokens` and `cachedInputTokens` are removed; use `outputTokenDetails.reasoningTokens` and `inputTokenDetails.cacheReadTokens`.
+- **Object generation:** the `mode:` argument of `generateObject`, `generateObjectArray`, `streamObject`, `streamObjectArray` and `GenerateObjectOutput.object`/`.array`, the `GenerateObjectOutputSpec.mode` property and the `GenerateObjectJSONMode`/`GenerateObjectEnumMode` enums are removed; they never changed the request, which always asks for a JSON response format. Delete the argument. The object APIs take `allowSystemInMessages:` like `generateText`.
+- **Downloads:** `createDefaultDownloadFunction(downloadImpl:abortSignal:)` takes a `DownloadFileFunction` (default `createDownload()`), which receives the call's abort signal, instead of a `(URL) async throws -> (data, mediaType)` closure.
+- **Typed provider options:** `GoogleEmbeddingModelOptions.toDictionary()` returns `JSONObject` and preserves multimodal content; its `outputDimensionality` and Luma's `maxPollAttempts` are `Int` counts. Raw fractional or unrepresentable counts fail validation before an API job is created.
+- **Media results:** `DefaultGeneratedAudioFile` no longer inherits from `DefaultGeneratedFile`; its data/base64 initializers now throw while resolving media types. Use the `GeneratedAudioFile` / `GeneratedFile` protocols instead of relying on the former class hierarchy. `GenerateImageResult` now includes per-call results/metadata through `calls`; custom result conformances must supply them.
+- **MCP and stream conformances:** custom `MCPClient` implementations must provide the expanded server/initialization, tool listing/calling, tool-definition conversion, and completion surface; embedded resource cases include metadata/additional properties. `AsyncIterableStream.AsyncIterator` is now an owned iterator type rather than an `AsyncThrowingStream` iterator alias. `UIMessageStreamEndEvent` carries cancellation/outcome information and no longer conforms to `Equatable`.
+- **Streaming/UI:** `pipeUIMessageStreamToResponse` and its stream-result method are now `async throws`; call them with `try await` to observe write failures and completion. `convertToCoreMessages` is removed in favor of `convertToModelMessages`. UI tool calls, approval messages, validation, stream writer outcomes, and finish events follow the current V4/core contracts.
+- **Provider construction:** remove the redundant `create*Provider` factories for Alibaba, Anthropic, AssemblyAI, Baseten, Black Forest Labs, ByteDance, Cerebras, Cohere, DeepInfra, DeepSeek, Deepgram, ElevenLabs, Fal, Fireworks, Gateway, Gladia, Groq, Hugging Face, KlingAI, Luma, Mistral, MoonshotAI, Perplexity, Prodia, RevAI, TogetherAI, and xAI. Use `createAlibaba`, `createAnthropic`, etc.; xAI is `createXai`, RevAI is `createRevAI`. Use `createOpenAICompatible`, `createGoogle` instead of `createGoogleGenerativeAI`, and `createGoogleVertex` instead of `createVertex`. `createAzure` / `createAzureProvider` and `createOpenResponses(options:)` now throw on invalid explicit base URLs. Credentials remain lazy and fail at request time.
+- **Provider model surfaces:** use `embedding` / `embeddingModel` instead of removed `textEmbedding` aliases on migrated providers. Google model, model-ID, option, prompt, and metadata types drop `GenerativeAI` from their names (`GoogleLanguageModel`, `GoogleModelId`, `GoogleLanguageModelOptions`, etc.). xAI now uses its native Responses implementation; its old Chat model, Chat options, and search-parameter types are removed. Audio/file transcription uses V4 file-data inputs, video models expose native start/status operations, and realtime/WebSocket injection uses the current shared transport contracts.
+- **Provider configuration:** `FalConfig.headers` is a throwing closure; invoke it with `try`. Fal options are `FalImageModelOptions`, `FalSpeechModelOptions`, `FalTranscriptionModelOptions`, and `FalVideoModelOptions`. Provider-prefixed version constants (including `FAL_VERSION`, `LUMA_VERSION`, `BLACK_FOREST_LABS_VERSION`, `BYTEDANCE_VERSION`, `KLINGAI_VERSION`, `PRODIA_VERSION`, and `REPLICATE_PROVIDER_VERSION`) are replaced by each module's `VERSION`.
+- **Provider option names:** replace OpenAI Chat/Completion/Responses `*ProviderOptions` types with `OpenAILanguageModelChatOptions`, `OpenAILanguageModelCompletionOptions`, and `OpenAILanguageModelResponsesOptions`; use `OpenAIEmbeddingModelOptions`, `OpenAISpeechModelOptions`, `OpenAITranscriptionModelOptions`, and `OpenAIOptions` instead of the old option aliases/facade. OpenAI Responses metadata payloads use `ResponsesProviderMetadata`, `ResponsesReasoningProviderMetadata`, `ResponsesCompactionProviderMetadata`, `ResponsesTextProviderMetadata`, and `ResponsesSourceDocumentProviderMetadata` in the existing `OpenaiResponses*` wrappers. OpenAI Compatible uses `OpenAICompatibleLanguageModelChatOptions`, `OpenAICompatibleLanguageModelCompletionOptions`, and `OpenAICompatibleEmbeddingModelOptions`. Other canonical names include `AlibabaLanguageModelChatOptions`, `AssemblyAITranscriptionModelOptions`, `CohereLanguageModelChatOptions`, `CohereEmbeddingModelOptions`, `CohereRerankingModelOptions`, `DeepgramSpeechModelOptions`, `DeepgramTranscriptionModelOptions`, `GladiaTranscriptionModelOptions`, `GroqLanguageModelChatOptions`, `HuggingFaceResponsesSettings`, `MistralLanguageModelChatOptions`, `GatewayProviderOptions`, `GoogleVertexEmbeddingModelOptions`, and `TogetherAIRerankingModelOptions`. Image/video option types for Black Forest Labs, ByteDance, KlingAI, Prodia, and Replicate now use `*ModelOptions` instead of `*ProviderOptions`.
+- **Removed aliases:** remove `Experimental_Agent`, `Experimental_AgentSettings`, `Experimental_InferAgentUIMessage`, `Experimental_GenerateImageResult`, `Experimental_SpeechResult`, `Experimental_TranscriptionResult`, and `Experimental_StreamTranscriptionResult`. Use their current unprefixed agent/result types. Replace `experimental_generateImage`, `experimental_generateSpeech`, `experimental_transcribe`, and `experimental_streamTranscribe` with the unprefixed functions; removed deprecated aliases are not retained as compatibility shims. Model-option serialization now throws `SerializationError` instead of `SerializeModelOptionsError`.
+- **Removed providers:** remove the `LMNTProvider` and `VercelProvider` SwiftPM products and all their exports, following upstream removal. Remove those product dependencies and choose another speech/language provider.
+
+### Added
+- Native V4 provider coverage across language generation, embeddings, images, video, speech, transcription, reranking, realtime, files, and skills, according to each provider's capabilities.
+- Expanded OpenAI Responses tools, hosted programmatic tool calls, computer tooling, file management, current options/metadata, and ordinary realtime sessions; Azure adds native DeepSeek, MAI image/transcription, Speech synthesis/recognition, and API selection.
+- Google/Vertex interactions, files, speech/transcription and provider-specific APIs; Bedrock Anthropic/Mantle APIs; xAI files, speech, transcription, and video operations; Perplexity Agent/embeddings and Prodia language/video models.
+- Middleware for default instructions/settings, embedding/provider wrapping, JSON/reasoning extraction, tool input examples, and current streaming part shapes.
+- MCP stdio transport, current HTTP/SSE lifecycle and protocol contracts, app resources, OAuth scope selection, and credential security.
+- `defaultFetchFunction()` is public in `AISDKProviderUtils`; providers share this transport instead of maintaining private copies (`3f5b6f5`).
+
+### Fixed
+- OpenAI stream calls classify pre-output quota and provider errors deterministically, independent of scheduler timing.
+- Fix Gateway image metadata compatibility, language and transcription stream backpressure, and standard error messages preserving server diagnostics and generation IDs.
+- Strip caller headers other than User-Agent when the default HTTP transport follows a cross-origin redirect, including credentialed API POST redirects.
+- Keep MaaS image downloads and Google video URLs credential-free; resolve Vertex API keys at request time and use the default MaaS/xAI endpoint for empty base URLs.
+- Preserve multimodal content in typed Google embedding options, reject unrepresentable image polling controls before submitting jobs, and correct Prodia invalid-size fallback and custom-model input capabilities.
+- OpenAI/Azure Responses preserve `apply_patch` tool-call finish reasons and support request/history reasoning-effort configuration updates; Compatible streams keep reasoning continuous across empty tool-call deltas. xAI hosted tools validate and strip provider-owned arguments, Baseten native embeddings resolve credentials per request, and anomalous Moonshot/MAI usage remains available as raw data without rejecting results or overflowing integer counts.
+- Fix Anthropic inline PDF detection, Bedrock Unicode JSON extraction, per-request bearer authentication and Nova embedding usage; preserve unknown usage without failures or overflow and remove deprecated Bedrock aliases.
+- Request token/call/result limits, embedding dimensions, shell limits, file expiry seconds, reasoning budgets and computer display sizes use `Int`; provider options reject fractional or unrepresentable counters before sending a request. Compaction thresholds and compression levels retain `Double`.
+- ElevenLabs `scribe_v2_realtime` now supports streaming transcription through the shared WebSocket transport, including audio/options, partial and final transcripts, timestamps, errors, and cancellation.
+- Provider credentials and caller-supplied headers are no longer sent to returned image, audio, or video download URLs, including sibling hosts. Downloads send only the User-Agent; applications must not rely on API credentials being forwarded to media hosts (`970f99d` and subsequent native-provider fixes).
+- Align native request/response schemas, numeric precision, multipart uploads, base64/MIME handling, UTF-8 decoding, stream lifecycle, tool replay, retryability, and cancellation with the pinned upstream behavior.
+- Keep HTTP body and WebSocket ownership cancellation-safe, including unopened multipart request bodies and unconsumed response streams.
+- UI message streams from `streamText` carry approval signatures, reasons, automatic flags and schema inputs, server approval decisions, text tool-input encoding and tool metadata, so signed approvals round-trip through UI messages; provider-executed string tool errors are no longer JSON-quoted. `toUIMessageStream`, `handleUIMessageStreamFinish` and `processUIMessageStream` read their source only as their consumer reads, and `onEnd` reports a consumer that cancels or drops the stream as cancelled.
+- Typed tools validate their input with the typed schema when the call is parsed, so an invalid input reaches `repairToolCall`, and approval, input callbacks, the recorded call and `execute` all see the input the schema produced; typed tools may return or take scalar values (`String`, numbers, `Bool`).
+- `streamObjectArray` publishes an element only once it is complete, its `textStream` is the JSON of the validated elements (numbers beyond `Int` no longer crash), and array schemas keep `$defs`/`definitions` at the root for root-relative `$ref`s.
+- Prompt files: every file part gets its media type completed from image bytes and the download's Content-Type; files in tool results are downloaded like user files; a `nil` custom download keeps the URL and an empty download is empty data; an abort or timeout reaches the default attachment download.
+- An abort ends `generateText` while `repairToolCall` is still running, and ends `streamText`'s `fullStream` while the provider stream ignores cancellation; a `streamText` retry cancels the failed provider stream before opening the next one. `smoothStream` keeps each delta's provider metadata, passes metadata-only deltas through and smooths reasoning deltas.
+- OpenTelemetry error spans record `http.response.status_code` for API call errors, including the last error of a `RetryError`; `stringifyForTelemetry` writes file data as base64 or URL strings; typed (`Codable`) objects from `generateObject`/`streamObject` reach telemetry `onEnd` and the root span output.
+
+### Docs
+- Update README and installation snippets to `0.20.0`, document direct native-model/string-ID inputs and unversioned helpers, and migrate executable examples to current generation, agent, tool, and telemetry APIs.
+
+## [0.19.0] - 2026-07-15
+
+Upstream parity release against Vercel AI SDK commit `c8d2726ae045a28142cb46df5e41cdd51d8dcc71`, plus the targeted OpenAI latest-main delta at `5b4a299200ec3d061a2cae087d78d13f74d6c90f`.
+
+### Changed
+- BREAKING (OpenAI construction): `createOpenAI(settings:)` and `createOpenAIProvider(settings:)` now throw when an explicit or environment-provided base URL is empty. Custom provider construction must use `try`; the default `openai` facade remains ready to use.
+- OpenAI Compatible: the V4 provider now owns native Chat, Completion, Embedding, and Image models instead of routing those surfaces through V3 adapters. Explicit V3 facades remain available.
+- Anthropic: the default `anthropic` and `createAnthropic(settings:)` facades now expose native Provider V4 language models, files, and skills. `createAnthropicProvider(settings:)` preserves the explicit V3 surface.
+
+### Added
+- OpenAI Compatible: add native V4 prompt conversion, provider options, tools, reasoning, detailed usage, provider metadata, typed HTTP/SSE errors, multipart image editing, and exact xAI fixture coverage.
+- Anthropic: add native V4 reasoning and prompt mapping, provider-reference files, container uploads, high-level file/skill uploads, the `advisor_20260301` tool, and current model support including Claude Sonnet 5, Fable 5, and Opus 4.8. Direct `xhigh` reasoning and provider `effort: max` remain distinct.
+- OpenAI: add the GPT-5.6 model family, `max` reasoning effort, Responses reasoning mode/context controls, prompt cache options and explicit breakpoints, cache-write usage, and `web_search_call.results`.
+
+### Fixed
+- OpenAI Compatible: validate malformed response roles, tool calls, stream chunks, completion usage, and embedding usage at the provider boundary; finalize streamed tool calls only on flush so a valid JSON prefix cannot execute as a truncated call.
+- OpenAI: normalize realtime transcription authorization headers and cancel caller audio when connection setup or sending fails.
+
+### Docs
+- Refresh README, Starlight provider documentation, compile-checked examples, and durable upstream parity evidence for the OpenAI Compatible, Anthropic, and OpenAI V4 surfaces.
+
+## [0.18.2] - 2026-07-04
+
+### Fixed
+- Google and Google Vertex: normalize video polling abort races to provider abort errors instead of leaking raw Swift `CancellationError`.
+
+### Docs
+- README, shared SDK release version, and Starlight install snippets now reference `0.18.2`.
+
+## [0.18.1] - 2026-07-03
+
+Upstream parity refresh against Vercel AI SDK commit `0c3c7e426d359c236952d6f8da7b0081eb6f1a7a`.
+
+### Added
+- Provider contracts: add V4 streaming transcription options, stream parts, stream results, and default unsupported behavior for providers that do not expose streaming transcription.
+- OpenAI: add realtime transcription streaming for `gpt-realtime-whisper*`, including WebSocket transport injection, session setup, audio append/commit messages, transcript delta/final/finish mapping, and provider error propagation.
+- Core adapters: forward V3 transcription models that explicitly expose the V4 streaming capability through the V4 adapter rail.
+
+### Fixed
+- OpenAI: reject non-streaming transcription calls for realtime-only transcription models.
+- OpenAI: reject streaming transcription calls for regular REST transcription models.
+- OpenAI: warn when REST-only transcription provider options are passed to realtime streaming.
+
+### Docs
+- README and Starlight install snippets now reference `0.18.1`.
+- Upstream evidence records the refreshed `0c3c7e4` baseline and the targeted OpenAI transcription parity slice.
+
+## [0.18.0] - 2026-07-02
+
+Upstream parity refresh against Vercel AI SDK commit `85a80fc6e71558717899e30c9f1fc0e9eb7d733d`.
+
+### Added
+- Core: add the V4 provider contract foundation across language, embedding, image, speech, transcription, video, reranking, realtime, middleware, files, skills, warnings, provider references, and shared file-data types.
+- Core: route high-level text, object, embedding, rerank, image, speech, transcription, and video flows through V4-compatible adapters while preserving existing V3 provider compatibility.
+- Core: add AI-level `uploadFile` and `uploadSkill` helpers with provider capability checks, media-type detection, multipart support, and direct regression coverage.
+- Provider utils: add V4 parity helpers for provider references, reasoning mapping, header normalization, same-origin and filename handling, nullable filtering, line extraction, media-type detection, inline file-data conversion, multipart form data, validated downloads, size-limited reads, model option serialization, streaming tool-call tracking, tool-name mapping, standard-schema normalization, response cancellation, delayed promises, and browser runtime detection.
+- OpenAI Compatible: add V4 provider-surface adapters and regression coverage for the OpenAI-compatible chat path.
+- Anthropic: add `files()` and `skills()` upload surfaces with multipart request support, beta headers, uploaded-skill version metadata, and provider metadata mapping.
+
+### Fixed
+- Amazon Bedrock: preserve assistant reasoning during prompt conversion even when Bedrock metadata is absent, and keep reasoning text intact when signatures are present.
+- Anthropic: align upload file-data handling with V4 file data contracts.
+- OpenAI Compatible: preserve `reasoning_content` round-trips for assistant reasoning.
+- Tool execution: cancel in-flight tool tasks when streaming is stopped.
+- MCP HTTP transport: stabilize inbound SSE reopen behavior.
+- CI/release: track the V4 skills contract files in Git so protected GitHub checkouts build cleanly.
+
+### Docs
+- README and Starlight docs now reference `0.18.0`.
+- Provider counts now reflect the current 38 concrete provider modules.
+- Public examples and docs snippets now compile against the current V4 registry, streaming, provider-warning, and OpenAI Responses helper APIs.
+- Upstream parity evidence now records the refreshed V4 core/provider-utils foundation and remaining provider-migration gaps.
+
+## [0.17.6] - 2026-03-30
+
+### Fixed
+- Tests/CI: vendor tracked fixtures into the repository for stable release and CI checkouts instead of relying on transient local state.
+- EventSourceParser: preserve `Data` chunks when multibyte UTF-8 characters are split across parser boundaries.
+- StreamText: keep the step loop advancing after invalid tool calls instead of stalling.
+- OpenAI: sort JSON keys in request encoding so prefix caching stays stable.
+- Anthropic: serialize top-level `cache_control` for automatic caching requests.
+- OpenAI Responses: refresh capability gates and model-id allowlists to the latest model surface, including `gpt-5.3-chat-latest`, `gpt-5.4-mini*`, and `gpt-5.4-nano*`, while removing stale legacy IDs and aligning `gpt-5.4-nano` priority-processing behavior.
+
+## [0.17.5] - 2026-03-22
+
+Upstream parity refresh against Vercel AI SDK commit `a921fbb381cf2d19ef75ae27906f8d1cb0b8325b`.
+
+### Fixed
+- Core: preserve deferred provider tool metadata in `generateText` / `streamText` and align UI message stream callback, tool metadata, and denial handling with upstream.
+- Anthropic: add current code execution and web tool parity, including encrypted code execution result handling and streamed server-tool input mapping.
+- OpenAI Responses: align custom/code interpreter/tool preparation, reasoning encrypted content retention, structured stream parse-error emission, and normalized `local_shell` input casing with upstream.
+- OpenAI Responses: align recorded MCP approval, web search, shell, local shell, image generation, file search, `apply_patch`, and custom-tool scenarios with current upstream behavior.
+
+## [0.17.4] - 2026-03-12
+
+### Fixed
+- OpenAI: align the `code_interpreter` tool input contract with upstream by accepting normalized `containerId` instead of wire-level `container_id`, and add regression coverage for the provider-executed parse path.
+
+## [0.17.3] - 2026-03-08
+
+### Fixed
+- OpenAI chat: serialize tool-result top-level JSON fragments (`string`, `number`, `null`, etc.) without crashing, with regression coverage for the fragment cases.
+
+## [0.17.2] - 2026-03-07
+
+Upstream parity refresh against Vercel AI SDK commit `a921fbb381cf2d19ef75ae27906f8d1cb0b8325b`.
+
+### Fixed
+- OpenAI: add `gpt-5.4`, `gpt-5.4-pro`, `gpt-5.4-2026-03-05`, and `gpt-5.3-codex` model-id parity for Responses reasoning support and capability detection.
+- OpenAI: preserve `providerMetadata.openai.phase` (`commentary` / `final_answer`) through Responses input mapping and streaming/non-streaming response parsing.
+
+### Docs
+- OpenAI: refresh provider documentation for the latest GPT-5.4 / GPT-5.3-codex model surface, reasoning-effort guidance, and `phase` metadata behavior.
+
+## [0.17.1] - 2026-03-07
+
+Upstream parity refresh against Vercel AI SDK commit `a921fbb381cf2d19ef75ae27906f8d1cb0b8325b`.
+
+### Added
+- UI: add public `processTextStream(stream:onTextPart:)` with incremental UTF-8 chunk decoding.
+- UI: add public `convertFileListToFileUIParts(files:)` as the Swift `[URL]?` adaptation of upstream browser `FileList` conversion.
+- UI: add missing helper surface and parity exports, including `lastAssistantMessageIsCompleteWithToolCalls`, `lastAssistantMessageIsCompleteWithApprovalResponses`, `isTextUIPart`, `isFileUIPart`, `isReasoningUIPart`, `isStaticToolUIPart`, `getStaticToolName`, and public `UIMessageStreamError`.
+
+### Fixed
+- StreamText: execute multiple tool handlers concurrently inside a single stream step, matching upstream behavior when the provider emits multiple tool calls together.
+- UI message stream: restore `createUIMessageStream(..., onStepFinish:)` parity and align tool approval handling, dynamic/static tool conversion, malformed stream invariants, and validation contracts with upstream.
+- UI model-message conversion: preserve tool result provider metadata and approval responses across `full stream -> UI chunks -> processUIMessageStream -> validateUIMessages -> convertToModelMessages`.
+- Tests/CI: vendor Cohere fixtures for stable parsing coverage and replace the flaky MCP elicitation fixed-sleep check with response polling.
+
+## [0.17.0] - 2026-02-27
+
+Upstream parity update against Vercel AI SDK commit `73d5c5920e0fea7633027fdd87374adc9ba49743`.
+
+### Added
+- Providers: add Alibaba, ByteDance, KlingAI, MoonshotAI, and OpenResponses support.
+- Docs: add and wire provider documentation for ByteDance, Kling AI, MoonshotAI, and OpenResponses, plus refresh provider counts and overviews.
+
+### Fixed
+- UI message stream: align finish/cancel semantics, `onStepFinish`, and processing API behavior with upstream.
+- Provider utils: expand JSON Schema validator parity, including conditional-schema behavior.
+- OpenAI / Gateway: align Responses include/options behavior, provider/image/video/tools mapping, Vercel o11y headers, and `generationId` error handling.
+- Amazon Bedrock: align chat, embeddings, image, SigV4, and reranking host mapping with upstream.
+- Providers: move missing-key/config failures to request time and add regression coverage across Cohere, DeepInfra, Perplexity, Replicate, Deepgram, AssemblyAI, Cerebras, Anthropic, RevAI, XAI, Alibaba, and Mistral.
+
+## [0.16.0] - 2026-02-25
+
+### Added
+- Open Responses provider (`OpenResponsesProvider`).
+- Moonshot AI provider (`MoonshotAIProvider`).
+
+### Fixed
+- OpenAI-compatible: align request mapping and provider options with upstream parity.
+- Anthropic: missing API key now throws request-time `LoadAPIKeyError` instead of crashing the process.
+- Google / Vertex: upstream parity fixes for schema conversion, auth, and language/image/video request + streaming edge cases.
+
+## [0.15.5] - 2026-02-25
+
+### Fixed
+- Google: preserve explicit `null` values in Imagen provider options for request payload parity.
+- Google: treat missing Imagen `predictions` as an empty list (upstream default behavior).
+- Google: allow usage-only Gemini stream chunks without `candidates`.
+- Google Vertex: preserve explicit `null` values in Imagen provider options for request payload parity.
+
+## [0.15.4] - 2026-02-24
+
+### Fixed
+- OpenAI: align Responses parity for provider tools and request/response mapping.
+- OpenAI: align `web_search` / `web_search_preview` tool schemas with upstream (strict action unions and `userLocation.type` requirements).
+- OpenAI: align `local_shell` contract to upstream snake_case fields (`timeout_ms`, `working_directory`).
+- OpenAI: align `shell` tool result handling with upstream when `store=true` by reconstructing `shell_call_output`.
+- OpenAI: map missing API key to runtime error (`LoadAPIKeyError`) instead of process crash (`fatalError`).
+
+## [0.15.3] - 2026-02-23
+
+### Added
+- Anthropic: Claude 4.6 support. Thanks to `@bunchjesse`.
+
+### Fixed
+- Google Vertex: respect explicit `baseURL` without requiring `project`/`location` and add regression coverage.
+
+## [0.15.2] - 2026-02-06
+
+### Added
+- Provider utils: JSON Schema validator now supports tuple schemas (`items: [...]` + `additionalItems`), `uniqueItems`, `multipleOf`, object `minProperties` / `maxProperties`, and string `format` / `contentEncoding: base64` (Zod v3 schema output parity).
+
+### Fixed
+- Provider utils: schema composition (`anyOf`/`oneOf`) no longer bypasses base keyword validation (e.g. `type: "string"`).
+- Streams: prevent `AsyncIterableStream` init race hangs.
+- Tools: harden `tools/test-runner.js` selector normalization and Swift Testing output parsing; add `tools/test-suspicious.config.json` for UI message stream suites.
+
+## [0.15.1] - 2026-02-06
+
+### Added
+- AI Core (`generateText`/`streamText`): add timeout configuration parity with upstream (`totalMs`, `stepMs`, `chunkMs`) and merged abort-signal behavior.
+- AI Core: add `experimentalInclude` retention controls:
+  - `generateText`: `requestBody` and `responseBody`
+  - `streamText`: `requestBody`
+
+### Fixed
+- Retry: make backoff delay abort-aware so timeout/abort interrupts retry sleep immediately.
+- Telemetry: report timeout as `ai.settings.timeout` using `totalMs` semantics.
+- Agent: forward timeout-derived abort behavior through `callSettings`.
+
+## [0.14.2] - 2026-02-06
+
+### Added
+- Fal (image): add parity coverage for additional error envelopes (`error.message/code` and top-level `message`) and align error message mapping.
+- Fal (speech): add provider options passthrough parity tests (`voice_setting` normalization, unknown key stripping, null/empty semantics).
+
+### Fixed
+- Fal (image/speech/transcription): close non-video parity gaps for provider option handling, request/response mapping, and metadata parity.
+- Fal (video): treat malformed status payloads (`video` present without `url`) as invalid JSON response (upstream parity).
+
+## [0.14.1] - 2026-02-05
+
+### Added
+- Video (experimental): `experimental_generateVideo` core API + `VideoModelV3` (v3) types and result/metadata support.
+- Fal: video model support via `fal.video(...)` (polling, metadata mapping, abort/timeout handling) + tests.
+
+### Docs
+- AI SDK Core: add Video Generation page and wire it into the sidebar.
+- Providers: add Fal provider page (including Video Models) and update provider overview/sidebar links.
+
+### Fixed
+- Download: normalize HTTP status casing so errors read like `404 Not Found`.
+
+## [0.14.0] - 2026-02-05
+
+### Changed
+- BREAKING (images): `GenerateImageResult` now includes `usage: ImageModelUsage` (aggregated across provider calls). Custom conformances must add this property.
+
+### Added
+- Images: provider-level `ImageModelV3Usage` and `ImageModelV3GenerateResult.usage` support (when the provider reports usage).
+- Images: AI-level `ImageModelUsage` + `addImageModelUsage` helper and aggregation across multiple `generateImage` calls.
+- Images: `GenerateImagePrompt` (structured prompt) with `.imageEditing(images:text:mask:)` parity for upstream `GenerateImagePrompt` union.
+- Images: new overloads for `generateImage` and `experimental_generateImage` that accept `GenerateImagePrompt`.
+- Images: `generateImage` now forwards optional `files` and `mask` into `ImageModelV3CallOptions` for editing / inpainting workflows.
+- Providers: add upstream-style `create*` aliases (`createTogetherAI`, `createProdia`, `createBlackForestLabs`, `createRevai`).
+- TogetherAI: add unlabeled model factories (`chat(_:)`, `completion(_:)`, `embedding(_:)`, `image(_:)`, `reranking(_:)`).
+
+### Docs
+- Providers: add and wire new provider pages (Vercel, Together.ai, Black Forest Labs, Prodia, Rev.ai) + update sidebar and provider overview.
+- Providers: update image editing examples to use `prompt: .imageEditing(...)` (`GenerateImagePrompt`) for Swift parity.
+- Docs: refresh provider lists.
+
+### Fixed
+- MCP (HTTP transport): align `start()` scheduling so the initial inbound SSE open happens promptly (matches upstream call ordering when the server returns `405` before `202`).
+
+## [0.13.0] - 2026-02-05
+
+### Added
+- Providers: Vercel provider + tests.
+- Providers: TogetherAI, BlackForestLabs, Prodia, RevAI providers.
+- MCP: major parity update (OAuth support, HTTP transport, tolerant decoding) + extensive unit/integration tests.
+- Provider utils: add `Tool._meta`.
+
+### Fixed
+- MCP (HTTP transport): correctly flush inbound SSE chunks so messages parse without waiting for connection close.
+- MCP (OAuth): normalize resource URLs (origin/path) to match upstream behavior.
+
+## [0.12.1] - 2026-02-04
+
+### Added
+- Rerank: add core `rerank` API + `RerankingModelV3` protocol parity.
+- Providers: Cohere + Amazon Bedrock reranking models (request/response mapping, warnings, telemetry) + tests.
+
+## [0.12.0] - 2026-02-04
+
+### Changed
+- BREAKING: align finish reasons with upstream `LanguageModelV3FinishReason { unified, raw }` and surface `rawFinishReason` through `generateText` / `streamText`.
+- BREAKING: `FinishReason` is now the unified finish reason (`LanguageModelV3FinishReason.Unified`).
+- BREAKING: `LanguageModelV3ToolResult` no longer includes `providerExecuted` (upstream parity).
+- UI: align UI message stream chunks with upstream (`finishReason`, abort `reason`, tool `title`/`providerMetadata`, dynamic tool states) + tests.
+
+### Added
+- `generateText`/`streamText`: support deferred results for provider-executed tools (`supportsDeferredResults`) in multi-step loops (upstream parity).
+
+### Fixed
+- Anthropic: match upstream tool-result flags.
+
+## [0.11.0] - 2026-02-04
+
+### Changed
+- BREAKING: align `LanguageModelV3Usage` to upstream token detail shape (`inputTokens` / `outputTokens`) and update provider usage mapping accordingly.
+- SwiftAISDK: add AI-level `LanguageModelUsage` helpers + adapter from provider usage for parity with upstream `@ai-sdk/ai`.
+
+## [0.10.0] - 2026-02-03
+
+### Changed
+- BREAKING (Anthropic): align provider-executed `web_fetch` / `web_search` tool result output schemas with upstream (camelCase + nullable fields).
+  - `AnthropicWebFetchToolResult.Content.title` is now `String?`.
+  - `AnthropicWebSearchToolResult.title` is now `String?`.
+  - Provider-executed outputs are now validated as camelCase: `retrievedAt`, `mediaType`, `pageAge`, `encryptedContent`.
+
+### Fixed
+- Anthropic: correctly map nullable tool result fields when converting to/from Anthropic message payloads.
+
+## [0.9.0] - 2026-02-03
+
+### Changed
+- BREAKING: rename LanguageModel V3 "provider-defined tools" to "provider tools" (upstream parity).
+  - `LanguageModelV3ProviderDefinedTool` → `LanguageModelV3ProviderTool`
+  - `LanguageModelV3Tool.providerDefined(...)` → `.provider(...)`
+  - `ToolType.providerDefined` → `ToolType.provider`
+  - `createProviderDefinedToolFactory*` → `createProviderToolFactory*`
+
+### Added
+- Tools: support `inputExamples` (tool input examples) and add middleware to inject examples into tool definitions.
+- Anthropic: enable `input_examples` and the `advanced-tool-use-2025-11-20` beta automatically when tool input examples are provided.
+
+### Fixed
+- streamText: apply `prepareStep` on multi-step streaming.
+- Middleware: stabilize JSON formatting for tool input examples to avoid nondeterministic output.
+
+## [0.8.4] - 2026-02-02
+
+### Added
+- Anthropic: add provider-defined tools `code_execution` (beta `code-execution-2025-08-25`) and `memory` (beta `context-management-2025-06-27`).
+
+### Fixed
+- Anthropic: align tool name mapping for provider/server tool calls & results (including streaming + programmatic tool calling) with upstream.
+- OpenAI (Responses): align truncation handling and finish-reason mapping with upstream.
+
+## [0.8.3] - 2026-02-02
+
+### Fixed
+- Google (Gemini): send `tools` as an array (`[{ functionDeclarations: [...] }]`) for function tools (matches upstream; fixes Gemini/Vertex request parsing errors).
+- OpenAI (Responses): align reasoning summary streaming (`reasoning_summary_part.done` handling + final `encrypted_content` on `output_item.done`) with upstream.
+
+## [0.8.2] - 2026-02-02
+
+### Added
+- Tools: propagate optional `title` through tool call/result/error types and stream parts.
+
+### Fixed
+- StreamText SSE: ensure tool events use upstream field names (`toolName`) and JSON-serializable payloads for `providerMetadata`/errors.
+
+## [0.8.1] - 2026-02-01
+
+### Added
+- Tools: add optional `title` to tool definitions and propagate it to parsed tool calls (including stream parts) to match upstream.
+
+## [0.8.0] - 2026-02-01
+
+### Changed
+- BREAKING: JSON schema validation now enforces union types (`type: [...]`), enums/const, and common bounds (string lengths, array sizes, numeric limits) for `Schema<JSONValue>` validation.
+
+### Fixed
+- Provider utils: improve JSON schema validation to match upstream Zod behavior for tool input/output schemas (e.g. OpenAI `web_search*` output validation is now strict).
+- Google: use `anyOf` (union) for `retrievalMetadata` grounding metadata schema to match upstream.
+
+## [0.7.77] - 2026-02-01
+
+### Fixed
+- OpenAI tools: add output schemas for `web_search` and `web_search_preview` provider tools (matches upstream).
+
+## [0.7.6] - 2026-02-01
+
+### Fixed
+- OpenAI Chat: validate `logitBias` keys are numeric (matches upstream schema behavior).
+
+## [0.7.5] - 2026-02-01
+
+### Added
+- OpenAI: port upstream `openai-language-model-capabilities` helper and share it across Chat/Responses.
+
+### Fixed
+- OpenAI Chat: validate `metadata` provider option key/value lengths (keys ≤ 64, values ≤ 512) to match upstream.
+
+## [0.7.4] - 2026-02-01
+
+### Fixed
+- OpenAI (Responses): validate `shell` tool result output shape and require `exitCode` for `exit` outcomes (matches upstream discriminated union behavior).
+
+## [0.7.3] - 2026-01-31
+
+### Fixed
+- OpenAI (Responses): include filtered citation annotations in `providerMetadata` for assistant text and streaming `text-end` (matches upstream behavior).
+- OpenAI (Responses): emit document source `providerMetadata` for `file_citation`, `container_file_citation`, and `file_path` (matches upstream behavior).
+
+## [0.7.2] - 2026-01-31
+
+### Added
+- LanguageModelV3: add optional `providerMetadata` support for `tool-call` and `tool-result` prompt parts.
+
+### Fixed
+- OpenAI (Responses): map provider-defined tool names to OpenAI tool names in requests, and back to custom tool names in responses/streaming (matches upstream behavior).
+- OpenAI (Responses): use `providerMetadata.itemId` for provider tool-result item references when `store=true` (matches upstream behavior).
+- OpenAI (Responses): validate provider tool call inputs using a JSONValue→Foundation conversion (fixes schema validation for `shell`, `local_shell`, `apply_patch`).
+
+## [0.7.1] - 2026-01-31
+
+### Fixed
+- OpenAI (Responses): read `itemId` from tool-call `providerMetadata` as a fallback (matches upstream behavior).
+
+## [0.7.0] - 2026-01-26
+
+### Added
+- OpenAI (Responses): provider-executed MCP tool support via `openai.tools.mcp(...)` (tool serialization + output mapping).
+- OpenAI (Responses): MCP approval workflow mapping (`mcp_approval_request` / `mcp_approval_response`) with tool call id aliasing via `approval_request_id`.
+
+### Docs
+- Docs/examples: document and demonstrate OpenAI MCP tool usage and approvals.
+
+## [0.6.0] - 2026-01-26
+
+### Changed
+- BREAKING (OpenAI): `strictJsonSchema` now defaults to `true` for both Chat and Responses models.
+- BREAKING (OpenAI Chat): provider option `structuredOutputs` is no longer supported. Use `strictJsonSchema: false` to disable strict structured outputs.
+- BREAKING (OpenAI): tool definitions now only include `"strict"` when the tool sets `strict` explicitly.
+
+### Added
+- Tools: add `strict` to tool definitions and forward to providers that support it.
+- OpenAI: add provider options `promptCacheRetention`, `systemMessageMode`, and `forceReasoning` (Chat + Responses).
+- OpenAI (Responses): add provider option `truncation`.
+
+### Fixed
+- OpenAI: update reasoning model capability detection to match upstream allowlist behavior.
+- OpenAI: match GPT-5.1/5.2 parameter compatibility rules when `reasoningEffort` is `none`.
+- Docs/examples: update OpenAI docs and examples to match new options/defaults.
+
+## [0.5.11] - 2026-01-26
+
+### Added
+- OpenAI: Responses option `conversation`.
+- OpenAI: provider tools `shell` and `apply_patch` (with `execute` examples).
+
+### Fixed
+- OpenAI: Responses input now skips execution-denied tool results and uses `itemId` for tool-result item references when available.
+- OpenAI: Responses apply-patch tool call mapping now requires `itemId` and forwards it via provider metadata (non-stream + streaming).
+
+## [0.5.10] - 2026-01-25
+
+### Fixed
+- OpenAI: Responses input uses item references for assistant text and tool calls when `store=true` and OpenAI `itemId` is available (fixes multi-turn reasoning/tool-call mismatch).
+
+## [0.5.9] - 2026-01-24
+
+### Fixed
+- Provider utils: increase default `URLRequest.timeoutInterval` to 24h (avoids the 60s default timeout) and cancel in-flight requests when `abortSignal` triggers.
+
+## [0.5.8] - 2026-01-18
+
+### Fixed
+- Anthropic: serialize tool call `input` as a JSON object (not a JSON string) for `tool_use` / `server_tool_use` history blocks.
+
+## [0.5.7] - 2026-01-18
+
+### Added
+- Anthropic: support MCP tool blocks (`mcp_tool_use`, `mcp_tool_result`) and tool search server tools/results.
+
+## [0.5.6] - 2026-01-18
+
+### Fixed
+- Anthropic: serialize tool call `input` as a JSON object (not a JSON string) to prevent 500 errors in multi-turn tool-use conversations.
+
+## [0.1.1] - 2025-10-21
+
+### Changed
+- Lower swift-tools-version from 6.1 to 6.0 for broader compatibility
+
+## [0.1.0] - 2025-10-20
+
+### Added
+
+**Core SDK** (3/3 packages - 101.8% test coverage):
+- `AISDKProvider` - Foundation types (139 tests)
+- `AISDKProviderUtils` - Provider utilities (272 tests, 85.0% coverage)
+- `SwiftAISDK` - Main SDK (1136 tests, 94.7% coverage)
+
+**Providers** (5/32 ported):
+- `OpenAIProvider` - Complete (292 tests, 100.7% coverage)
+- `AnthropicProvider` - Complete (115 tests, 100.9% coverage)
+- `GoogleProvider` - Partial (20 tests, 12.9% coverage)
+- `GroqProvider` - Partial (19 tests, 32.8% coverage)
+- `OpenAICompatibleProvider` - Partial (9 tests, 7.0% coverage)
+
+**Features**:
+- Text generation: `generateText()`, `streamText()`
+- Structured output: `generateObject()`, `streamObject()`
+- Tool calling and MCP tools support
+- Middleware system for language models
+- Telemetry and error handling
+- Zod-like schema DSL (`AISDKZodAdapter`)
+- SSE streaming parser (`EventSourceParser`)
+
+**Platform Support**:
+- iOS 16+, macOS 13+, tvOS 16+, watchOS 9+
+
+**Test Coverage**:
+- Total: 1728 tests passing
+- Upstream parity: 68.4% (2002/2928 relevant upstream tests)
+
+**Upstream Reference**:
+- Vercel AI SDK 6.0.0-beta.42 (commit 77db222eeded7a936a8a268bf7795ff86c060c2f)

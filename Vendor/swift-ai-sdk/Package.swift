@@ -1,0 +1,176 @@
+// swift-tools-version: 6.0
+// The swift-tools-version declares the minimum version of Swift required to build this package.
+
+import PackageDescription
+
+let package = Package(
+    name: "SwiftAISDK",
+    platforms: [
+        .macOS(.v13),
+        .iOS(.v16),
+        .watchOS(.v9),
+        .tvOS(.v16)
+    ],
+    products: [
+        // Main products matching upstream @ai-sdk architecture
+        .library(name: "AISDKProvider", targets: ["AISDKProvider"]),
+        .library(name: "AISDKProviderUtils", targets: ["AISDKProviderUtils"]),
+        .library(name: "SwiftAISDK", targets: ["SwiftAISDK"]),
+	        .library(name: "OpenAIProvider", targets: ["OpenAIProvider"]),
+	        .library(name: "OpenAICompatibleProvider", targets: ["OpenAICompatibleProvider"]),
+	        .library(name: "MoonshotAIProvider", targets: ["MoonshotAIProvider"]),
+	        .library(name: "OpenResponsesProvider", targets: ["OpenResponsesProvider"]),
+	        .library(name: "ByteDanceProvider", targets: ["ByteDanceProvider"]),
+	        .library(name: "AlibabaProvider", targets: ["AlibabaProvider"]),
+	        .library(name: "KlingAIProvider", targets: ["KlingAIProvider"]),
+	        .library(name: "AnthropicProvider", targets: ["AnthropicProvider"]),
+	        .library(name: "AmazonBedrockProvider", targets: ["AmazonBedrockProvider"]),
+	        .library(name: "GatewayProvider", targets: ["GatewayProvider"]),
+        .library(name: "GoogleProvider", targets: ["GoogleProvider"]),
+        .library(name: "GoogleVertexProvider", targets: ["GoogleVertexProvider"]),
+        .library(name: "AzureProvider", targets: ["AzureProvider"]),
+        .library(name: "GroqProvider", targets: ["GroqProvider"]),
+        .library(name: "MistralProvider", targets: ["MistralProvider"]),
+        .library(name: "PerplexityProvider", targets: ["PerplexityProvider"]),
+        .library(name: "CohereProvider", targets: ["CohereProvider"]),
+        .library(name: "DeepgramProvider", targets: ["DeepgramProvider"]),
+        .library(name: "DeepInfraProvider", targets: ["DeepInfraProvider"]),
+        .library(name: "ElevenLabsProvider", targets: ["ElevenLabsProvider"]),
+        .library(name: "FalProvider", targets: ["FalProvider"]),
+        .library(name: "FireworksProvider", targets: ["FireworksProvider"]),
+        .library(name: "GladiaProvider", targets: ["GladiaProvider"]),
+        .library(name: "HuggingFaceProvider", targets: ["HuggingFaceProvider"]),
+        .library(name: "HumeProvider", targets: ["HumeProvider"]),
+        .library(name: "AssemblyAIProvider", targets: ["AssemblyAIProvider"]),
+        .library(name: "CerebrasProvider", targets: ["CerebrasProvider"]),
+        .library(name: "DeepSeekProvider", targets: ["DeepSeekProvider"]),
+        .library(name: "BasetenProvider", targets: ["BasetenProvider"]),
+        .library(name: "BlackForestLabsProvider", targets: ["BlackForestLabsProvider"]),
+        .library(name: "ReplicateProvider", targets: ["ReplicateProvider"]),
+        .library(name: "XAIProvider", targets: ["XAIProvider"]),
+        .library(name: "LumaProvider", targets: ["LumaProvider"]),
+        .library(name: "TogetherAIProvider", targets: ["TogetherAIProvider"]),
+        .library(name: "ProdiaProvider", targets: ["ProdiaProvider"]),
+        .library(name: "RevAIProvider", targets: ["RevAIProvider"]),
+        .library(name: "AISDKJSONSchema", targets: ["AISDKJSONSchema"]),
+        .library(name: "EventSourceParser", targets: ["EventSourceParser"]), // internal lib for SSE
+        .library(name: "AISDKZodAdapter", targets: ["AISDKZodAdapter"]),
+        .executable(name: "playground", targets: ["SwiftAISDKPlayground"]) 
+    ],
+    dependencies: [
+        .package(url: "https://github.com/apple/swift-argument-parser", from: "1.3.0")
+    ],
+    targets: [
+        // EventSourceParser - SSE parsing (internal utility)
+        .target(name: "EventSourceParser"),
+
+        // AISDKProvider - Foundation types (matches @ai-sdk/provider)
+        // Language model interfaces (V3/V4), provider errors, JSONValue, shared types
+        .target(name: "AISDKProvider", dependencies: []),
+
+        // AISDKProviderUtils - Provider utilities (matches @ai-sdk/provider-utils)
+        // HTTP, JSON, schema, validation, retry, headers, ID generation, tools
+        .target(
+            name: "AISDKProviderUtils",
+            dependencies: ["AISDKProvider", "AISDKZodAdapter", "EventSourceParser"]
+        ),
+
+        // Zod/ToJSONSchema adapters (public)
+        .target(name: "AISDKZodAdapter", dependencies: ["AISDKProvider"]),
+
+        // OpenAI provider package
+        .target(name: "OpenAIProvider", dependencies: ["AISDKProvider", "AISDKProviderUtils", "EventSourceParser"]),
+
+	        // OpenAI-compatible provider package
+	        .target(name: "OpenAICompatibleProvider", dependencies: ["AISDKProvider", "AISDKProviderUtils"]),
+	        .target(name: "MoonshotAIProvider", dependencies: ["AISDKProvider", "AISDKProviderUtils"]),
+	        .target(name: "OpenResponsesProvider", dependencies: ["AISDKProvider", "AISDKProviderUtils"]),
+	        .target(name: "ByteDanceProvider", dependencies: ["AISDKProvider", "AISDKProviderUtils"]),
+	        .target(name: "AlibabaProvider", dependencies: ["AISDKProvider", "AISDKProviderUtils"]),
+	        .target(name: "KlingAIProvider", dependencies: ["AISDKProvider", "AISDKProviderUtils"]),
+	        .target(name: "AnthropicProvider", dependencies: ["AISDKProvider", "AISDKProviderUtils", "EventSourceParser"]),
+	        .target(name: "AmazonBedrockProvider", dependencies: ["AISDKProvider", "AISDKProviderUtils", "AnthropicProvider", "OpenAIProvider"]),
+	        .target(name: "GatewayProvider", dependencies: ["AISDKProvider", "AISDKProviderUtils"]),
+        .target(name: "GoogleProvider", dependencies: ["AISDKProvider", "AISDKProviderUtils", "EventSourceParser"]),
+        .target(name: "GoogleVertexProvider", dependencies: ["AISDKProvider", "AISDKProviderUtils", "GoogleProvider", "AnthropicProvider", "OpenAICompatibleProvider"]),
+        .target(name: "AzureProvider", dependencies: ["AISDKProvider", "AISDKProviderUtils", "OpenAIProvider", "DeepSeekProvider"]),
+        .target(name: "GroqProvider", dependencies: ["AISDKProvider", "AISDKProviderUtils", "EventSourceParser"]),
+        .target(name: "MistralProvider", dependencies: ["AISDKProvider", "AISDKProviderUtils", "EventSourceParser"]),
+        .target(name: "PerplexityProvider", dependencies: ["AISDKProvider", "AISDKProviderUtils", "EventSourceParser"]),
+        .target(name: "CohereProvider", dependencies: ["AISDKProvider", "AISDKProviderUtils", "EventSourceParser"]),
+        .target(name: "DeepgramProvider", dependencies: ["AISDKProvider", "AISDKProviderUtils"]),
+        .target(name: "DeepInfraProvider", dependencies: ["AISDKProvider", "AISDKProviderUtils", "OpenAICompatibleProvider"]),
+        .target(name: "ElevenLabsProvider", dependencies: ["AISDKProvider", "AISDKProviderUtils"]),
+        .target(name: "FalProvider", dependencies: ["AISDKProvider", "AISDKProviderUtils"]),
+        .target(name: "FireworksProvider", dependencies: ["AISDKProvider", "AISDKProviderUtils", "OpenAICompatibleProvider"]),
+        .target(name: "GladiaProvider", dependencies: ["AISDKProvider", "AISDKProviderUtils"]),
+        .target(name: "HuggingFaceProvider", dependencies: ["AISDKProvider", "AISDKProviderUtils", "OpenAICompatibleProvider"]),
+        .target(name: "HumeProvider", dependencies: ["AISDKProvider", "AISDKProviderUtils"]),
+        .target(name: "AssemblyAIProvider", dependencies: ["AISDKProvider", "AISDKProviderUtils"]),
+        .target(name: "CerebrasProvider", dependencies: ["AISDKProvider", "AISDKProviderUtils", "OpenAICompatibleProvider"]),
+        .target(name: "DeepSeekProvider", dependencies: ["AISDKProvider", "AISDKProviderUtils"]),
+        .target(name: "BasetenProvider", dependencies: ["AISDKProvider", "AISDKProviderUtils", "OpenAICompatibleProvider"]),
+        .target(name: "BlackForestLabsProvider", dependencies: ["AISDKProvider", "AISDKProviderUtils"]),
+        .target(name: "ReplicateProvider", dependencies: ["AISDKProvider", "AISDKProviderUtils"]),
+        .target(name: "XAIProvider", dependencies: ["AISDKProvider", "AISDKProviderUtils"]),
+        .target(name: "LumaProvider", dependencies: ["AISDKProvider", "AISDKProviderUtils"]),
+        .target(name: "TogetherAIProvider", dependencies: ["AISDKProvider", "AISDKProviderUtils", "OpenAICompatibleProvider"]),
+        .target(name: "ProdiaProvider", dependencies: ["AISDKProvider", "AISDKProviderUtils"]),
+        .target(name: "RevAIProvider", dependencies: ["AISDKProvider", "AISDKProviderUtils"]),
+        // JSON Schema generator (optional product)
+        .target(
+            name: "AISDKJSONSchema",
+            dependencies: [
+                "AISDKProviderUtils",
+                "AISDKZodAdapter"
+            ]
+        ),
+
+        // SwiftAISDK - Main AI SDK (matches @ai-sdk/ai)
+        // GenerateText, Registry, Middleware, Prompts, Tools, Telemetry
+        .target(name: "SwiftAISDK", dependencies: ["AISDKProvider", "AISDKProviderUtils", "AISDKJSONSchema", "EventSourceParser", "GatewayProvider"]),
+
+        // SwiftAISDKPlayground - CLI executable for manual testing (Playground)
+        .executableTarget(
+            name: "SwiftAISDKPlayground",
+            dependencies: [
+                "SwiftAISDK",
+	                "AISDKProvider",
+	                "AISDKProviderUtils",
+	                "OpenAIProvider",
+	                "OpenResponsesProvider",
+	                "GoogleProvider",
+	                "GoogleVertexProvider",
+	                "AzureProvider",
+                "GroqProvider",
+                "MistralProvider",
+                "PerplexityProvider",
+                "CohereProvider",
+                "DeepgramProvider",
+		                "DeepInfraProvider",
+			                "MoonshotAIProvider",
+			                "ByteDanceProvider",
+			                "AlibabaProvider",
+			                "KlingAIProvider",
+                "ElevenLabsProvider",
+                "FalProvider",
+                "FireworksProvider",
+                "GladiaProvider",
+                "HuggingFaceProvider",
+                "HumeProvider",
+                "AssemblyAIProvider",
+                "CerebrasProvider",
+                "DeepSeekProvider",
+                "BlackForestLabsProvider",
+                "ReplicateProvider",
+                "LumaProvider",
+                "TogetherAIProvider",
+                "XAIProvider",
+                "ProdiaProvider",
+                "RevAIProvider",
+                .product(name: "ArgumentParser", package: "swift-argument-parser")
+            ],
+            exclude: ["README.md"]
+        )
+    ]
+)

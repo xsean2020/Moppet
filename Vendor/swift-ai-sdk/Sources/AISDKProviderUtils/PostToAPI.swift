@@ -1,0 +1,299 @@
+import Foundation
+import AISDKProvider
+
+/**
+ HTTP POST utilities for API calls.
+
+ Port of `@ai-sdk/provider-utils/src/post-to-api.ts`.
+
+ Provides functions for making POST requests with JSON or FormData payloads,
+ handling responses with custom success/failure handlers, and proper error wrapping.
+ */
+
+// MARK: - Post JSON to API
+
+/**
+ Posts JSON data to an API endpoint.
+
+ - Parameters:
+   - url: The URL to post to
+   - headers: Optional HTTP headers (will be merged with Content-Type: application/json)
+   - body: The body to encode as JSON
+   - failedResponseHandler: Handler for non-2xx responses
+   - successfulResponseHandler: Handler for successful responses
+   - isAborted: Optional closure to check if request should be cancelled
+   - fetch: Optional custom fetch function (for testing)
+
+ - Returns: The result from successfulResponseHandler
+ - Throws: APICallError or handler errors
+ */
+public func postJsonToAPI<T>(
+    url: String,
+    headers: [String: String]? = nil,
+    body: some Encodable,
+    failedResponseHandler: ResponseHandler<APICallError>,
+    successfulResponseHandler: ResponseHandler<T>,
+    isAborted: (@Sendable () -> Bool)? = nil,
+    fetch: FetchFunction? = nil
+) async throws -> ResponseHandlerResult<T> {
+    // Sorted keys ensure deterministic JSON byte output so providers
+    // that use prefix-based caching (e.g. OpenAI) can match request prefixes.
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
+    let jsonData = try encoder.encode(body)
+
+    let mergedHeaders = combineHeaders(
+        ["Content-Type": "application/json"],
+        headers?.mapValues { Optional($0) }
+    ).compactMapValues { $0 }
+
+    return try await postToAPI(
+        url: url,
+        headers: mergedHeaders,
+        body: PostBody(content: .json(jsonData), values: body),
+        failedResponseHandler: failedResponseHandler,
+        successfulResponseHandler: successfulResponseHandler,
+        isAborted: isAborted,
+        fetch: fetch
+    )
+}
+
+// MARK: - Post FormData to API
+
+/**
+ Posts form data to an API endpoint.
+
+ Port of `postFormDataToApi` from `@ai-sdk/provider-utils/src/post-to-api.ts:47-75`.
+
+ - Parameters:
+   - url: The URL to post to
+   - headers: Optional HTTP headers; multipart Content-Type is inferred when absent
+   - formData: Form data as key-value pairs
+   - failedResponseHandler: Handler for non-2xx responses
+   - successfulResponseHandler: Handler for successful responses
+   - isAborted: Optional closure to check if request should be cancelled
+   - fetch: Optional custom fetch function (for testing)
+
+ - Returns: The result from successfulResponseHandler
+ - Throws: APICallError or handler errors
+ */
+public func postFormDataToAPI<T>(
+    url: String,
+    headers: [String: String]? = nil,
+    formData: [String: String],
+    failedResponseHandler: ResponseHandler<APICallError>,
+    successfulResponseHandler: ResponseHandler<T>,
+    isAborted: (@Sendable () -> Bool)? = nil,
+    fetch: FetchFunction? = nil
+) async throws -> ResponseHandlerResult<T> {
+    let builder = convertToFormData(formData)
+
+    return try await postToAPI(
+        url: url,
+        headers: headers,
+        body: PostBody(content: .multipartFormData(builder), values: formData),
+        failedResponseHandler: failedResponseHandler,
+        successfulResponseHandler: successfulResponseHandler,
+        isAborted: isAborted,
+        fetch: fetch
+    )
+}
+
+// MARK: - Post Body Type
+
+/// Represents the body content for POST requests
+public struct PostBody: Sendable {
+    public enum Content: Sendable {
+        case json(Data)
+        case data(Data)
+        case formData([String: String])
+        case multipartFormData(MultipartFormDataBuilder)
+    }
+
+    let content: Content
+    private let valuesStorage: AnySendable?
+
+    public init(content: Content, values: Any?) {
+        self.content = content
+        if let values {
+            self.valuesStorage = AnySendable(values)
+        } else {
+            self.valuesStorage = nil
+        }
+    }
+
+    public var values: Any? {
+        valuesStorage?.value
+    }
+}
+
+// MARK: - Post to API (Base Function)
+
+/**
+ Base function for POST requests to API endpoints.
+
+ Handles:
+ - User-Agent header injection
+ - Response status code checking
+ - Error/success handler invocation
+ - Error wrapping for network failures
+
+ - Parameters:
+   - url: The URL to post to
+   - headers: Optional HTTP headers
+   - body: The request body with content and values
+   - failedResponseHandler: Handler for non-2xx responses
+   - successfulResponseHandler: Handler for successful responses
+   - isAborted: Optional closure to check cancellation
+   - fetch: Optional custom fetch function
+
+ - Returns: The result from successfulResponseHandler
+ - Throws: APICallError or handler errors
+ */
+public func postToAPI<T>(
+    url: String,
+    headers: [String: String]? = nil,
+    body: PostBody,
+    failedResponseHandler: ResponseHandler<APICallError>,
+    successfulResponseHandler: ResponseHandler<T>,
+    isAborted: (@Sendable () -> Bool)? = nil,
+    fetch: FetchFunction? = nil
+) async throws -> ResponseHandlerResult<T> {
+    let fetchImpl = fetch ?? defaultFetchFunction()
+
+    do {
+        // Prepare request
+        guard let requestURL = URL(string: url) else {
+            throw APICallError(
+                message: "Invalid URL",
+                url: url,
+                requestBodyValues: body.values
+            )
+        }
+
+        var request = URLRequest(url: requestURL)
+        request.httpMethod = "POST"
+        request.timeoutInterval = PROVIDER_UTILS_DEFAULT_REQUEST_TIMEOUT_INTERVAL
+
+        // Add headers with User-Agent
+        let headersWithUA = withUserAgentSuffix(
+            headers ?? [:],
+            "ai-sdk-provider-utils/\(PROVIDER_UTILS_VERSION)",
+            getRuntimeEnvironmentUserAgent()
+        )
+
+        for (key, value) in headersWithUA {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+
+        // Set body
+        switch body.content {
+        case .json(let data), .data(let data):
+            request.httpBody = data
+        case .formData(let fields):
+            let builder = convertToFormData(fields)
+            let multipart = builder.build()
+            request.httpBody = multipart.data
+            if request.value(forHTTPHeaderField: "Content-Type") == nil {
+                request.setValue(multipart.contentType, forHTTPHeaderField: "Content-Type")
+            }
+        case .multipartFormData(let builder):
+            let multipart = builder.build()
+            request.httpBody = multipart.data
+            if request.value(forHTTPHeaderField: "Content-Type") == nil {
+                request.setValue(multipart.contentType, forHTTPHeaderField: "Content-Type")
+            }
+        }
+
+        // Check cancellation before fetch
+        if isAborted?() == true {
+            throw CancellationError()
+        }
+
+        // Execute request
+        let fetchResponse = try await fetchWithAbortCheck(
+            fetch: fetchImpl,
+            request: request,
+            isAborted: isAborted
+        )
+
+        guard let httpResponse = fetchResponse.urlResponse as? HTTPURLResponse else {
+            throw APICallError(
+                message: "Invalid response type",
+                url: url,
+                requestBodyValues: body.values
+            )
+        }
+
+        let responseHeaders = extractResponseHeaders(from: httpResponse)
+
+        // Create ProviderHTTPResponse
+        let providerResponse = ProviderHTTPResponse(
+            url: requestURL,
+            httpResponse: httpResponse,
+            body: fetchResponse.body
+        )
+
+        // Handle non-2xx responses
+        if !(200...299).contains(httpResponse.statusCode) {
+            let errorInput = ResponseHandlerInput(
+                url: url,
+                requestBodyValues: body.values,
+                response: providerResponse
+            )
+
+            let errorInfo: ResponseHandlerResult<APICallError>
+            do {
+                errorInfo = try await failedResponseHandler(errorInput)
+            } catch let error as APICallError {
+                throw error
+            } catch {
+                if isAbortError(error) {
+                    throw error
+                }
+
+                throw APICallError(
+                    message: "Failed to process error response",
+                    url: url,
+                    requestBodyValues: body.values,
+                    statusCode: httpResponse.statusCode,
+                    responseHeaders: responseHeaders,
+                    responseBody: nil,
+                    cause: error
+                )
+            }
+
+            throw errorInfo.value
+        }
+
+        // Handle successful response
+        let successInput = ResponseHandlerInput(
+            url: url,
+            requestBodyValues: body.values,
+            response: providerResponse
+        )
+
+        do {
+            return try await successfulResponseHandler(successInput)
+        } catch let error as APICallError {
+            throw error
+        } catch {
+            if isAbortError(error) {
+                throw error
+            }
+
+            throw APICallError(
+                message: "Failed to process successful response",
+                url: url,
+                requestBodyValues: body.values,
+                statusCode: httpResponse.statusCode,
+                responseHeaders: responseHeaders,
+                responseBody: nil,
+                cause: error
+            )
+        }
+
+    } catch {
+        throw handleFetchError(error: error, url: url, requestBodyValues: body.values)
+    }
+}

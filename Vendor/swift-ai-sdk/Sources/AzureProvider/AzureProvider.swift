@@ -1,0 +1,462 @@
+import Foundation
+import AISDKProvider
+import AISDKProviderUtils
+import OpenAIProvider
+@_exported import struct OpenAIProvider.OpenAILanguageModelChatOptions
+@_exported import struct OpenAIProvider.OpenAILanguageModelResponsesOptions
+import DeepSeekProvider
+
+/// Settings for configuring the Azure OpenAI provider.
+/// Mirrors `packages/azure/src/azure-openai-provider.ts`.
+public struct AzureProviderSettings: Sendable {
+    public var resourceName: String?
+    public var baseURL: String?
+    public var maiBaseURL: String?
+    public var speechBaseURL: String?
+    public var apiKey: String?
+    public var tokenProvider: (@Sendable () async throws -> String)?
+    public var headers: [String: String]?
+    public var fetch: FetchFunction?
+    public var webSocket: WebSocketConstructor?
+    public var apiVersion: String?
+    public var useDeploymentBasedUrls: Bool
+
+    public init(
+        resourceName: String? = nil,
+        baseURL: String? = nil,
+        maiBaseURL: String? = nil,
+        speechBaseURL: String? = nil,
+        apiKey: String? = nil,
+        tokenProvider: (@Sendable () async throws -> String)? = nil,
+        headers: [String: String]? = nil,
+        fetch: FetchFunction? = nil,
+        webSocket: WebSocketConstructor? = nil,
+        apiVersion: String? = nil,
+        useDeploymentBasedUrls: Bool = false
+    ) {
+        self.resourceName = resourceName
+        self.baseURL = baseURL
+        self.maiBaseURL = maiBaseURL
+        self.speechBaseURL = speechBaseURL
+        self.apiKey = apiKey
+        self.tokenProvider = tokenProvider
+        self.headers = headers
+        self.fetch = fetch
+        self.webSocket = webSocket
+        self.apiVersion = apiVersion
+        self.useDeploymentBasedUrls = useDeploymentBasedUrls
+    }
+}
+
+/// Azure OpenAI provider implementation.
+/// Mirrors `packages/azure/src/azure-openai-provider.ts`.
+public final class AzureProvider: ProviderV4 {
+    private let chatFactory: @Sendable (OpenAIChatModelId) -> OpenAIChatLanguageModel
+    private let deepseekFactory: @Sendable (DeepSeekChatModelId) -> DeepSeekChatLanguageModel
+    private let responsesFactory: @Sendable (OpenAIResponsesModelId) -> OpenAIResponsesLanguageModel
+    private let completionFactory: @Sendable (OpenAICompletionModelId) -> OpenAICompletionLanguageModel
+    private let embeddingFactory: @Sendable (OpenAIEmbeddingModelId) -> OpenAIEmbeddingModel
+    private let imageFactory: @Sendable (String) -> AzureImageModel
+    private let transcriptionFactory: @Sendable (String) -> AzureTranscriptionModel
+    private let speechFactory: @Sendable (String) -> AzureSpeechModel
+    public let tools: AzureProviderTools
+
+    init(
+        chatFactory: @escaping @Sendable (OpenAIChatModelId) -> OpenAIChatLanguageModel,
+        deepseekFactory: @escaping @Sendable (DeepSeekChatModelId) -> DeepSeekChatLanguageModel,
+        responsesFactory: @escaping @Sendable (OpenAIResponsesModelId) -> OpenAIResponsesLanguageModel,
+        completionFactory: @escaping @Sendable (OpenAICompletionModelId) -> OpenAICompletionLanguageModel,
+        embeddingFactory: @escaping @Sendable (OpenAIEmbeddingModelId) -> OpenAIEmbeddingModel,
+        imageFactory: @escaping @Sendable (String) -> AzureImageModel,
+        transcriptionFactory: @escaping @Sendable (String) -> AzureTranscriptionModel,
+        speechFactory: @escaping @Sendable (String) -> AzureSpeechModel,
+        tools: AzureProviderTools
+    ) {
+        self.chatFactory = chatFactory
+        self.deepseekFactory = deepseekFactory
+        self.responsesFactory = responsesFactory
+        self.completionFactory = completionFactory
+        self.embeddingFactory = embeddingFactory
+        self.imageFactory = imageFactory
+        self.transcriptionFactory = transcriptionFactory
+        self.speechFactory = speechFactory
+        self.tools = tools
+    }
+
+    public func languageModel(modelId: String) throws -> any LanguageModelV4 {
+        responsesFactory(OpenAIResponsesModelId(rawValue: modelId))
+    }
+
+    public func chatModel(modelId: String) throws -> any LanguageModelV4 {
+        chatFactory(OpenAIChatModelId(rawValue: modelId))
+    }
+
+    public func completionModel(modelId: String) -> any LanguageModelV4 {
+        completionFactory(OpenAICompletionModelId(rawValue: modelId))
+    }
+
+    public func embeddingModel(modelId: String) throws -> any EmbeddingModelV4 {
+        embeddingFactory(OpenAIEmbeddingModelId(rawValue: modelId))
+    }
+
+    public func imageModel(modelId: String) throws -> any ImageModelV4 {
+        imageFactory(modelId)
+    }
+
+    public func transcriptionModel(modelId: String) throws -> (any TranscriptionModelV4)? {
+        transcriptionFactory(modelId)
+    }
+
+    public func speechModel(modelId: String) throws -> (any SpeechModelV4)? {
+        speechFactory(modelId)
+    }
+
+    public func callAsFunction(_ modelId: String) throws -> any LanguageModelV4 {
+        try languageModel(modelId: modelId)
+    }
+
+    public func chat(_ modelId: OpenAIChatModelId) -> OpenAIChatLanguageModel {
+        chatFactory(modelId)
+    }
+
+    public func deepseek(_ modelId: DeepSeekChatModelId) -> DeepSeekChatLanguageModel {
+        deepseekFactory(modelId)
+    }
+
+    public func responses(_ modelId: OpenAIResponsesModelId) -> OpenAIResponsesLanguageModel {
+        responsesFactory(modelId)
+    }
+
+    public func completion(_ modelId: OpenAICompletionModelId) -> OpenAICompletionLanguageModel {
+        completionFactory(modelId)
+    }
+
+    public func embedding(_ modelId: OpenAIEmbeddingModelId) -> OpenAIEmbeddingModel {
+        embeddingFactory(modelId)
+    }
+
+    public func embeddingModel(_ modelId: OpenAIEmbeddingModelId) -> OpenAIEmbeddingModel {
+        embeddingFactory(modelId)
+    }
+
+    public func image(_ modelId: String) -> AzureImageModel {
+        imageFactory(modelId)
+    }
+
+    public func imageModel(_ modelId: String) -> AzureImageModel {
+        imageFactory(modelId)
+    }
+
+    public func transcription(_ modelId: String) -> AzureTranscriptionModel {
+        transcriptionFactory(modelId)
+    }
+
+    public func transcriptionModel(_ modelId: String) -> AzureTranscriptionModel {
+        transcriptionFactory(modelId)
+    }
+
+    public func speech(_ modelId: String) -> AzureSpeechModel {
+        speechFactory(modelId)
+    }
+
+    public func speechModel(_ modelId: String) -> AzureSpeechModel {
+        speechFactory(modelId)
+    }
+}
+
+public func createAzureProvider(settings: AzureProviderSettings = .init()) throws -> AzureProvider {
+    if let apiKey = settings.apiKey, !apiKey.isEmpty, settings.tokenProvider != nil {
+        throw InvalidArgumentError(
+            argument: "apiKey/tokenProvider",
+            message: "Both apiKey and tokenProvider were provided. Please use only one authentication method."
+        )
+    }
+
+    let endpoint = try Endpoint(baseURL: settings.baseURL)
+    let getHeaders: @Sendable (API) throws -> [String: String?] = { api in
+        var authHeaders: [String: String?] = [:]
+        if settings.tokenProvider == nil {
+            authHeaders[api == .speech ? "Ocp-Apim-Subscription-Key" : "api-key"] = try loadAPIKey(
+                apiKey: settings.apiKey,
+                environmentVariableName: "AZURE_API_KEY",
+                description: api.description
+            )
+        }
+        let combined = combineHeaders(authHeaders, settings.headers?.mapValues { Optional($0) })
+        return withUserAgentSuffix(combined, "ai-sdk-azure/\(AZURE_PROVIDER_VERSION)").mapValues { Optional($0) }
+    }
+
+    let headers: @Sendable () throws -> [String: String?] = { try getHeaders(.openai) }
+
+    let fetch: FetchFunction?
+    if let tokenProvider = settings.tokenProvider {
+        let baseFetch = settings.fetch ?? defaultFetchFunction()
+        fetch = { request in
+            var request = request
+            if request.value(forHTTPHeaderField: "Authorization") == nil {
+                request.setValue("Bearer \(try await tokenProvider())", forHTTPHeaderField: "Authorization")
+            }
+            return try await baseFetch(request)
+        }
+    } else {
+        fetch = settings.fetch
+    }
+
+    let getResourceName: @Sendable () throws -> String = {
+        let resourceName = try loadSetting(
+            settingValue: settings.resourceName,
+            environmentVariableName: "AZURE_RESOURCE_NAME",
+            settingName: "resourceName",
+            description: "Azure OpenAI resource name"
+        )
+        guard isValidHostnamePart(resourceName) else {
+            throw InvalidArgumentError(
+                argument: "resourceName",
+                message: "Invalid Azure resource name. Expected a single DNS label (letters, digits, and hyphens). Use `baseURL` for custom endpoints."
+            )
+        }
+        return resourceName
+    }
+
+    let urlBuilder: @Sendable (OpenAIConfig.URLOptions) throws -> String = { options in
+        let basePrefix: String
+        if let baseURL = settings.baseURL {
+            basePrefix = withoutTrailingSlash(baseURL) ?? baseURL
+        } else {
+            basePrefix = "https://\(try getResourceName()).openai.azure.com/openai"
+        }
+
+        let fullURL: String
+        if settings.useDeploymentBasedUrls {
+            fullURL = "\(basePrefix)/deployments/\(options.modelId)\(options.path)"
+        } else if !endpoint.isAzure || endpoint.isVersioned {
+            fullURL = basePrefix + options.path
+        } else {
+            fullURL = basePrefix + "/v1" + options.path
+        }
+
+        guard var url = URLComponents(string: fullURL), url.host != nil, url.scheme != nil else {
+            throw InvalidArgumentError(argument: "baseURL", message: "Invalid Azure request URL.")
+        }
+        url.host = url.host?.lowercased()
+        url.scheme = url.scheme?.lowercased()
+        if settings.useDeploymentBasedUrls || (endpoint.isAzure && !endpoint.isVersioned && !endpoint.isFoundry) {
+            url.percentEncodedQuery = url.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%20")
+            var items = url.queryItems ?? []
+            if let index = items.firstIndex(where: { $0.name == "api-version" }) {
+                items[index] = URLQueryItem(name: "api-version", value: settings.apiVersion ?? "v1")
+                items = items.enumerated().filter { $0.offset == index || $0.element.name != "api-version" }.map(\.element)
+            } else {
+                items.append(URLQueryItem(name: "api-version", value: settings.apiVersion ?? "v1"))
+            }
+            url.percentEncodedQuery = items.map {
+                Endpoint.encodeQuery($0.name) + "=" + Endpoint.encodeQuery($0.value ?? "")
+            }.joined(separator: "&")
+        }
+        guard let result = url.string else {
+            throw InvalidArgumentError(argument: "baseURL", message: "Invalid Azure request URL.")
+        }
+        return result
+    }
+
+    let chatConfig = OpenAIConfig(
+        provider: "azure.chat",
+        url: urlBuilder,
+        headers: headers,
+        fetch: fetch
+    )
+
+    let responsesConfig = OpenAIConfig(
+        provider: "azure.responses",
+        explicitMessageItemType: endpoint.isFoundry,
+        url: urlBuilder,
+        headers: headers,
+        fetch: fetch,
+        fileIdPrefixes: ["assistant-"]
+    )
+
+    let completionConfig = OpenAIConfig(
+        provider: "azure.completion",
+        url: urlBuilder,
+        headers: headers,
+        fetch: fetch
+    )
+
+    let embeddingConfig = OpenAIConfig(
+        provider: "azure.embeddings",
+        url: urlBuilder,
+        headers: headers,
+        fetch: fetch
+    )
+
+    let imageConfig = OpenAIConfig(
+        provider: "azure.image",
+        imageInputCapabilities: .init(),
+        url: urlBuilder,
+        headers: headers,
+        fetch: fetch
+    )
+
+    let transcriptionConfig = OpenAIConfig(
+        provider: "azure.transcription",
+        url: urlBuilder,
+        headers: headers,
+        fetch: fetch
+    )
+
+    let speechConfig = OpenAIConfig(
+        provider: "azure.speech",
+        url: urlBuilder,
+        headers: headers,
+        fetch: fetch
+    )
+
+    let deepseekConfig = DeepSeekChatConfig(
+        provider: "azure.deepseek",
+        headers: { try headers().compactMapValues { $0 } },
+        url: { try urlBuilder(.init(modelId: $0.modelId, path: $0.path)) },
+        fetch: fetch,
+        supportsPenaltySampling: true,
+        supportsThinking: false,
+        supportsStructuredOutputs: true
+    )
+    let deepseekFactory: @Sendable (DeepSeekChatModelId) -> DeepSeekChatLanguageModel = { modelId in
+        DeepSeekChatLanguageModel(modelId: modelId, config: deepseekConfig)
+    }
+
+    let chatFactory: @Sendable (OpenAIChatModelId) -> OpenAIChatLanguageModel = { modelId in
+        OpenAIChatLanguageModel(
+            modelId: modelId,
+            config: chatConfig
+        )
+    }
+
+    let responsesFactory: @Sendable (OpenAIResponsesModelId) -> OpenAIResponsesLanguageModel = { modelId in
+        OpenAIResponsesLanguageModel(
+            modelId: modelId,
+            config: responsesConfig
+        )
+    }
+
+    let completionFactory: @Sendable (OpenAICompletionModelId) -> OpenAICompletionLanguageModel = { modelId in
+        OpenAICompletionLanguageModel(
+            modelId: modelId,
+            config: completionConfig
+        )
+    }
+
+    let embeddingFactory: @Sendable (OpenAIEmbeddingModelId) -> OpenAIEmbeddingModel = { modelId in
+        OpenAIEmbeddingModel(
+            modelId: modelId,
+            config: embeddingConfig
+        )
+    }
+
+    let getMaiBaseURL: @Sendable () throws -> String = {
+        try withoutTrailingSlash(settings.maiBaseURL) ?? "https://\(getResourceName()).services.ai.azure.com/mai/v1"
+    }
+    let getSpeechBaseURL: @Sendable () throws -> String = {
+        try withoutTrailingSlash(settings.speechBaseURL) ?? "https://\(getResourceName()).cognitiveservices.azure.com"
+    }
+    let maiImageConfig = AzureMaiImageConfig(
+        url: { try getMaiBaseURL() + $0 },
+        headers: { try getHeaders(.mai) },
+        fetch: fetch
+    )
+    let imageFactory: @Sendable (String) -> AzureImageModel = { modelId in
+        AzureImageModel(modelId: modelId,
+            openai: OpenAIImageModel(modelId: .init(rawValue: modelId), config: imageConfig),
+            mai: AzureMaiImageModel(modelId: modelId, config: maiImageConfig))
+    }
+
+    let speechTranscriptionConfig = AzureSpeechTranscriptionConfig(
+        url: { try getSpeechBaseURL() + "/speechtotext/transcriptions:transcribe?api-version=2025-10-15" },
+        headers: { try getHeaders(.speech) }, fetch: fetch
+    )
+    let maiTranscriptionConfig = AzureMaiTranscriptionConfig(
+        url: { try getMaiBaseURL() + "/realtime?intent=transcription" },
+        headers: {
+            if let tokenProvider = settings.tokenProvider {
+                return combineHeaders(["authorization": "Bearer \(try await tokenProvider())"], try getHeaders(.mai))
+            }
+            return try getHeaders(.mai)
+        }, webSocket: settings.webSocket
+    )
+    let transcriptionFactory: @Sendable (String) -> AzureTranscriptionModel = { modelId in
+        AzureTranscriptionModel(modelId: modelId,
+            openai: OpenAITranscriptionModel(modelId: .init(rawValue: modelId), config: transcriptionConfig),
+            speech: AzureSpeechTranscriptionModel(modelId: modelId, config: speechTranscriptionConfig),
+            mai: AzureMaiTranscriptionModel(modelId: modelId, config: maiTranscriptionConfig))
+    }
+
+    let speechAPIConfig = AzureSpeechSpeechConfig(
+        url: { try getSpeechBaseURL() + "/tts/cognitiveservices/v1" },
+        headers: { try getHeaders(.speech) },
+        fetch: fetch
+    )
+    let speechFactory: @Sendable (String) -> AzureSpeechModel = { modelId in
+        AzureSpeechModel(modelId: modelId,
+            openai: OpenAISpeechModel(modelId: .init(rawValue: modelId), config: speechConfig),
+            speech: AzureSpeechSpeechModel(modelId: modelId, config: speechAPIConfig))
+    }
+
+    return AzureProvider(
+        chatFactory: chatFactory,
+        deepseekFactory: deepseekFactory,
+        responsesFactory: responsesFactory,
+        completionFactory: completionFactory,
+        embeddingFactory: embeddingFactory,
+        imageFactory: imageFactory,
+        transcriptionFactory: transcriptionFactory,
+        speechFactory: speechFactory,
+        tools: azureOpenaiTools
+    )
+}
+
+/// Alias to mirror TypeScript naming (`createAzure`).
+public func createAzure(settings: AzureProviderSettings = .init()) throws -> AzureProvider {
+    try createAzureProvider(settings: settings)
+}
+
+/// Default Azure provider instance (`export const azure = createAzure()`).
+public let azure: AzureProvider = try! createAzureProvider()
+
+private enum API: Sendable {
+    case openai, speech, mai
+
+    var description: String {
+        switch self {
+        case .openai: "Azure OpenAI"
+        case .speech: "Azure Speech"
+        case .mai: "Azure MAI"
+        }
+    }
+}
+
+private struct Endpoint: Sendable {
+    let isAzure: Bool
+    let isFoundry: Bool
+    let isVersioned: Bool
+
+    init(baseURL: String?) throws {
+        guard let baseURL else {
+            isAzure = true
+            isFoundry = false
+            isVersioned = false
+            return
+        }
+        guard let url = URLComponents(string: baseURL), let host = url.host?.lowercased(), !host.isEmpty, url.scheme != nil else {
+            throw InvalidArgumentError(argument: "baseURL", message: "Invalid Azure base URL.")
+        }
+        isAzure = [".openai.azure.com", ".services.ai.azure.com", ".cognitiveservices.azure.com"].contains { host.hasSuffix($0) }
+        var path = url.path
+        while path.hasSuffix("/") { path.removeLast() }
+        isFoundry = host.hasSuffix(".services.ai.azure.com") && path.hasPrefix("/api/projects/")
+        isVersioned = isAzure && path.lowercased().hasSuffix("/openai/v1")
+    }
+
+    static func encodeQuery(_ value: String) -> String {
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789*-._")
+        return value.addingPercentEncoding(withAllowedCharacters: allowed)!.replacingOccurrences(of: "%20", with: "+")
+    }
+}

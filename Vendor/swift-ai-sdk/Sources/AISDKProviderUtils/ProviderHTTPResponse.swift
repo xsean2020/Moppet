@@ -1,0 +1,97 @@
+import Foundation
+
+/// Represents the body of an HTTP response returned by a provider request.
+public enum ProviderHTTPResponseBody: Sendable {
+    case none
+    case data(Data)
+    case stream(AsyncThrowingStream<Data, Error>)
+
+    /// Creates a stream for the body. For buffered data, the stream yields a single chunk.
+    public func makeStream() -> AsyncThrowingStream<Data, Error> {
+        switch self {
+        case .none:
+            return AsyncThrowingStream { continuation in
+                continuation.finish()
+            }
+        case .data(let data):
+            return AsyncThrowingStream { continuation in
+                if !data.isEmpty {
+                    continuation.yield(data)
+                }
+                continuation.finish()
+            }
+        case .stream(let stream):
+            return stream
+        }
+    }
+
+    /// Collects the body into a single `Data` object.
+    public func collectData() async throws -> Data {
+        if Task.isCancelled {
+            if case .stream(let stream) = self { await cancelStream(stream) }
+            throw CancellationError()
+        }
+        let result: Data
+        switch self {
+        case .none:
+            result = Data()
+        case .data(let data):
+            result = data
+        case .stream(let stream):
+            var buffer = Data()
+            for try await chunk in stream {
+                buffer.append(chunk)
+            }
+            result = buffer
+        }
+        try Task.checkCancellation()
+        return result
+    }
+
+    public func collectText() async throws -> String {
+        try await collectData().utf8String()
+    }
+}
+
+extension Data {
+    // Response text strips one initial BOM and replaces malformed UTF-8 bytes.
+    func utf8String() -> String {
+        let bytes = starts(with: [0xef, 0xbb, 0xbf]) ? dropFirst(3) : self
+        return String(decoding: bytes, as: UTF8.self)
+    }
+}
+
+/// Lightweight representation of an HTTP response for provider utilities.
+public struct ProviderHTTPResponse: Sendable {
+    public let url: URL
+    public let httpResponse: HTTPURLResponse
+    public let body: ProviderHTTPResponseBody
+    public let statusText: String
+
+    public init(
+        url: URL,
+        httpResponse: HTTPURLResponse,
+        body: ProviderHTTPResponseBody,
+        statusText: String? = nil
+    ) {
+        self.url = url
+        self.httpResponse = httpResponse
+        self.body = body
+        if let statusText {
+            self.statusText = statusText
+        } else {
+            let localized = HTTPURLResponse.localizedString(forStatusCode: httpResponse.statusCode)
+            self.statusText = localized.isEmpty ? "\(httpResponse.statusCode)" : localized.capitalizingFirstLetter()
+        }
+    }
+
+    public var statusCode: Int {
+        httpResponse.statusCode
+    }
+}
+
+private extension String {
+    func capitalizingFirstLetter() -> String {
+        self.capitalized
+    }
+}

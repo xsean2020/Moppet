@@ -1,0 +1,134 @@
+import Foundation
+import AISDKProvider
+import AISDKProviderUtils
+
+/// Settings for configuring the Replicate provider.
+/// Mirrors `packages/replicate/src/replicate-provider.ts`.
+public struct ReplicateProviderSettings: Sendable {
+    /// API token sent via the Authorization header (env: REPLICATE_API_TOKEN)
+    public var apiToken: String?
+
+    /// Custom base URL for API calls (default: https://api.replicate.com/v1)
+    public var baseURL: String?
+
+    /// Custom headers to include in requests
+    public var headers: [String: String]?
+
+    /// Custom fetch implementation
+    public var fetch: FetchFunction?
+
+    public init(
+        apiToken: String? = nil,
+        baseURL: String? = nil,
+        headers: [String: String]? = nil,
+        fetch: FetchFunction? = nil
+    ) {
+        self.apiToken = apiToken
+        self.baseURL = baseURL
+        self.headers = headers
+        self.fetch = fetch
+    }
+}
+
+public final class ReplicateProvider: ProviderV4, VideoProviderV4 {
+    private let imageFactory: @Sendable (ReplicateImageModelId) -> ReplicateImageModel
+    private let videoFactory: @Sendable (ReplicateVideoModelId) -> ReplicateVideoModel
+
+    init(
+        imageFactory: @escaping @Sendable (ReplicateImageModelId) -> ReplicateImageModel,
+        videoFactory: @escaping @Sendable (ReplicateVideoModelId) -> ReplicateVideoModel
+    ) {
+        self.imageFactory = imageFactory
+        self.videoFactory = videoFactory
+    }
+
+    // MARK: ProviderV4
+    public func languageModel(modelId: String) throws -> any LanguageModelV4 {
+        throw NoSuchModelError(modelId: modelId, modelType: .languageModel)
+    }
+
+    public func embeddingModel(modelId: String) throws -> any EmbeddingModelV4 {
+        throw NoSuchModelError(modelId: modelId, modelType: .embeddingModel)
+    }
+
+    public func imageModel(modelId: String) throws -> any ImageModelV4 {
+        imageFactory(ReplicateImageModelId(rawValue: modelId))
+    }
+
+    public func videoModel(modelId: String) throws -> any VideoModelV4 {
+        videoFactory(ReplicateVideoModelId(rawValue: modelId))
+    }
+
+    // MARK: Convenience
+    public func image(_ modelId: ReplicateImageModelId) -> ReplicateImageModel {
+        imageFactory(modelId)
+    }
+
+    public func imageModel(_ modelId: ReplicateImageModelId) -> ReplicateImageModel {
+        imageFactory(modelId)
+    }
+
+    public func video(_ modelId: ReplicateVideoModelId) -> ReplicateVideoModel {
+        videoFactory(modelId)
+    }
+
+    public func videoModel(_ modelId: ReplicateVideoModelId) -> ReplicateVideoModel {
+        videoFactory(modelId)
+    }
+}
+
+/// Create a Replicate provider instance.
+public func createReplicate(settings: ReplicateProviderSettings = .init()) -> ReplicateProvider {
+    let baseURL = withoutTrailingSlash(settings.baseURL) ?? "https://api.replicate.com/v1"
+
+    let fetch = settings.fetch
+
+    let headersClosure: @Sendable () throws -> [String: String?] = {
+        _ = try validateBaseURL(baseURL)
+        let apiToken = try loadAPIKey(
+            apiKey: settings.apiToken,
+            environmentVariableName: "REPLICATE_API_TOKEN",
+            description: "Replicate"
+        )
+        var headers: [String: String?] = ["Authorization": "Bearer \(apiToken)"]
+
+        if let extra = settings.headers {
+            for (k, v) in extra { headers[k] = v }
+        }
+
+        let withUA = withUserAgentSuffix(headers, "ai-sdk-replicate/\(VERSION)")
+        return withUA.mapValues { Optional($0) }
+    }
+
+    let factory: @Sendable (ReplicateImageModelId) -> ReplicateImageModel = { modelId in
+        ReplicateImageModel(
+            modelId,
+            config: ReplicateImageModelConfig(
+                provider: "replicate",
+                baseURL: baseURL,
+                headers: headersClosure,
+                fetch: fetch
+            )
+        )
+    }
+
+    let videoFactory: @Sendable (ReplicateVideoModelId) -> ReplicateVideoModel = { modelId in
+        ReplicateVideoModel(
+            modelId,
+            config: ReplicateVideoModelConfig(
+                provider: "replicate.video",
+                baseURL: baseURL,
+                headers: headersClosure,
+                fetch: fetch
+            )
+        )
+    }
+
+    return ReplicateProvider(
+        imageFactory: factory,
+        videoFactory: videoFactory
+    )
+}
+
+/// Default Replicate provider instance.
+public let replicate: ReplicateProvider = createReplicate()

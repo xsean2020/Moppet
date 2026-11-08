@@ -1,0 +1,64 @@
+import Foundation
+import AISDKProvider
+import AISDKProviderUtils
+
+/**
+ Generate image prompt.
+
+ Port of `GenerateImagePrompt` from `@ai-sdk/ai/src/generate-image/generate-image.ts`.
+ */
+public enum GenerateImagePrompt: Sendable {
+    case text(String)
+    case imageEditing(text: String?, images: [DataContent], mask: DataContent?)
+}
+
+extension GenerateImagePrompt {
+    public static func imageEditing(
+        images: [DataContent],
+        text: String? = nil,
+        mask: DataContent? = nil
+    ) -> GenerateImagePrompt {
+        .imageEditing(text: text, images: images, mask: mask)
+    }
+
+    func normalize() throws -> (prompt: String?, files: [ImageModelV4File]?, mask: ImageModelV4File?) {
+        switch self {
+        case .text(let text):
+            return (prompt: text, files: nil, mask: nil)
+
+        case .imageEditing(let text, let images, let mask):
+            let files = try images.map { try toImageModelV4File($0) }
+            let maskFile = try mask.map { try toImageModelV4File($0) }
+            return (prompt: text, files: files, mask: maskFile)
+        }
+    }
+}
+
+func toImageModelV4File(_ dataContent: DataContent) throws -> ImageModelV4File {
+    switch dataContent {
+    case .string(let string):
+        if string.hasPrefix("http") {
+            return .url(url: string, providerOptions: nil)
+        }
+
+        if string.hasPrefix("data:") {
+            let (dataUrlMediaType, base64Content) = splitDataUrl(string)
+
+            if let base64Content {
+                let data = try convertBase64ToData(base64Content)
+                let mediaType = dataUrlMediaType
+                    ?? detectMediaType(data: data, topLevelType: "image")
+                    ?? "image/png"
+                return .file(mediaType: mediaType, data: .binary(data), providerOptions: nil)
+            }
+        }
+
+        let data = try convertBase64ToData(string)
+        let mediaType = detectMediaType(data: data, topLevelType: "image") ?? "image/png"
+        return .file(mediaType: mediaType, data: .binary(data), providerOptions: nil)
+
+    case .data(let data):
+        let mediaType = detectMediaType(data: data, topLevelType: "image") ?? "image/png"
+        return .file(mediaType: mediaType, data: .binary(data), providerOptions: nil)
+    }
+}

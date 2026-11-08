@@ -1,0 +1,20 @@
+import Foundation
+import AISDKProvider
+import AISDKProviderUtils
+
+private let codeExecutionOutputJSONSchema: JSONValue = .object([
+    "type": .string("object"),
+    "required": .array([.string("output")]),
+    "additionalProperties": .bool(false),
+    "properties": .object([
+        "output": .object(["type": .string("string")]),
+        "error": .object(["type": .string("string")])
+    ])
+])
+
+public let xaiCodeExecutionToolFactory = createProviderExecutedToolFactory(
+    id: "xai.code_execution",
+    name: "code_execution",
+    inputSchema: hostedToolInputSchema,
+    outputSchema: FlexibleSchema(jsonSchema(codeExecutionOutputJSONSchema))
+)

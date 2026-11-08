@@ -1,0 +1,77 @@
+import Foundation
+import AISDKProvider
+import AISDKProviderUtils
+
+public struct OpenAILocalShellAction: Codable, Sendable, Equatable {
+    public let type: String
+    public let command: [String]
+    public let timeoutMs: Int?
+    public let user: String?
+    public let workingDirectory: String?
+    public let env: [String: String]?
+}
+
+public struct OpenAILocalShellInput: Codable, Sendable, Equatable {
+    public let action: OpenAILocalShellAction
+}
+
+public struct OpenAILocalShellOutput: Codable, Sendable, Equatable {
+    public let output: String
+}
+
+private let localShellInputJSONSchema: JSONValue = .object([
+    "type": .string("object"),
+    "required": .array([.string("action")]),
+    "additionalProperties": .bool(false),
+    "properties": .object([
+        "action": .object([
+            "type": .string("object"),
+            "required": .array([.string("type"), .string("command")]),
+            "additionalProperties": .bool(false),
+            "properties": .object([
+                "type": .object([
+                    "type": .string("string"),
+                    "enum": .array([JSONValue.string("exec")])
+                ]),
+                "command": .object([
+                    "type": .string("array"),
+                    "items": .object(["type": .string("string")])
+                ]),
+                "timeoutMs": .object([
+                    "type": .string("integer")
+                ]),
+                "user": .object([
+                    "type": .string("string")
+                ]),
+                "workingDirectory": .object([
+                    "type": .string("string")
+                ]),
+                "env": .object([
+                    "type": .string("object"),
+                    "additionalProperties": .object(["type": .string("string")])
+                ])
+            ])
+        ])
+    ])
+])
+
+private let localShellOutputJSONSchema: JSONValue = .object([
+    "type": .string("object"),
+    "required": .array([.string("output")]),
+    "additionalProperties": .bool(false),
+    "properties": .object([
+        "output": .object([
+            "type": .string("string")
+        ])
+    ])
+])
+
+public let openaiLocalShellInputSchema = openAIToolSchema(OpenAILocalShellInput.self, localShellInputJSONSchema)
+public let openaiLocalShellOutputSchema = openAIToolSchema(OpenAILocalShellOutput.self, localShellOutputJSONSchema)
+
+public let openaiLocalShellTool = createProviderDefinedToolFactoryWithOutputSchema(
+    id: "openai.local_shell",
+    name: "local_shell",
+    inputSchema: openAIToolSchema(localShellInputJSONSchema),
+    outputSchema: openAIToolSchema(localShellOutputJSONSchema)
+)

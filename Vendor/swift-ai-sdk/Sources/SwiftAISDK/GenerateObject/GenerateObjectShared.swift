@@ -1,0 +1,85 @@
+import Foundation
+import AISDKProvider
+import AISDKProviderUtils
+
+/**
+ Shared helpers for `generateObject` and `streamObject`.
+
+ Port of `@ai-sdk/ai/src/generate-object` shared utilities.
+ */
+func makeGenerateObjectPrompt(
+    instructions: Instructions?,
+    prompt: String?,
+    messages: [ModelMessage]?,
+    allowSystemInMessages: Bool?
+) throws -> Prompt {
+    if prompt != nil, messages != nil {
+        throw InvalidPromptError(
+            prompt: "Prompt(instructions: \(String(describing: instructions)), prompt: \(prompt ?? "nil"), messages: provided)",
+            message: "Provide either `prompt` or `messages`, not both."
+        )
+    }
+
+    if prompt != nil || messages != nil {
+        return Prompt(
+            instructions: instructions,
+            allowSystemInMessages: allowSystemInMessages,
+            prompt: prompt.map(PromptContent.text),
+            messages: messages
+        )
+    }
+
+    throw InvalidPromptError(
+        prompt: "Prompt(instructions: \(String(describing: instructions)))",
+        message: "Either `prompt` or `messages` must be provided."
+    )
+}
+
+func convertGenerateObjectRequestMetadata(
+    _ info: LanguageModelV4RequestInfo?
+) -> LanguageModelRequestMetadata {
+    convertGenerateObjectRequestBody(info?.body)
+}
+
+private func convertGenerateObjectRequestBody(_ body: Any?) -> LanguageModelRequestMetadata {
+    guard let body else {
+        return LanguageModelRequestMetadata()
+    }
+
+    if let json = try? jsonValue(from: body) {
+        return LanguageModelRequestMetadata(body: json)
+    }
+
+    if let encodable = body as? Encodable {
+        let encoder = JSONEncoder()
+        if let data = try? encoder.encode(AnyEncodableBox(encodable)),
+           let object = try? JSONSerialization.jsonObject(with: data),
+           let json = JSONValue(jsonObject: object) {
+            return LanguageModelRequestMetadata(body: json)
+        }
+    }
+
+    return LanguageModelRequestMetadata()
+}
+
+private struct AnyEncodableBox: Encodable {
+    private let value: Encodable
+
+    init(_ value: Encodable) {
+        self.value = value
+    }
+
+    func encode(to encoder: Encoder) throws {
+        try value.encode(to: encoder)
+    }
+}
+
+func convertGenerateObjectResponseBody(_ body: Any?) -> JSONValue? {
+    guard let body else { return nil }
+
+    if let json = body as? JSONValue {
+        return json
+    }
+
+    return try? jsonValue(from: body)
+}

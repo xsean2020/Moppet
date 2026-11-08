@@ -7,7 +7,11 @@ let package = Package(
     dependencies: [
         // Unified AI SDK for Swift (port of Vercel AI SDK): multi-vendor
         // providers, streaming, tool-calling agent loops.
-        .package(url: "https://github.com/teunlao/swift-ai-sdk.git", from: "0.20.0"),
+        // Vendored（Apache-2.0，源 Vendor/swift-ai-sdk）：0.20.0 在
+        // Swift 6.0/6.1（Xcode 16.x / Intel Mac）编译报 Sendable 跨界错
+        // （ConvertAsyncIteratorToReadableStream.swift），上游无修复 tag，
+        // 本地补丁见该文件内注释；上游发布修复版后可换回远程依赖。
+        .package(path: "Vendor/swift-ai-sdk"),
         // Markdown rendering for the AI chat transcript.
         .package(url: "https://github.com/gonzalezreal/swift-markdown-ui.git", from: "2.4.0"),
         // Keychain wrapper for the AI API key.

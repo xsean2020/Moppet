@@ -1,0 +1,85 @@
+import Foundation
+import AISDKProvider
+import AISDKProviderUtils
+
+private func parseOptionalNumber(_ dict: [String: JSONValue], key: String, allowNull: Bool = false) throws -> Int? {
+    guard let value = dict[key] else { return nil }
+    if value == .null {
+        if allowNull {
+            return nil
+        }
+        let error = SchemaValidationIssuesError(vendor: "openai", issues: "\(key) must be a number")
+        throw TypeValidationError.wrap(value: value, cause: error)
+    }
+    guard case .number(let number) = value, let integer = Int(exactly: number) else {
+        let error = SchemaValidationIssuesError(vendor: "openai", issues: "\(key) must be a number")
+        throw TypeValidationError.wrap(value: value, cause: error)
+    }
+    return integer
+}
+
+private func parseOptionalString(_ dict: [String: JSONValue], key: String, allowNull: Bool = false) throws -> String? {
+    guard let value = dict[key] else { return nil }
+    if value == .null {
+        if allowNull {
+            return nil
+        }
+        let error = SchemaValidationIssuesError(vendor: "openai", issues: "\(key) must be a string")
+        throw TypeValidationError.wrap(value: value, cause: error)
+    }
+    guard case .string(let string) = value else {
+        let error = SchemaValidationIssuesError(vendor: "openai", issues: "\(key) must be a string")
+        throw TypeValidationError.wrap(value: value, cause: error)
+    }
+    return string
+}
+
+public struct OpenAIEmbeddingModelOptions: Sendable, Equatable {
+    public let dimensions: Int?
+    public let user: String?
+
+    public init(dimensions: Int? = nil, user: String? = nil) {
+        self.dimensions = dimensions
+        self.user = user
+    }
+}
+
+private let openaiEmbeddingProviderOptionsJSONSchema: JSONValue = .object([
+    "type": .string("object"),
+    "additionalProperties": .bool(true),
+    "properties": .object([
+        "dimensions": .object([
+            "type": .string("integer")
+        ]),
+        "user": .object([
+            "type": .string("string")
+        ])
+    ])
+])
+
+public let openaiEmbeddingProviderOptionsSchema = FlexibleSchema<OpenAIEmbeddingModelOptions>(
+    Schema(
+        jsonSchemaResolver: { openaiEmbeddingProviderOptionsJSONSchema },
+        validator: { value in
+            do {
+                let json = try jsonValue(from: value)
+                guard case .object(let dict) = json else {
+                    let error = SchemaValidationIssuesError(vendor: "openai", issues: "expected object")
+                    return .failure(error: TypeValidationError.wrap(value: value, cause: error))
+                }
+
+                let options = OpenAIEmbeddingModelOptions(
+                    dimensions: try parseOptionalNumber(dict, key: "dimensions", allowNull: false),
+                    user: try parseOptionalString(dict, key: "user", allowNull: false)
+                )
+
+                return .success(value: options)
+            } catch let error as TypeValidationError {
+                return .failure(error: error)
+            } catch {
+                let wrapped = TypeValidationError.wrap(value: value, cause: error)
+                return .failure(error: wrapped)
+            }
+        }
+    )
+)

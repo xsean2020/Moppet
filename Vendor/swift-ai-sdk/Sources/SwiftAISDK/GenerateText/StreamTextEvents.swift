@@ -1,0 +1,217 @@
+import Foundation
+import AISDKProvider
+import AISDKProviderUtils
+
+/// High-level event emitted while observing a StreamText full stream.
+public enum StreamTextEvent: Sendable {
+    case start
+    case startStep(index: Int, warnings: [CallWarning])
+    case textDelta(text: String, id: String)
+    case textEnd(id: String)
+    case reasoningDelta(text: String, id: String)
+    case toolCall(TypedToolCall)
+    case toolResult(TypedToolResult)
+    case toolError(TypedToolError)
+    case toolApprovalRequest(ToolApprovalRequestOutput)
+    case toolOutputDenied(ToolOutputDenied)
+    case source(Source)
+    case custom(kind: String, providerMetadata: ProviderMetadata?)
+    case file(GeneratedFile)
+    case reasoningFile(GeneratedFile)
+    case finish(reason: FinishReason, rawFinishReason: String?, usage: LanguageModelUsage)
+    case abort(reason: String?)
+}
+
+/// Converts a `TextStreamPart` stream into a higher-level event stream mirroring the
+/// upstream `stream-text.ts` event helpers.
+public func makeStreamTextEventStream(
+    from stream: AsyncThrowingStream<TextStreamPart, Error>
+) -> AsyncThrowingStream<StreamTextEvent, Error> {
+    AsyncThrowingStream { continuation in
+        let task = Task {
+            let encoder = StreamTextEventEncoder()
+            do {
+                for try await part in stream {
+                    if Task.isCancelled { break }
+                    for event in encoder.encode(part: part) {
+                        continuation.yield(event)
+                    }
+                }
+                for event in encoder.finalize() {
+                    continuation.yield(event)
+                }
+                continuation.finish()
+            } catch {
+                continuation.finish(throwing: error)
+            }
+        }
+        continuation.onTermination = { _ in task.cancel() }
+    }
+}
+
+/// Summary produced by `summarizeStreamTextEvents`.
+public struct StreamTextEventSummary: Sendable {
+    public var text: String
+    public var reasoning: [String]
+    public var toolCalls: [TypedToolCall]
+    public var toolResults: [TypedToolResult]
+    public var files: [GeneratedFile]
+    public var reasoningFiles: [GeneratedFile]
+    public var sources: [Source]
+    public var finishReason: FinishReason?
+    public var usage: LanguageModelUsage?
+    public var aborted: Bool
+
+    public init(
+        text: String = "",
+        reasoning: [String] = [],
+        toolCalls: [TypedToolCall] = [],
+        toolResults: [TypedToolResult] = [],
+        files: [GeneratedFile] = [],
+        reasoningFiles: [GeneratedFile] = [],
+        sources: [Source] = [],
+        finishReason: FinishReason? = nil,
+        usage: LanguageModelUsage? = nil,
+        aborted: Bool = false
+    ) {
+        self.text = text
+        self.reasoning = reasoning
+        self.toolCalls = toolCalls
+        self.toolResults = toolResults
+        self.files = files
+        self.reasoningFiles = reasoningFiles
+        self.sources = sources
+        self.finishReason = finishReason
+        self.usage = usage
+        self.aborted = aborted
+    }
+}
+
+/// Consumes a StreamText event stream and aggregates high-level data.
+public func summarizeStreamTextEvents(
+    _ stream: AsyncThrowingStream<StreamTextEvent, Error>
+) async throws -> StreamTextEventSummary {
+    var summary = StreamTextEventSummary()
+    for try await event in stream {
+        switch event {
+        case .start:
+            continue
+        case .startStep:
+            continue
+        case let .textDelta(text, _):
+            summary.text.append(contentsOf: text)
+        case .textEnd:
+            continue
+        case let .reasoningDelta(text, _):
+            summary.reasoning.append(text)
+        case let .toolCall(call):
+            summary.toolCalls.append(call)
+        case let .toolResult(result):
+            summary.toolResults.append(result)
+        case .toolError:
+            continue
+        case .toolApprovalRequest:
+            continue
+        case .toolOutputDenied:
+            continue
+        case let .source(source):
+            summary.sources.append(source)
+        case .custom:
+            continue
+        case let .file(file):
+            summary.files.append(file)
+        case let .reasoningFile(file):
+            summary.reasoningFiles.append(file)
+        case let .finish(reason, _, usage):
+            summary.finishReason = reason
+            summary.usage = usage
+        case .abort:
+            summary.aborted = true
+        }
+    }
+    return summary
+}
+
+// MARK: - Internal encoder
+
+private final class StreamTextEventEncoder {
+    private var currentStep = -1
+    private var finishedEmitted = false
+
+    func encode(part: TextStreamPart) -> [StreamTextEvent] {
+        switch part {
+        case .start:
+            currentStep = -1
+            finishedEmitted = false
+            return [.start]
+
+        case let .startStep(_, warnings):
+            currentStep += 1
+            return [.startStep(index: currentStep, warnings: warnings)]
+
+        case .textStart:
+            return []
+
+        case let .textDelta(id, text, _):
+            return [.textDelta(text: text, id: id)]
+
+        case let .textEnd(id, _, _):
+            return [.textEnd(id: id)]
+
+        case let .reasoningDelta(id, text, _):
+            return [.reasoningDelta(text: text, id: id)]
+
+        case let .toolCall(call):
+            return [.toolCall(call)]
+
+        case let .toolResult(result):
+            return [.toolResult(result)]
+
+        case let .toolError(error):
+            return [.toolError(error)]
+
+        case let .toolApprovalRequest(request):
+            return [.toolApprovalRequest(request)]
+
+        case let .toolOutputDenied(denied):
+            return [.toolOutputDenied(denied)]
+
+        case let .source(source):
+            return [.source(source)]
+
+        case let .custom(kind, providerMetadata):
+            return [.custom(kind: kind, providerMetadata: providerMetadata)]
+
+        case let .file(file, _):
+            return [.file(file)]
+
+        case let .reasoningFile(file, _):
+            return [.reasoningFile(file)]
+
+        case .finishStep:
+            return []
+
+        case let .finish(reason, rawFinishReason, usage):
+            finishedEmitted = true
+            return [.finish(reason: reason, rawFinishReason: rawFinishReason, usage: usage)]
+
+        case let .abort(reason):
+            finishedEmitted = true
+            return [.abort(reason: reason)]
+
+        case .raw:
+            return []
+
+        case .error:
+            return []
+
+        case .toolInputStart, .toolInputDelta, .toolInputEnd,
+             .reasoningStart, .reasoningEnd, .toolApprovalResponse:
+            return []
+        }
+    }
+
+    func finalize() -> [StreamTextEvent] {
+        finishedEmitted ? [] : [.finish(reason: .other, rawFinishReason: nil, usage: LanguageModelUsage())]
+    }
+}

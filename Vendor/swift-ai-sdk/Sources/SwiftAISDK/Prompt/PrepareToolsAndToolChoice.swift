@@ -1,0 +1,191 @@
+import Foundation
+import AISDKProvider
+import AISDKProviderUtils
+
+/**
+ Prepares tools and tool choice for a model call.
+
+ Port of `@ai-sdk/ai/src/prompt/prepare-tools-and-tool-choice.ts`.
+ */
+public func prepareToolsAndToolChoice(
+    tools: [String: Tool]?,
+    toolChoice: ToolChoice?,
+    activeTools: [String]?
+) async throws -> (
+    tools: [LanguageModelV4Tool]?,
+    toolChoice: LanguageModelV4ToolChoice?
+) {
+    guard let tools, !tools.isEmpty else {
+        return (tools: nil, toolChoice: nil)
+    }
+
+    let filteredTools: [(key: String, value: Tool)]
+    if let activeTools {
+        filteredTools = tools.filter { activeTools.contains($0.key) }.sorted { $0.key < $1.key }
+    } else {
+        filteredTools = tools.sorted { $0.key < $1.key }
+    }
+
+    var languageModelTools: [LanguageModelV4Tool] = []
+
+    for (name, tool) in filteredTools {
+        switch tool.type {
+        case nil, .function, .dynamic:
+            let jsonSchema = try await tool.inputSchema.resolve().jsonSchema()
+
+            let providerOptions: SharedV4ProviderOptions? = tool.providerOptions.map { options in
+                options.compactMapValues { value in
+                    if case .object(let nestedDict) = value {
+                        return nestedDict
+                    }
+                    return nil
+                }
+            }
+
+            let inputExamples = tool.inputExamples
+
+            languageModelTools.append(.function(LanguageModelV4FunctionTool(
+                name: name,
+                inputSchema: jsonSchema,
+                inputExamples: inputExamples,
+                description: tool.description?.resolve(context: nil),
+                strict: tool.strict,
+                providerOptions: providerOptions
+            )))
+
+        case .provider:
+            guard let id = tool.id else {
+                throw InvalidArgumentError(
+                    parameter: "tools[\(name)]",
+                    value: JSONValue.string(String(describing: tool)),
+                    message: "Provider tool must have 'id' field"
+                )
+            }
+
+            languageModelTools.append(.provider(LanguageModelV4ProviderTool(
+                id: id,
+                name: name,
+                args: tool.args ?? [:]
+            )))
+        }
+    }
+
+    let convertedToolChoice: LanguageModelV4ToolChoice
+    if let toolChoice {
+        switch toolChoice {
+        case .auto:
+            convertedToolChoice = .auto
+        case .none:
+            convertedToolChoice = .none
+        case .required:
+            convertedToolChoice = .required
+        case .tool(let toolName):
+            convertedToolChoice = .tool(toolName: toolName)
+        }
+    } else {
+        convertedToolChoice = .auto
+    }
+
+    return (tools: languageModelTools, toolChoice: convertedToolChoice)
+}
+
+/**
+ Limits the tools to the active tool names.
+
+ Port of `@ai-sdk/ai/src/generate-text/filter-active-tools.ts`.
+ */
+func filterActiveTools(_ tools: ToolSet?, activeTools: [String]?) -> ToolSet? {
+    guard let tools, let activeTools else { return tools }
+    return tools.filter { activeTools.contains($0.key) }
+}
+
+/**
+ Converts tools to the provider tool definitions.
+
+ Port of `@ai-sdk/ai/src/prompt/prepare-tools.ts`. Tools listed in `toolOrder`
+ come first in that order; the remaining tools follow sorted by name. Swift
+ dictionaries have no insertion order, so without `toolOrder` all tools are
+ sorted by name. Descriptions are resolved with the tool's context.
+ */
+func prepareTools(
+    tools: ToolSet?,
+    toolOrder: [String]? = nil,
+    toolsContext: ToolsContext = [:]
+) async throws -> [LanguageModelV4Tool]? {
+    guard let tools, !tools.isEmpty else { return nil }
+
+    let ordered = (toolOrder ?? []).compactMap { name in tools[name].map { (name, $0) } }
+    let orderedNames = Set(ordered.map(\.0))
+    let remaining = tools
+        .filter { !orderedNames.contains($0.key) }
+        .sorted { $0.key < $1.key }
+        .map { ($0.key, $0.value) }
+
+    var languageModelTools: [LanguageModelV4Tool] = []
+    for (name, tool) in ordered + remaining {
+        switch tool.type {
+        case nil, .function, .dynamic:
+            let providerOptions: SharedV4ProviderOptions? = tool.providerOptions.map { options in
+                options.compactMapValues { value in
+                    if case .object(let nested) = value { return nested }
+                    return nil
+                }
+            }
+            languageModelTools.append(.function(LanguageModelV4FunctionTool(
+                name: name,
+                inputSchema: try await tool.inputSchema.resolve().jsonSchema(),
+                inputExamples: tool.inputExamples?.map { LanguageModelV4ToolInputExample(input: $0.input) },
+                description: tool.description?.resolve(context: toolsContext[name]),
+                strict: tool.strict,
+                providerOptions: providerOptions
+            )))
+
+        case .provider:
+            guard let id = tool.id else {
+                throw InvalidArgumentError(
+                    parameter: "tools[\(name)]",
+                    value: .string(name),
+                    message: "Provider tool must have 'id' field"
+                )
+            }
+            languageModelTools.append(.provider(LanguageModelV4ProviderTool(
+                id: id,
+                name: name,
+                args: tool.args ?? [:]
+            )))
+        }
+    }
+    return languageModelTools
+}
+
+/**
+ Converts the tool choice to the provider tool choice; `auto` when unset.
+
+ Port of `@ai-sdk/ai/src/prompt/prepare-tool-choice.ts`.
+ */
+func prepareToolChoice(_ toolChoice: ToolChoice?) -> LanguageModelV4ToolChoice {
+    guard let toolChoice else { return .auto }
+    switch toolChoice {
+    case .auto: return .auto
+    case .none: return .none
+    case .required: return .required
+    case .tool(let toolName): return .tool(toolName: toolName)
+    }
+}
+
+/// Tool choice for model generation.
+///
+/// Port of `@ai-sdk/ai/src/types/language-model.ts` ToolChoice type.
+public enum ToolChoice: Sendable, Equatable {
+    /// The model can choose whether and which tools to call (default).
+    case auto
+
+    /// The model must not call tools.
+    case none
+
+    /// The model must call a tool (any tool).
+    case required
+
+    /// The model must call the specified tool.
+    case tool(toolName: String)
+}
