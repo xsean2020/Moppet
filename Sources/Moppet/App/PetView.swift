@@ -956,6 +956,7 @@ struct PetView: View {
                             withAnimation(Airi.controlAnimation) { bubbleVisible = false }
                             if bus.state == .talking { bus.setState(.idle) }
                             bus.dismissStreaming()
+                            bus.noteBubbleHidden()   // 任务摘要被点掉：后续进度保持安静
                         } else if bus.state == .celebrating || bus.state == .sad {
                             // Click during a celebration or a sad moment
                             // means "got it" — settle back to idle.
@@ -1011,6 +1012,7 @@ struct PetView: View {
                 guard !Task.isCancelled else { return }
                 withAnimation(Airi.controlAnimation) { bubbleVisible = false }
                 if bus.state == .talking { bus.setState(.idle) }
+                bus.noteBubbleHidden()   // 摘要气泡到时隐藏：失去显示面
             }
         }
         .onChange(of: bus.state) { _, newState in

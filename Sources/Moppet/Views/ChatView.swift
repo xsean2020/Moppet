@@ -40,6 +40,7 @@ struct SlashCommand {
         SlashCommand(name: "/cd", summary: L("/cd <path> — change working directory"), icon: "folder.badge.gear"),
         SlashCommand(name: "/ps", summary: L("running exec sessions"), icon: "terminal"),
         SlashCommand(name: "/stop", summary: L("/stop [id] — stop exec sessions"), icon: "stop.circle"),
+        SlashCommand(name: "/tasks", summary: L("parallel task status"), icon: "list.bullet.rectangle"),
         SlashCommand(name: "/export", summary: L("export chat as Markdown"), icon: "square.and.arrow.up"),
         SlashCommand(name: "/copy", summary: L("copy last reply"), icon: "doc.on.doc"),
     ]
@@ -51,6 +52,19 @@ struct ChatNotice: Identifiable {
     let id = UUID()
     let icon: String
     let text: String
+}
+
+/// 切换会话的待确认动作（§5.10：有运行中任务/排队消息时先弹确认 sheet）。
+enum SessionSwitchIntent: Identifiable {
+    case new
+    case resume(ChatSessionStore.SessionInfo)
+
+    var id: String {
+        switch self {
+        case .new: "new"
+        case .resume(let info): info.id
+        }
+    }
 }
 
 /// AI chat window — full session management over agent rollouts:
@@ -81,8 +95,16 @@ struct ChatView: View {
     @State private var scrollProxy: ScrollViewProxy?
     /// Expanded tool-output blocks (lineLimit off).
     @State private var expandedOutputs: Set<Int> = []
+    /// 任务条折叠（显示优化）：多任务并行时收起普通行，只留「等你处理」
+    /// 的行——需要动手的任务不折叠，其余一眼计数。
+    @State private var taskStripExpanded = true
     /// Expanded reasoning summaries.
     @State private var expandedReasoning: Set<Int> = []
+    /// 「任务」chip（§5.6）：开着时发送的输入成为并行任务而非对话消息。
+    /// 默认关——对话式消息不排队成任务。
+    @State private var taskMode = false
+    /// 切会话确认（§5.10）：有运行中任务/排队人消息时先弹 sheet。
+    @State private var confirmingSessionSwitch: SessionSwitchIntent?
     /// User-defined provider profiles, snapshotted once per change instead of
     /// re-read per render: `providerOptions` used to call
     /// `AIProviderRegistry.load()` — open + JSON-decode a file — from inside
@@ -118,11 +140,19 @@ struct ChatView: View {
         .sheet(isPresented: $confirmingBatchDelete) {
             batchDeletionConfirm()
         }
+        .sheet(item: $confirmingSessionSwitch) { intent in
+            sessionSwitchConfirm()
+        }
         .sheet(item: approvalBinding) { request in
-            ApprovalSheet(request: request)
+            ApprovalSheet(request: request,
+                          // §5.7 来源徽标：「任务：标题」/「对话」。
+                          sourceLabel: request.source == nil
+                              ? L("Chat") : store.scheduler.sourceLabel(for: request.source))
         }
         .sheet(item: userInputBinding) { request in
-            UserInputSheet(request: request)
+            UserInputSheet(request: request,
+                           sourceLabel: request.source == nil
+                               ? L("Chat") : store.scheduler.sourceLabel(for: request.source))
         }
         .onAppear {
             // Next runloop: openWindow creates the window asynchronously —
@@ -153,6 +183,8 @@ struct ChatView: View {
         }
         .onDisappear {
             UserInputCenter.chatSurfaceVisible = false
+            // §5.10：关窗即终止一切在跑工作（任务 + 排队人消息 + 对话 turn）。
+            store.shutdownForClose()
         }
         .onReceive(NotificationCenter.default.publisher(
             for: AIProviderRegistry.changedNotification)) { _ in
@@ -198,7 +230,7 @@ struct ChatView: View {
                 .buttonStyle(.plain)
                 .help(L("Select sessions"))
                 Button {
-                    store.newSession()
+                    confirmSessionSwitch(.new)
                 } label: {
                     Image(systemName: "plus.circle.fill")
                         .font(.system(size: 14))
@@ -330,7 +362,7 @@ struct ChatView: View {
             if selectMode {
                 if isSelected { selectedSessions.remove(info.id) } else { selectedSessions.insert(info.id) }
             } else {
-                store.resume(info)
+                confirmSessionSwitch(.resume(info))
             }
         }
     }
@@ -354,6 +386,44 @@ struct ChatView: View {
                         isDeleting = false
                         sessionToDelete = nil
                     }
+                }
+            }
+        }
+        .padding(Airi.space4)
+        .frame(width: 380)
+    }
+
+    /// 切会话确认（§5.10，复用 deletionConfirm 模式）：有运行中任务/排队
+    /// 人消息时，切换/新建先把"切换即取消"讲清楚。
+    private func confirmSessionSwitch(_ intent: SessionSwitchIntent) {
+        if store.scheduler.hasActive {
+            confirmingSessionSwitch = intent
+        } else {
+            performSessionSwitch(intent)
+        }
+    }
+
+    private func performSessionSwitch(_ intent: SessionSwitchIntent) {
+        switch intent {
+        case .new: store.newSession()
+        case .resume(let info): store.resume(info)
+        }
+    }
+
+    private func sessionSwitchConfirm() -> some View {
+        VStack(alignment: .leading, spacing: Airi.space3) {
+            Label(L("Switch chat?"), systemImage: "arrow.triangle.swap")
+                .font(.system(size: 14, weight: .medium))
+            Text(L("Running tasks and queued messages will be cancelled when you switch sessions."))
+                .font(Airi.captionFont)
+                .foregroundStyle(Airi.neutral500)
+            HStack {
+                Spacer()
+                AiriButton(title: L("Cancel"), variant: .secondary) { confirmingSessionSwitch = nil }
+                AiriButton(title: L("Switch"), variant: .destructive) {
+                    let intent = confirmingSessionSwitch
+                    confirmingSessionSwitch = nil
+                    if let intent { performSessionSwitch(intent) }
                 }
             }
         }
@@ -450,8 +520,19 @@ struct ChatView: View {
                     .lineLimit(1)
             }
             Spacer()
-            if brain.isRunning {
+            // §5.11：对话运行或任务/队列活跃时都显示进行中状态。
+            if brain.isRunning || store.scheduler.hasActive {
                 ProgressView().controlSize(.mini)
+            }
+            if !store.scheduler.tasks.isEmpty {
+                // 「N 任务」徽标：任务车道非空才有，不与流式状态混淆。
+                Text(String(format: L("%lld tasks"), store.scheduler.tasks.count))
+                    .font(.system(size: 10, weight: .medium))
+                    .monospacedDigit()
+                    .foregroundStyle(Airi.primary)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(Capsule().fill(Airi.primary.opacity(0.1)))
             }
             // The window style is hiddenTitleBar, so there are no traffic
             // lights — provide an explicit close button.
@@ -538,9 +619,18 @@ struct ChatView: View {
                 .help(L("Web search — server-side search on the ChatGPT backend (codex hosted web_search)"))
             }
 
-            if brain.isRunning {
+            if brain.isRunning || store.scheduler.hasActive {
                 AiriButton(title: L("Stop"), icon: "stop.fill", variant: .destructive) {
-                    brain.cancel()
+                    // §5.2/§5.11（rev.3 #6）：先 stopEverything（清排队人消息 +
+                    // 取消任务）再 brain.cancel()——否则 cancel 的 .turnSettled
+                    // 会把尚未清空的队列立即续发，违背"全部停止"意图。
+                    store.scheduler.stopEverything()
+                    // 主 agent 空闲（仅任务/排队活跃）时不 cancel：idle 上
+                    // cancel 无 turn 可停，只会写 lastError="cancelled"——
+                    // transcript 尾部多出一条无对应 turn 的「Turn cancelled」
+                    // 幻影 note（残留到下一次提交才清位）。按钮扩为 hasActive
+                    // 可见后必须门控，恢复 HEAD 的一一对应。
+                    if brain.isRunning { brain.cancel() }
                 }
             }
 
@@ -681,13 +771,34 @@ struct ChatView: View {
 
     @ViewBuilder
     private var brainTranscript: some View {
-        if brain.items.isEmpty && brain.streamingText.isEmpty && notices.isEmpty {
+        if brain.items.isEmpty && brain.streamingText.isEmpty && notices.isEmpty
+            && !store.scheduler.hasActive {
             emptyHint(String(format: L("Chat with %@ — the desktop pet with a Codex-grade agent brain: shell, resumable exec, file patches, images, plans, cleaning tools, MCP. Type / for commands."),
                              PetIdentity.name))
         }
         ForEach(Array(brain.items.enumerated()), id: \.offset) { index, item in
             brainBubble(item, index: index)
                 .id("brain-\(index + 1)")
+        }
+        // 任务条（§5.11）：ForEach 之后、streaming bubble 之前——任务卡不进
+        // offset ForEach（.taskResult 是尾部追加，offset 键不错位）。
+        // 显示优化：摘要头（计数）+ 折叠——收起时只保留「等你处理」的行，
+        // 普通进行中/排队行让位给对话正文。
+        if !store.scheduler.tasks.isEmpty {
+            taskStripHeader
+        }
+        let visibleTasks = taskStripExpanded || store.scheduler.tasks.count < 2
+            ? store.scheduler.tasks
+            : store.scheduler.tasks.filter { store.scheduler.stage(of: $0) == .awaitingUser }
+        ForEach(visibleTasks) { task in
+            BrainTaskCard(
+                task: task,
+                stage: store.scheduler.stage(of: task),
+                onCancel: { store.scheduler.cancelTask(id: task.id) }
+            )
+        }
+        ForEach(store.scheduler.pendingPerson) { message in
+            pendingPersonRow(message)
         }
         if !brain.streamingText.isEmpty {
             streamingBubble(brain.streamingText)
@@ -730,6 +841,76 @@ struct ChatView: View {
         .background(
             RoundedRectangle(cornerRadius: Airi.radiusCard)
                 .fill(Airi.primary.opacity(0.06))
+        )
+    }
+
+    /// 任务条摘要头（显示优化）：一行计数（N 运行 · M 等你 · K 排队）+
+    /// 折叠开关。多任务并行时任务条不再无声地吃掉半屏对话——收起后普通
+    /// 行让位，唯独「等你处理」的行保留（需要动手的事不折叠）。
+    private var taskStripHeader: some View {
+        let tasks = store.scheduler.tasks
+        let running = tasks.filter { store.scheduler.stage(of: $0) == .running }.count
+        let awaiting = tasks.filter { store.scheduler.stage(of: $0) == .awaitingUser }.count
+        let queued = tasks.filter { store.scheduler.stage(of: $0) == .queued }.count
+        var parts: [String] = []
+        if running > 0 { parts.append("\(running) " + L("Running")) }
+        if awaiting > 0 { parts.append("\(awaiting) " + L("Waiting for you")) }
+        if queued > 0 { parts.append("\(queued) " + L("Queued")) }
+        return HStack(spacing: 6) {
+            Image(systemName: "list.bullet.rectangle")
+                .font(Airi.caption2Font)
+                .foregroundStyle(Airi.neutral500)
+            Text(parts.isEmpty ? L("Tasks") : L("Tasks") + " · " + parts.joined(separator: " · "))
+                .font(Airi.caption2Font.weight(.medium))
+                .foregroundStyle(Airi.neutral500)
+            Spacer(minLength: 0)
+            if tasks.count > 1 {
+                Button {
+                    withAnimation(Airi.controlAnimation) { taskStripExpanded.toggle() }
+                } label: {
+                    Image(systemName: taskStripExpanded ? "chevron.up" : "chevron.down")
+                        .font(Airi.caption2Font)
+                        .foregroundStyle(Airi.neutral400)
+                }
+                .buttonStyle(.plain)
+                .help(taskStripExpanded ? L("Collapse") : L("Expand"))
+            }
+        }
+        .padding(.horizontal, 4)
+    }
+
+    /// 排队中的人消息「待发送」行（§5.3）：pendingPerson 驱动，✕ 撤回。
+    /// 已 claim（flush 发起、占位成功即已开跑）的消息转「发送中」态：
+    /// 实线边框 + 纸飞机图标，无 ✕——撤回不了执行中的 turn，不给出假入口。
+    private func pendingPersonRow(_ message: BrainTaskScheduler.PendingPersonMessage) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: message.claimed ? "paperplane.fill" : "clock.arrow.circlepath")
+                .font(Airi.caption2Font)
+                .foregroundStyle(Airi.neutral400)
+            Text(message.text.isEmpty ? L("(image message)") : message.text)
+                .font(Airi.footnoteFont)
+                .foregroundStyle(Airi.neutral500)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if !message.claimed {
+                Button {
+                    store.scheduler.recallPendingPerson(id: message.id)
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(Airi.footnoteFont)
+                        .foregroundStyle(Airi.neutral400)
+                }
+                .buttonStyle(.plain)
+                .help(L("Recall"))
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: Airi.radiusCard, style: .continuous)
+                .fill(Airi.neutral100.opacity(0.5))
+                .strokeBorder(Airi.neutral200,
+                              style: StrokeStyle(lineWidth: 1, dash: message.claimed ? [] : [4, 3]))
         )
     }
 
@@ -784,10 +965,25 @@ struct ChatView: View {
                     }
                     .onSubmit { send() }
                 // Secondary action first, primary (Send) rightmost.
-                CircleIconButton(icon: "arrow.counterclockwise") { store.newSession() }
+                CircleIconButton(icon: "arrow.counterclockwise") { confirmSessionSwitch(.new) }
                     .help(L("New chat"))
-                AiriButton(title: L("Send"), icon: "arrow.up.circle.fill",
-                           disabled: brain.isRunning) { send() }
+                // 「任务」chip（§5.6）：默认关。开着时发送走任务车道（scheduler
+                // submitTask——slot 模型并行执行），否则走对话车道。
+                Button {
+                    taskMode.toggle()
+                } label: {
+                    Label(L("Task"), systemImage: "list.bullet.rectangle")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(taskMode ? .white : Airi.neutral500)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 5)
+                        .background(Capsule().fill(taskMode ? Airi.primary : Airi.neutral100))
+                }
+                .buttonStyle(.plain)
+                .help(L("Send as a parallel task — runs on its own agent with its own rollout; the result returns to this transcript"))
+                // §5.6：Send 永远可发——忙时由 scheduler 的 trySubmit 原子占位/
+                // 排队仲裁，不再 disabled。
+                AiriButton(title: L("Send"), icon: "arrow.up.circle.fill") { send() }
             }
             .padding(Airi.space3)
         }
@@ -888,16 +1084,19 @@ struct ChatView: View {
             handleSlash(trimmed)
             return
         }
-        // Gate BEFORE clearing the draft: `brain.submit` is a silent no-op
-        // while a turn is running, so an ungated Return would swallow the
-        // typed message. Keep the text so it can be sent after this turn.
         let images = attachments.map(\.dataURL)
-        guard !trimmed.isEmpty || !images.isEmpty, !brain.isRunning else { return }
+        guard !trimmed.isEmpty || !images.isEmpty else { return }
         draft = ""
         attachments = []
-        Task {
-            await brain.submit(trimmed, images: images)
+        // §5.6 三路分流：slash → handleSlash；taskMode → 任务车道；其余 →
+        // 人车道（scheduler.submitPerson：空闲即发、忙即排队——不再直调
+        // brain.submit，消除「用户直发与 pump 续发竞速」的第三条路径）。
+        if taskMode {
+            store.scheduler.submitTask(trimmed, images: images)
             store.syncCurrentSession()
+            taskMode = false
+        } else {
+            store.scheduler.submitPerson(trimmed, images: images)
         }
     }
 
@@ -916,7 +1115,7 @@ struct ChatView: View {
         // BrainSlash runner (also used by the quick bar).
         switch command {
         case "/new":
-            store.newSession()
+            confirmSessionSwitch(.new)
             return
         case "/export":
             if let url = brain.exportMarkdown() {
@@ -947,7 +1146,7 @@ struct ChatView: View {
         let icon = SlashCommand.all.first { $0.name == command }?.icon ?? "terminal"
         if command == "/compact" { notice(icon, L("compacting…")) }
         Task {
-            let result = await BrainSlash.run(raw, brain: brain)
+            let result = await BrainSlash.run(raw, brain: brain, tasks: store.scheduler)
                 ?? String(format: L("%@ is chat-window only"), command)
             notice(icon, result)
             if command == "/init" { store.syncCurrentSession() }
@@ -1041,7 +1240,52 @@ struct ChatView: View {
             planCard(steps)
         case .imageItem(let callID, let dataURL):
             imageBubble(callID: callID, dataURL: dataURL)
+        case .taskResult(let taskID, let title, let status, let summary, let usageTokens):
+            taskResultCard(taskID: taskID, title: title, status: status,
+                           summary: summary, usageTokens: usageTokens)
         }
+    }
+
+    /// 任务结果卡（§5.11）：status 图标 + summary + failed/cancelled 时的
+    /// 「重试」按钮（查 scheduler.recentEnded 重发同 prompt）。
+    private func taskResultCard(taskID: String, title: String, status: String,
+                                summary: String, usageTokens: Int?) -> some View {
+        let ended = store.scheduler.recentEnded.first { $0.id == taskID }
+        return VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 6) {
+                Image(systemName: status == "completed" ? "checkmark.circle.fill"
+                      : status == "failed" ? "xmark.octagon.fill" : "stop.circle.fill")
+                    .font(Airi.footnoteFont)
+                    .foregroundStyle(status == "completed" ? Airi.success
+                                     : status == "failed" ? Airi.danger : Airi.neutral400)
+                Text(title)
+                    .font(Airi.captionFont.weight(.medium))
+                    .foregroundStyle(Airi.neutral900)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                if let usageTokens {
+                    Text("\(usageTokens) tk")
+                        .font(Airi.caption2Font)
+                        .foregroundStyle(Airi.neutral400)
+                        .monospacedDigit()
+                }
+            }
+            Text(summary)
+                .font(Airi.captionFont)
+                .foregroundStyle(Airi.neutral700)
+                .lineLimit(6)
+            if let ended, ended.canRetry {
+                AiriButton(title: L("Retry"), icon: "arrow.clockwise", variant: .secondary) {
+                    _ = store.scheduler.retry(taskID: taskID)
+                }
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: Airi.radiusCard)
+                .fill(Airi.neutral100.opacity(0.7))
+        )
     }
 
     /// Reasoning summaries used to be dropped entirely (EmptyView) — they
@@ -1207,10 +1451,18 @@ struct ChatView: View {
 
 struct ApprovalSheet: View {
     let request: ApprovalRequest
+    /// 来源徽标（§5.7）：「任务：标题」/「对话」。nil = 无来源信息（兼容
+    /// 旧构造点）则不显示。
+    var sourceLabel: String? = nil
     @State private var appeared = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: Airi.space3) {
+            if let sourceLabel {
+                Label(sourceLabel, systemImage: sourceLabel.contains(L("Task")) ? "list.bullet.rectangle" : "bubble.left")
+                    .font(Airi.caption2Font.weight(.medium))
+                    .foregroundStyle(Airi.primary)
+            }
             Label(request.title, systemImage: "shield.lefthalf.filled")
                 .font(.system(size: 15, weight: .medium))
                 .foregroundStyle(Airi.neutral950)
@@ -1234,6 +1486,8 @@ struct ApprovalSheet: View {
 /// question offers 2–3 options plus a free-text "Other" answer.
 struct UserInputSheet: View {
     let request: UserInputRequest
+    /// 来源徽标（§5.7）：「任务：标题」/「对话」。nil = 不显示（兼容旧构造点）。
+    var sourceLabel: String? = nil
     /// answers[question.id] — option label or free text.
     @State private var answers: [String: String] = [:]
     @State private var others: [String: String] = [:]
@@ -1244,6 +1498,11 @@ struct UserInputSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Airi.space3) {
+            if let sourceLabel {
+                Label(sourceLabel, systemImage: sourceLabel.contains(L("Task")) ? "list.bullet.rectangle" : "bubble.left")
+                    .font(Airi.caption2Font.weight(.medium))
+                    .foregroundStyle(Airi.primary)
+            }
             Label(L("A quick question"), systemImage: "questionmark.bubble.fill")
                 .font(.system(size: 15, weight: .medium))
                 .foregroundStyle(Airi.neutral950)

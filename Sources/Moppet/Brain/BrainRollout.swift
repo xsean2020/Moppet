@@ -6,6 +6,10 @@ import Foundation
 /// so sessions can be resumed exactly like `codex resume`.
 enum BrainRollout {
 
+    /// 任务子会话的 originator（设计文档 §5.9）：侧栏列表与总数都跳过这类
+    /// 文件——它们是主会话的附属轨迹，不迁移旧文件。
+    static let taskOriginator = "moppet-brain-task"
+
     struct SessionMeta: Codable {
         let id: String
         let timestamp: Date
@@ -104,6 +108,16 @@ enum BrainRollout {
         private let url: URL
         private let encoder: JSONEncoder
         private let appendLock = NSLock()
+        /// 会话文件被 deleteAll 删除后置位：append 直接丢弃。兜底分支会用
+        /// 单条记录重建无 sessionMeta 头的孤儿 JSONL——load() 读到即 nil、
+        /// listSessions 的 meta 守卫跳过、侧栏不可见、无删除入口。
+        private var invalidated = false
+
+        func invalidate() {
+            appendLock.lock()
+            defer { appendLock.unlock() }
+            invalidated = true
+        }
 
         init(meta: SessionMeta) {
             sessionID = meta.id
@@ -124,6 +138,7 @@ enum BrainRollout {
             // tears JSONL lines.
             appendLock.lock()
             defer { appendLock.unlock() }
+            guard !invalidated else { return }
             if let handle = FileHandle(forWritingAtPath: url.path) {
                 handle.seekToEndOfFile()
                 handle.write(Data(line.utf8))
@@ -194,6 +209,8 @@ enum BrainRollout {
             guard let firstLine = text.split(separator: "\n").first,
                   let meta = try? decoder.decode(Record.self, from: Data(firstLine.utf8)),
                   case .sessionMeta(let m) = meta else { continue }
+            // 任务子会话（§5.9）：不进侧栏列表，也不进总数。
+            guard m.originator != taskOriginator else { continue }
             let itemCount = text.components(separatedBy: "\"type\":\"response_item\"").count - 1
             guard itemCount > 0 else { continue }
             results.append((id, m.timestamp, itemCount))

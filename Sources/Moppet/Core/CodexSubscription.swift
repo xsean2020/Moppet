@@ -763,6 +763,13 @@ private final class LoopbackCallbackListener: @unchecked Sendable {
                                 ["type": "input_text", "text": note],
                                 ["type": "input_image", "image_url": dataURL],
                              ]]]
+                case .taskResult(_, let title, let status, let summary, _):
+                    // Parallel-task result card — projected as a user note so
+                    // the model keeps the outcome in history (same shape as
+                    // the .plan assistant-note projection; design doc §5.5).
+                    return [["type": "message", "role": "user",
+                             "content": [["type": "input_text",
+                                          "text": "[task \(status): \(title)]\n\(summary)"]]]]
                 }
             }
 

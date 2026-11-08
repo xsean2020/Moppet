@@ -66,6 +66,21 @@ enum BrainSmokeTest {
             done.wait()
             return value!
         }
+        /// @MainActor 版 awaitValue：调度器/审批段的对象都是 @MainActor，
+        /// 任务要主线程空闲才能执行——不能用 done.wait() 阻塞主线程。
+        /// 用 run loop 泵轮询等待（主线程保持可调度）。
+        func awaitMainValue<T>(_ work: @escaping @MainActor () async -> T) -> T {
+            let done = DispatchSemaphore(value: 0)
+            var value: T?
+            Task { @MainActor in
+                value = await work()
+                done.signal()
+            }
+            while done.wait(timeout: .now() + 0.05) == .timedOut {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            }
+            return value!
+        }
 
         let sema = DispatchSemaphore(value: 0)
 
@@ -1538,6 +1553,111 @@ enum BrainSmokeTest {
         }
         parityDone.wait()
         trace("parity section done")
+
+        // 7) 并行任务调度器（设计文档 rev.3）：双任务并行、取消幂等（单条
+        //    结果行）、纯任务会话落盘、侧栏过滤、排队审批超时。
+        //    全部对象 @MainActor——经 awaitMainValue 以 run loop 泵等待。
+        trace("scheduler section start")
+        awaitMainValue { @MainActor in
+            // maxConcurrent 持久化在 UserDefaults——测试前后保存/恢复。
+            let savedMax = UserDefaults.standard.integer(forKey: "brain.task.maxConcurrent")
+            defer { UserDefaults.standard.set(savedMax, forKey: "brain.task.maxConcurrent") }
+            let turnScript: [BrainStreamEvent] = [
+                .completed(finalMessage: "parallel task finished",
+                           usage: BrainUsage(inputTokens: 2, outputTokens: 3)),
+            ]
+            // 4 份脚本：7a 两个子任务各一份，7b 的排队/取消任务不消耗。
+            let agent = BrainAgent(model: ScriptedModel(
+                scripted: [turnScript, turnScript, turnScript, turnScript]))
+            let scheduler = BrainTaskScheduler()
+            scheduler.mainAgent = agent
+            scheduler.maxConcurrent = 2
+
+            // 7a) 双任务并行 → 两条 completed 结果 + 各自的 prompt 行。
+            scheduler.submitTask("清理下载文件夹的安装包", images: [])
+            scheduler.submitTask("整理桌面截图", images: [])
+            var deadline = Date().addingTimeInterval(5)
+            while scheduler.recentEnded.count < 2 && Date() < deadline {
+                try? await Task.sleep(nanoseconds: 20_000_000)
+            }
+            expect("scheduler: two tasks both completed",
+                   scheduler.recentEnded.count == 2
+                   && scheduler.recentEnded.allSatisfy { $0.outcome == .completed },
+                   "\(scheduler.recentEnded.map(\.outcome.rawValue))")
+            expect("scheduler: running set drains after finish", scheduler.tasks.isEmpty,
+                   "\(scheduler.tasks.count) left")
+
+            // 7b) 取消幂等：slot=1 时第二个任务排队；排队取消走 child:nil
+            //     结账；运行取消与重复取消各只产生一条结果行。
+            scheduler.maxConcurrent = 1
+            let idA = scheduler.submitTask("任务A", images: [])
+            let idB = scheduler.submitTask("任务B", images: [])
+            expect("scheduler: overflow task queued",
+                   scheduler.tasks.first { $0.id == idB }?.runState == .queued,
+                   "\(scheduler.tasks.map { "\($0.id):\($0.runState.rawValue)" })")
+            scheduler.cancelTask(id: idB)   // 排队取消 → 直接结账（同步）
+            expect("scheduler: queued cancel checks out cancelled",
+                   scheduler.recentEnded.contains { $0.id == idB && $0.outcome == .cancelled })
+            scheduler.cancelTask(id: idA)   // 运行取消：run.cancel + child.cancel
+            deadline = Date().addingTimeInterval(5)
+            while scheduler.tasks.contains(where: { $0.id == idA }) && Date() < deadline {
+                try? await Task.sleep(nanoseconds: 20_000_000)
+            }
+            scheduler.cancelTask(id: idA)   // 已结束 → 幂等 no-op
+            expect("scheduler: running cancel checks out cancelled",
+                   scheduler.recentEnded.contains { $0.id == idA && $0.outcome == .cancelled },
+                   "\(scheduler.recentEnded.map(\.outcome.rawValue))")
+
+            // 单条结果行：主 transcript 里每个 taskID 恰好一条 task_result。
+            var rowsPerTask: [String: Int] = [:]
+            for item in agent.items {
+                if case .taskResult(let taskID, _, _, _, _) = item {
+                    rowsPerTask[taskID, default: 0] += 1
+                }
+            }
+            expect("scheduler: exactly one result row per task",
+                   rowsPerTask.count == 4 && rowsPerTask.values.allSatisfy { $0 == 1 },
+                   "\(rowsPerTask)")
+
+            // 7c) 纯任务会话落盘：prompt 行 + task_result 行都在主 rollout。
+            let mainText = (try? String(
+                contentsOf: BrainRollout.fileURL(for: agent.sessionID),
+                encoding: .utf8)) ?? ""
+            expect("scheduler: prompt rows persisted on submit",
+                   mainText.contains("清理下载文件夹的安装包")
+                   && mainText.contains("整理桌面截图"))
+            expect("scheduler: task_result rows persisted",
+                   mainText.components(separatedBy: "\"type\":\"task_result\"").count - 1 == 4,
+                   "\(mainText.components(separatedBy: "\"type\":\"task_result\"").count - 1) rows")
+
+            // 7d) 侧栏过滤：任务子会话（originator=moppet-brain-task）不进列表。
+            let listed = BrainRollout.listSessions(limit: 100)
+            expect("scheduler: task child sessions hidden from sidebar",
+                   !listed.sessions.contains { $0.id.contains("-t") },
+                   "\(listed.total) sessions")
+
+            // 7e) 排队审批超时（rev.3 #16）：删除请求级计时器后，呈现时武装
+            //     单一定时器——排队请求到点不再 no-op，呈示后才起算。
+            ApprovalCenter.timeoutInterval = 0.4
+            defer { ApprovalCenter.timeoutInterval = 15 * 60 }
+            let firstAsk = Task { await ApprovalCenter.shared.request(
+                title: "t1", detail: "d", source: "task-x") }
+            try? await Task.sleep(nanoseconds: 80_000_000)
+            let secondAsk = Task { await ApprovalCenter.shared.request(
+                title: "t2", detail: "d", source: "task-y") }
+            try? await Task.sleep(nanoseconds: 80_000_000)
+            expect("approval: queued request derives hasRequest(source:)",
+                   ApprovalCenter.shared.hasRequest(source: "task-x")
+                   && ApprovalCenter.shared.hasRequest(source: "task-y"))
+            ApprovalCenter.shared.pending?.respond(true)
+            let first = await firstAsk.value
+            expect("approval: first request answered", first == true)
+            let second = await secondAsk.value
+            expect("approval: queued request times out after presentation", second == false)
+            expect("approval: no pending left after timeout",
+                   ApprovalCenter.shared.pending == nil)
+        }
+        trace("scheduler section done")
 
         // cleanup
         HarnessStore.rootOverride = nil

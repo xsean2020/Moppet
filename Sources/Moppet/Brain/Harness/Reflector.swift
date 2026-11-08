@@ -138,6 +138,9 @@ enum Reflector {
                 lines.append("[\(entry.line)] (plan) " + steps.map(\.step).joined(separator: " / "))
             case .responseItem(.imageItem):
                 lines.append("[\(entry.line)] (image attached)")
+            case .responseItem(.taskResult(_, let title, let status, let summary, _)):
+                // 任务结果卡（§5.5）：并行任务的生命周期证据，与工具轨迹同级。
+                lines.append("[\(entry.line)] (task \(status)) \(title): \(String(summary.prefix(300)))")
             case .approvalEvent(let event):
                 lines.append("[\(entry.line)] (approval) \(event.name): \(event.approved ? "approved" : "DENIED")")
             case .turnOutcome(let outcome):

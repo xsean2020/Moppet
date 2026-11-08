@@ -8,7 +8,10 @@ enum BrainSlash {
 
     /// Runs a command. Returns output text (nil = unknown or UI-only — the
     /// caller decides what to do; `uiOnly` lists what needs a richer surface).
-    static func run(_ raw: String, brain: BrainAgent) async -> String? {
+    /// `tasks`（设计文档 §8）：任务车道调度器，/tasks 报告用；默认 nil，
+    /// 既有调用点（quick bar）零破坏。
+    static func run(_ raw: String, brain: BrainAgent,
+                    tasks: BrainTaskScheduler? = nil) async -> String? {
         let trimmed = raw.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return "empty command — /help lists commands" }
         let parts = trimmed.split(separator: " ", maxSplits: 1).map(String.init)
@@ -24,6 +27,9 @@ enum BrainSlash {
             return brain.statusText
         case "/mcp":
             return brain.mcpStatusText
+        case "/tasks":
+            guard let tasks else { return nil }   // 无调度器的入口（quick bar）：UI-only
+            return await Self.tasksReport(tasks)
         case "/compact":
             guard !brain.isRunning else { return "brain is running — try again after the turn" }
             return await brain.compactNow()
@@ -53,6 +59,42 @@ enum BrainSlash {
             return nil    // UI-owned: the chat window implements them
         default:
             return "unknown command \(command) — /help lists commands"
+        }
+    }
+
+    /// /tasks — 并行任务状态一览（§8）：任务卡同源的派生 stage，加上人车道
+    /// 队列深度；纯读，不驱动任何状态迁移。
+    @MainActor
+    static func tasksReport(_ tasks: BrainTaskScheduler) -> String {
+        var lines: [String] = []
+        if !tasks.pendingPerson.isEmpty {
+            lines.append(String(format: L("person lane: %lld queued"), tasks.pendingPerson.count))
+        }
+        for task in tasks.tasks {
+            let stage = tasks.stage(of: task)
+            var line = "· [\(stageLabel(stage))] \(task.title)"
+            if let tool = task.lastToolName, stage == .running || stage == .awaitingUser {
+                line += " — \(tool)"
+            }
+            lines.append(line)
+        }
+        let recent = tasks.recentEnded.suffix(5)
+        for task in recent {
+            lines.append("· [\(task.outcome.rawValue)] \(task.title)")
+        }
+        return lines.isEmpty
+            ? L("no parallel tasks")
+            : lines.joined(separator: "\n")
+    }
+
+    private static func stageLabel(_ stage: BrainTask.Stage) -> String {
+        switch stage {
+        case .queued: "queued"
+        case .running: "running"
+        case .awaitingUser: "waiting-for-you"
+        case .completed: "completed"
+        case .failed: "failed"
+        case .cancelled: "cancelled"
         }
     }
 

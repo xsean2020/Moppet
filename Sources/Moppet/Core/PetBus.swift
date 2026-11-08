@@ -38,6 +38,14 @@ final class PetBus {
     /// genuinely new speaks (a regular say() or the next turn). Without
     /// this, every token re-opened a bubble the user had just closed.
     private(set) var streamingDismissed = false
+    /// 任务车道聚合摘要当前是否占着气泡（并行任务显示优化）：scheduler 的
+    /// 任务事件据此决定「原地更新文本」还是「重新弹出」。任何非任务内容
+    /// （普通 say / 流式回合）接管气泡时复位；气泡被隐藏（计时 / 点掉）
+    /// 时由 PetView 经 noteBubbleHidden() 复位。
+    private(set) var taskSummaryOnBubble = false
+    /// 用户点掉过任务摘要：普通任务进度不再重开气泡（聊天窗口的任务条
+    /// 才是常驻视图），失败与批次收尾仍各突破一次。
+    private var taskSummaryDismissed = false
     /// Pending auto-settle for one-shot states (celebration loops forever
     /// otherwise — the completion announcement has nothing downstream to
     /// call settle()). Lock-guarded: `say` is called from task-group threads
@@ -64,6 +72,7 @@ final class PetBus {
         let body = Self.nonBlank(text)
         applyOnMain {
             self.streamingDismissed = false
+            self.taskSummaryOnBubble = false   // 非任务内容接管气泡
             self.message = body
             self.messageID = UUID()
             self.messageHideInterval = hideAfter
@@ -116,6 +125,7 @@ final class PetBus {
         applyOnMain {
             self.streamingTurnActive = true
             self.streamingDismissed = false
+            self.taskSummaryOnBubble = false   // 流式回答接管气泡
             self.message = body
             self.messageID = UUID()
             self.messageHideInterval = 0
@@ -163,6 +173,7 @@ final class PetBus {
             let dismissed = self.streamingDismissed
             self.streamingTurnActive = false
             self.streamingDismissed = false
+            self.taskSummaryOnBubble = false   // 回合结果接管气泡
             guard !dismissed || breakThrough else {
                 if self.state == .talking { self.state = .idle }
                 return
@@ -176,6 +187,48 @@ final class PetBus {
             scheduleSettle(after: 3.2)
         } else if pose == .sad {
             scheduleSettle(after: 4.0)
+        }
+    }
+
+    // MARK: 任务车道聚合气泡（并行任务显示优化）
+
+    /// 任务事件（启动/完成/失败/取消）统一走这里，替代逐条 say() 抢占气泡：
+    /// - 气泡正忙（流式回答中 / 有审批待答）→ 完全不打断，人正在看的内容优先；
+    /// - 气泡已在显示任务摘要且非 force → 原地更新文本：messageID 不动，
+    ///   不重弹、不重置隐藏计时——一批任务事件只弹一次气泡；
+    /// - 用户点掉过摘要 → 普通进度保持安静（聊天窗口的任务条才是常驻
+    ///   视图）；force（失败 / 批次收尾）突破一次。
+    /// 摘要行由 scheduler 组装（计数 + 最近事件），这里只管呈现纪律。
+    func announceTask(_ line: String, state: PetState? = nil, force: Bool = false) {
+        let pose = state ?? .scanning
+        applyOnMain {
+            guard !self.streamingTurnActive, ApprovalCenter.shared.pending == nil else { return }
+            if self.taskSummaryOnBubble, !force {
+                self.message = line          // 原地更新：气泡不重弹、计时器不重置
+                return
+            }
+            if self.taskSummaryDismissed, !force { return }
+            self.taskSummaryOnBubble = true
+            self.taskSummaryDismissed = false
+            self.streamingDismissed = false
+            self.message = line
+            self.messageID = UUID()
+            self.messageHideInterval = 6
+            self.state = pose
+        }
+        switch pose {
+        case .celebrating: scheduleSettle(after: 3.2)
+        case .sad: scheduleSettle(after: 4.0)
+        default: cancelSettle()
+        }
+    }
+
+    /// 气泡被隐藏（自动计时 / 用户点掉）时由 PetView 调用：正在显示的若是
+    /// 任务摘要，记为「已点掉」——后续普通任务进度不再重开气泡。
+    func noteBubbleHidden() {
+        applyOnMain {
+            if self.taskSummaryOnBubble { self.taskSummaryDismissed = true }
+            self.taskSummaryOnBubble = false
         }
     }
 
@@ -207,6 +260,9 @@ struct ApprovalRequest: Identifiable {
     let id = UUID()
     let title: String
     let detail: String
+    /// 归属标签（设计文档 §5.7）：任务子 agent 传 taskID——「等待你」卡片
+    /// 徽标与 scheduler 的 awaitingUser 派生据此查询；主 agent nil。
+    var source: String? = nil
     var respond: (Bool) -> Void = { _ in }
 }
 
@@ -220,6 +276,12 @@ final class ApprovalCenter {
     static let shared = ApprovalCenter()
     private(set) var pending: ApprovalRequest?
     private var queued: [ApprovalRequest] = []
+    /// 呈现时武装的单一定时器（rev.3 #16）：pending 安装与 presentNext 出队时
+    /// armTimeout()（先 cancel 旧 Task），15 分钟从成为 pending 起算——每个
+    /// 请求恰好一个生效计时器，排队请求不再永不超时、也不再双计时器并存。
+    private var timeoutTask: Task<Void, Never>?
+    /// Test seam（--brain-smoke 排队超时用例）：生产默认 15 分钟。
+    static var timeoutInterval: TimeInterval = 15 * 60
 
     /// Headless auto-approval (`--brain-exec --yes`): checked BEFORE the
     /// MainActor request path — in headless modes the main thread is blocked
@@ -251,38 +313,76 @@ final class ApprovalCenter {
     }
 
     @MainActor
-    func request(title: String, detail: String) async -> Bool {
+    func request(title: String, detail: String, source: String? = nil) async -> Bool {
         await withCheckedContinuation { continuation in
             let once = OnceContinuation(continuation)
-            var request = ApprovalRequest(title: title, detail: detail)
-            request.respond = { [weak self] approved in
+            var request = ApprovalRequest(title: title, detail: detail, source: source)
+            request.respond = { [weak self, requestID = request.id] approved in
                 once.resumeOnce(approved)
-                self?.presentNext()
+                // 仅当响应的正是当前 pending 时才推进队列：dismissForSource 对
+                // queued 项的 deny 不得顶掉无关 pending——否则那张卡片的
+                // continuation 被搁浅、对应 turn 永久挂起。
+                self?.presentNext(ifCurrent: requestID)
             }
             if pending == nil {
                 pending = request
+                armTimeout()   // 15 分钟从成为 pending 起算（rev.3 #16）
             } else {
                 queued.append(request)
-            }
-            // Last-resort timeout: with the pet hidden and the chat window
-            // closed no surface can ever answer — deny instead of parking
-            // the turn forever (aligned with UserInputCenter's timeout).
-            let requestID = request.id
-            Task { [weak self] in
-                try? await Task.sleep(nanoseconds: 15 * 60 * 1_000_000_000)
-                guard let self, !Task.isCancelled else { return }
-                if self.pending?.id == requestID {
-                    self.pending?.respond(false)
-                }
             }
         }
     }
 
+    /// 呈现时武装单一定时器（§5.7 / rev.3 #16）：请求级计时 Task 已删除——
+    /// 它只对当前 pending 生效（排队请求永不超时），且与 presentNext 重设
+    /// 并存时会让排队后呈示的审批实际预算 < 15 分钟。pending 安装与出队时
+    /// 各武装一次（先 cancel 旧 Task）。
     @MainActor
-    private func presentNext() {
+    private func armTimeout() {
+        timeoutTask?.cancel()
+        timeoutTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(Self.timeoutInterval * 1_000_000_000))
+            guard let self, !Task.isCancelled else { return }
+            // Last-resort timeout: with the pet hidden and the chat window
+            // closed no surface can ever answer — deny instead of parking
+            // the turn forever (aligned with UserInputCenter's timeout).
+            self.pending?.respond(false)
+        }
+    }
+
+    /// 「等待你」派生查询（§5.7）：扫描 pending+queued 的 source。
+    @MainActor
+    func hasRequest(source: String) -> Bool {
+        if pending?.source == source { return true }
+        return queued.contains { $0.source == source }
+    }
+
+    @MainActor
+    private func presentNext(ifCurrent id: UUID) {
+        // 队列推进只由「当前呈示项被响应」驱动；dismissForSource 摘除的排队
+        // 项也走 respond(false) 恢复 continuation，但 id 不匹配 → 不推进、
+        // 不动无关 pending。
+        guard pending?.id == id else { return }
         pending = nil
         if !queued.isEmpty {
             pending = queued.removeFirst()
+            armTimeout()   // 出队即呈现：预算从现在起算，单一生效计时器
+        }
+    }
+
+    /// 任务取消时按 source 清理在途审批（§6 修复）：runLoop 停在不可取消的
+    /// 审批 continuation 上时，runTask.cancel/agent.cancel 都到不了它——按
+    /// source（任务子 agent 传 taskID）deny 全部 pending+queued 匹配项，让
+    /// 挂起的 continuation 以 false 立即返回 → runLoop 下一检查点展开 →
+    /// finishTask 结账；僵尸审批不再可被批准执行破坏性动作。
+    @MainActor
+    func dismissForSource(_ source: String) {
+        while pending?.source == source {
+            pending?.respond(false)   // 恢复 + presentNext 提升下一个（可能仍是本任务 → 循环）
+        }
+        while let index = queued.firstIndex(where: { $0.source == source }) {
+            let request = queued.remove(at: index)
+            request.respond(false)   // 恢复；ifCurrent 守卫跳过推进，不动无关 pending
         }
     }
 

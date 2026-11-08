@@ -117,10 +117,16 @@ enum BrainResponseItem: Codable, Equatable {
     /// rollout round-trip; each transport re-encodes it natively
     /// (Responses `input_image` / SDK image part).
     case imageItem(callID: String, dataURL: String)
+    /// 任务完成/失败/取消后写进主 transcript 的结果卡（编码 "task_result"，
+    /// 设计文档 §5.5）。旧构建读到这一行会在 init(from:) 抛错并由
+    /// BrainRollout.readRecords 的 try? 跳过——丢行不炸会话。
+    case taskResult(taskID: String, title: String, status: String,
+                    summary: String, usageTokens: Int?)
 
     private enum CodingKeys: String, CodingKey {
         case type, role, content, summary, callID = "call_id", name, arguments, output, steps
         case dataURL = "data_url"
+        case taskID = "task_id", title, status, usageTokens = "usage_tokens"
     }
 
     init(from decoder: Decoder) throws {
@@ -143,6 +149,12 @@ enum BrainResponseItem: Codable, Equatable {
         case "image":
             self = .imageItem(callID: try c.decodeIfPresent(String.self, forKey: .callID) ?? "user",
                               dataURL: try c.decode(String.self, forKey: .dataURL))
+        case "task_result":
+            self = .taskResult(taskID: try c.decode(String.self, forKey: .taskID),
+                               title: try c.decode(String.self, forKey: .title),
+                               status: try c.decode(String.self, forKey: .status),
+                               summary: try c.decode(String.self, forKey: .summary),
+                               usageTokens: try c.decodeIfPresent(Int.self, forKey: .usageTokens))
         default:
             throw DecodingError.dataCorruptedError(forKey: .type, in: c, debugDescription: "unknown item type")
         }
@@ -174,6 +186,13 @@ enum BrainResponseItem: Codable, Equatable {
             try c.encode("image", forKey: .type)
             try c.encode(callID, forKey: .callID)
             try c.encode(dataURL, forKey: .dataURL)
+        case .taskResult(let taskID, let title, let status, let summary, let usageTokens):
+            try c.encode("task_result", forKey: .type)
+            try c.encode(taskID, forKey: .taskID)
+            try c.encode(title, forKey: .title)
+            try c.encode(status, forKey: .status)
+            try c.encode(summary, forKey: .summary)
+            try c.encodeIfPresent(usageTokens, forKey: .usageTokens)
         }
     }
 }
@@ -211,6 +230,16 @@ enum BrainEvent {
     case planUpdated(BrainPlan)
     case turnCompleted(outputMessage: String?, usage: BrainUsage?)
     case error(String)
+    /// 可靠空闲信号：isRunning 归位**之后**同步 emit（runTask 收尾 / cancel /
+    /// compactNow defer 三个清 flag 点，设计文档 §5.3）。stale loop（generation
+    /// 不匹配）不 emit。人车道续发唯一驱动源——不用 .turnCompleted，它在
+    /// runLoop 内部 emit、早于 flag 归位。
+    case turnSettled
+    /// 任务车道事件（设计文档 §5.4）——scheduler 发，主 agent 的 onEvent
+    /// 转发给 scheduler；status: "completed"|"failed"|"cancelled"。
+    case taskQueued(taskID: String, title: String)
+    case taskStarted(taskID: String, title: String)
+    case taskEnded(taskID: String, title: String, status: String)
 }
 
 struct BrainUsage: Equatable {

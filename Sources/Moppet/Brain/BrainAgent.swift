@@ -73,6 +73,11 @@ struct SDKChatModel: BrainModel {
                 } else {
                     messages.append(.user("\(note) [unsupported image data URL]"))
                 }
+            case .taskResult(_, let title, let status, let summary, _):
+                // Parallel-task result card — projected as a user note so the
+                // model keeps the outcome in history (same shape as the .plan
+                // assistant-note projection; design doc §5.5).
+                messages.append(.user("[task \(status): \(title)]\n\(summary)"))
             }
         }
 
@@ -203,6 +208,11 @@ final class BrainAgent {
     /// codex hosted web_search — only the Responses (ChatGPT subscription)
     /// transport can execute it; the toggle no-ops on other vendors.
     var webSearchEnabled = false
+    /// 宠物公告门控（设计文档 §5.8）：任务子 agent 置 false——后台任务的
+    /// thinking/talking/scanning/settle 不再写全局单气泡，也不把
+    /// streamingDismissed 重置回 false（PetBus.say 的副作用）顶掉正在流式的
+    /// 主对话气泡。主 agent / QuickChat / BrainExec 默认 true，零变化。
+    var announcesToPet = true
 
     // Live state
     private(set) var items: [BrainResponseItem] = []
@@ -226,6 +236,16 @@ final class BrainAgent {
     private var runTask: Task<Void, Never>?
     /// Resumable exec sessions (codex unified_exec session map).
     private let execSessions = BrainExecSessionRegistry()
+    /// 本会话 rollout 的 originator（§5.9）：主 agent "moppet-brain"，任务子
+    /// agent "moppet-brain-task"——侧栏按后者过滤。
+    private var originator = "moppet-brain"
+    /// 本 agent 作为任务子 agent 的归属标签（§5.7）：ApprovalCenter /
+    /// UserInputCenter 的「等待你」派生据此归属到任务；主 agent 为 nil。
+    private(set) var taskSource: String?
+    /// 保护 isRunning / loopGeneration 的读写（§5.3）：submit 是非隔离 async
+    /// （SE-0338 切到全局并发执行器），guard→占位之间含文件 I/O，两个并发
+    /// 调用方可同时通过裸 guard——原子占位的前提是状态位自身受锁。
+    private let stateLock = NSLock()
 
     // MARK: Growth instrumentation (P2, design doc §5.6)
 
@@ -310,7 +330,7 @@ final class BrainAgent {
             id: sessionID,
             timestamp: Date(),
             cwd: cwd,
-            originator: "moppet-brain",
+            originator: originator,
             cliVersion: "1.0.0",
             instructions: nil,
             // §5.12: stamp WHICH harness produced this session at open time.
@@ -398,59 +418,138 @@ final class BrainAgent {
     /// (codex UserInput::Image / TUI paste); they enter the transcript as
     /// image items so every transport can re-encode them natively.
     func submit(_ text: String, images: [String] = []) async {
-        guard !isRunning, !text.trimmingCharacters(in: .whitespaces).isEmpty || !images.isEmpty else { return }
+        await trySubmit(text, images: images)
+    }
+
+    /// 原子占位版 submit（设计文档 §5.3）：占位失败返回 false（不产生任何
+    /// 副作用），成功语义与原 submit 完全一致。submit 是非隔离 async
+    /// （SE-0338 切到全局并发执行器），原 guard→`isRunning = true` 之间含
+    /// beginSession/写 rollout 的文件 I/O——两个并发调用方可同时通过 guard，
+    /// 形成下方注释所述的历史事故形态；占位提前到任何 await / 文件 I/O 之前。
+    /// 唯一的占位后返回路径是「启动前校验」：占位→启动窗口内被 cancel()/
+    /// compactNow 抢占（generation 被外部 bump）时放弃启动并返回 false——
+    /// 此时 rollout 已写入 user 行（与 mid-turn 取消同形），isRunning 由
+    /// cancel 清位、不在此重复回滚。
+    @discardableResult
+    func trySubmit(_ text: String, images: [String] = []) async -> Bool {
+        guard !text.trimmingCharacters(in: .whitespaces).isEmpty || !images.isEmpty else { return false }
+        // withLock：async-safe 的 scoped locking（临界区内无挂起点，语义与
+        // lock/unlock 对完全一致）。check-and-set 必须同一临界区——占位
+        // 与抢占之间不能留窗口。
+        // Claim 纪元：generation 递增与占位同一临界区——cancel()/compactNow
+        // 的 defer 在「占位→启动」窗口内 bump generation 即令本 claim 失效，
+        // 启动前校验据此放弃本次 turn。否则被取消的 turn 照常执行且 runTask
+        // 句柄被下一次提交覆盖，形成双 runLoop 并发（streamingText 无锁交叉
+        // 写、rollout 行交错，Stop 再也停不掉第一个 loop）。
+        let generation = stateLock.withLock { () -> Int? in
+            guard !isRunning else { return nil }
+            isRunning = true   // ← 在任何 await / 文件 I/O 之前完成占位
+            loopGeneration += 1
+            return loopGeneration
+        }
+        guard let generation else { return false }
         // The user is here: any background self-improvement yields instantly.
         BrainActivity.touch()
         Evolver.shared.cancel()
-        if writer == nil { beginSession() }
+        // 惰性 beginSession 在 itemsLock 内判定+创建：submit 路径与 ingest
+        // 路径（scheduler @MainActor）都可能首建——两路并发不允许产出两个
+        // Writer 交错写同一 JSONL（§5.5 写-写竞态治理）。
+        itemsLock.withLock {
+            if writer == nil { beginSession() }
+        }
         // codex persists a turn_context per turn — /cd and mid-session
         // toggles survive restarts (they used to roll back on resume).
         writer?.append(context: turnContext)
 
         beginTurn(prompt: text)
 
-        items.append(.message(role: "user", content: text))
+        itemsLock.withLock {
+            items.append(.message(role: "user", content: text))
+            for dataURL in images {
+                items.append(.imageItem(callID: "user", dataURL: dataURL))
+            }
+        }
         writer?.append(item: .message(role: "user", content: text))
         for dataURL in images {
-            items.append(.imageItem(callID: "user", dataURL: dataURL))
             writer?.append(item: .imageItem(callID: "user", dataURL: dataURL))
         }
         // Never echo the user's question into the pet bubble — it's their
         // own words; show agent-side state instead (hideAfter 0 keeps the
         // bubble until the first delta/tool event replaces it).
-        PetBus.shared.say(L("Thinking…"), state: .thinking, hideAfter: 0)
+        if announcesToPet {
+            PetBus.shared.say(L("Thinking…"), state: .thinking, hideAfter: 0)
+        }
 
-        isRunning = true
         lastError = nil
         emit(.turnStarted)
 
-        loopGeneration += 1
-        let generation = loopGeneration
-        runTask = Task {
-            await runLoop()
-            // Only the CURRENT loop owns the flag/handle — a cancelled-but-
-            // still-unwinding stale loop must not clobber a newer submit's
-            // state (that's how double runLoops used to interleave).
-            if generation == self.loopGeneration {
-                self.isRunning = false
-                self.runTask = nil
+        // 启动前校验 + runTask 赋值同一临界区（校验→赋值窗口零宽）：generation
+        // 已被 cancel()/compactNow defer 在占位窗口内 bump → 本次 turn 放弃
+        // 启动。isRunning 不在此回滚——cancel 已清位；若已被 compactNow 或
+        // 更新的 claim 持有，代清会踩他人占位。仅恢复 lastError（占位窗口内
+        // 上面的 nil 可能抹掉了 cancel 的写入；与后写者的竞争窗口是 µs 级
+        // 赋值对 ms 级 beginSession 文件 I/O，实际不可达，与既有锁粒度一致）。
+        let start = stateLock.withLock { () -> Bool in
+            guard loopGeneration == generation else { return false }
+            runTask = Task {
+                await runLoop()
+                // Only the CURRENT loop owns the flag/handle — a cancelled-but-
+                // still-unwinding stale loop must not clobber a newer submit's
+                // state (that's how double runLoops used to interleave).
+                guard generation == self.loopGeneration else { return }
+                // 锁内复查 generation：杜绝「compare 通过 → cancel/新 claim
+                // 落入 → 清掉他人句柄/flag」的窄窗（句柄覆盖是缺陷⑤形态）。
+                let settled = self.stateLock.withLock { () -> Bool in
+                    guard generation == self.loopGeneration else { return false }
+                    self.isRunning = false
+                    self.runTask = nil
+                    return true
+                }
+                // 可靠空闲信号（§5.3/§5.4）：flag 归位之后同步 emit——人车道
+                // 续发唯一驱动源。stale loop（generation 不匹配）不 emit。
+                if settled { self.emit(.turnSettled) }
             }
+            return true
         }
-        await runTask?.value
+        guard start else {
+            lastError = "cancelled"
+            // 补一发空闲信号：cancel()/compactNow 自身的 .turnSettled 发出时，
+            // 在途 flush 还挂在占位 await 上——没有这一发，被放弃 turn 涉及
+            // 的队列要等下一次无关事件才续发。
+            emit(.turnSettled)
+            return false
+        }
+        let handle = stateLock.withLock { runTask }
+        await handle?.value
+        return true
     }
 
-    /// Bumped by submit and cancel: lets a stale (cancelled) loop detect it
-    /// no longer owns the session state.
+    /// Claim/run epoch — bumped at trySubmit claim（与 isRunning 占位同一临
+    /// 界区）以及 cancel()/compactNow 的 defer：让 stale（被取消）的占位或
+    /// loop 检测到自己已不再拥有会话状态。
     private var loopGeneration = 0
 
     func cancel() {
-        loopGeneration += 1
-        runTask?.cancel()
-        runTask = nil
-        isRunning = false
+        // 单临界区：generation bump（使占位窗口内的 claim 失效——双 runLoop
+        // 修复的另一半）+ flag 清位 + runTask 句柄原子摘除。句柄在锁外
+        // cancel()：Task.cancel 非阻塞，且此刻 generation 已递增，被取消 loop
+        // 的收尾闭包必然 stale、不会清写他人状态。
+        let handle = stateLock.withLock { () -> Task<Void, Never>? in
+            loopGeneration += 1
+            isRunning = false
+            let task = runTask
+            runTask = nil
+            return task
+        }
+        handle?.cancel()
         lastError = "cancelled"
         execSessions.stopAll()
-        PetBus.shared.settle()
+        if announcesToPet {
+            PetBus.shared.settle()
+        }
+        // 清 flag 后同步 emit（§5.3 三个清 flag 点之二）：Stop 后人车道若还有
+        // 排队消息由此续发（stopEverything 会先清队列，续发为 no-op）。
+        emit(.turnSettled)
     }
 
     deinit {
@@ -494,6 +593,10 @@ final class BrainAgent {
     }
 
     func compactHistoryIfNeeded() {
+        // 整体换血纳入 itemsLock（§5.5）：ingest 写点并行后，无锁换血与
+        // append 并发是 UB。函数内无 await，整段持锁即可。
+        itemsLock.lock()
+        defer { itemsLock.unlock() }
         guard items.count > compactThreshold else { return }
         let head = items.prefix(2)   // first user goal + first reply
         let tail = items.suffix(compactKeepTail)
@@ -516,20 +619,33 @@ final class BrainAgent {
     /// CompactedItem. Returns a short human-readable result line.
     @discardableResult
     func compactNow() async -> String {
-        guard !items.isEmpty else { return "nothing to compact (empty session)" }
-        guard !isRunning else { return "wait for the current turn to finish first" }
-        // Own the running flag for the whole (multi-second) summary — a
-        // concurrent submit used to interleave two writers on `items`.
-        isRunning = true
-        defer {
-            loopGeneration += 1   // invalidate any racing loop's ownership
-            isRunning = false
+        guard !itemsLock.withLock({ items.isEmpty })
+        else { return "nothing to compact (empty session)" }
+        // check-and-set 收进 stateLock（§5.3/§7）：compact 的 isRunning 置位与
+        // trySubmit 原子占位互斥，同一窗口不再有两个写者能各自过 guard。
+        let running = stateLock.withLock { () -> Bool in
+            let busy = isRunning
+            if !busy { isRunning = true }
+            return busy
         }
-        let summarizable = items.filter { item in
-            switch item {
-            case .message, .functionCall, .functionCallOutput: return true
-            case .reasoning, .plan, .imageItem: return false
+        guard !running else { return "wait for the current turn to finish first" }
+        defer {
+            stateLock.withLock {
+                loopGeneration += 1   // invalidate any racing loop's ownership
+                isRunning = false
             }
+            // 清 flag 后同步 emit（§5.3 三个清 flag 点之三，rev.3 #2）：
+            // /compact 持 isRunning 数秒，期间入队的人消息由此续发。
+            emit(.turnSettled)
+        }
+        let (summarizable, head) = itemsLock.withLock { () -> ([BrainResponseItem], [BrainResponseItem]) in
+            let summarizable = items.filter { item in
+                switch item {
+                case .message, .functionCall, .functionCallOutput, .taskResult: return true
+                case .reasoning, .plan, .imageItem: return false
+                }
+            }
+            return (summarizable, Array(items.prefix(2)))
         }
         do {
             let stream = try await model.streamTurn(
@@ -544,15 +660,17 @@ final class BrainAgent {
             guard !summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 return "compaction skipped (empty summary from the model)"
             }
-            let head = items.prefix(2)
-            let tail = items.suffix(min(compactKeepTail, max(0, items.count - 2)))
-            var compacted = Array(head)
-            compacted.append(.message(
-                role: "user",
-                content: "[compacted summary of earlier turns]\n\(summary)"))
-            compacted.append(contentsOf: tail)
-            let dropped = items.count - compacted.count
-            items = Self.pairingSafe(compacted)
+            let dropped = itemsLock.withLock { () -> Int in
+                let tail = Array(items.suffix(min(compactKeepTail, max(0, items.count - 2))))
+                var compacted = head
+                compacted.append(.message(
+                    role: "user",
+                    content: "[compacted summary of earlier turns]\n\(summary)"))
+                compacted.append(contentsOf: tail)
+                let dropped = items.count - compacted.count
+                items = Self.pairingSafe(compacted)
+                return dropped
+            }
             writer?.append(.compacted(summary: summary))
             return "compacted: \(dropped) items replaced by a \(summary.count)-char summary"
         } catch {
@@ -582,7 +700,11 @@ final class BrainAgent {
         if !running.isEmpty {
             lines.append("exec sessions: \(running.count) (\(running.filter(\.running).count) running)")
         }
-        lines.append("transcript: \(items.count) items (auto-compact at \(compactThreshold))")
+        // 锁内快照（§5.5）：ingest 并行后 items.count 不能裸读。
+        itemsLock.lock()
+        let itemCount = items.count
+        itemsLock.unlock()
+        lines.append("transcript: \(itemCount) items (auto-compact at \(compactThreshold))")
         return lines.joined(separator: "\n")
     }
 
@@ -621,7 +743,11 @@ final class BrainAgent {
     /// File lands in ~/.moppet/brain/exports/<sessionID>.md.
     func exportMarkdown() -> URL? {
         var lines = ["# \(PetIdentity.name) — session \(sessionID)", ""]
-        for item in items {
+        // 锁内快照后遍历（§5.5）。
+        itemsLock.lock()
+        let snapshot = items
+        itemsLock.unlock()
+        for item in snapshot {
             switch item {
             case .message(let role, let content):
                 lines.append(role == "user" ? "## 🧑 User" : "## 🐹 \(PetIdentity.name)")
@@ -640,6 +766,10 @@ final class BrainAgent {
                 lines.append("")
             case .imageItem(let callID, _):
                 lines.append("**image** (\(callID == "user" ? "attached by user" : "view_image \(callID)"))")
+                lines.append("")
+            case .taskResult(_, let title, let status, let summary, _):
+                lines.append("**task \(status):** \(title)")
+                lines.append(summary)
                 lines.append("")
             }
         }
@@ -815,9 +945,12 @@ final class BrainAgent {
             streamingText = ""
 
             do {
+                // 历史锁内快照（§5.5）：model 拿到的是稳定副本，ingest/换血
+                // 与流式请求互不干扰。
+                let history = itemsLock.withLock { items }
                 let stream = try await model.streamTurn(
                     system: system, developer: developer,
-                    history: items, specs: specs
+                    history: history, specs: specs
                 )
                 for try await event in stream {
                     if Task.isCancelled {
@@ -828,7 +961,9 @@ final class BrainAgent {
                     switch event {
                     case .textDelta(let delta):
                         streamingText += delta
-                        PetBus.shared.setState(.talking)
+                        if announcesToPet {
+                            PetBus.shared.setState(.talking)
+                        }
                     case .toolCall(let call):
                         pendingCalls.append(call)
                     case .completed(let message, let eventUsage):
@@ -854,14 +989,33 @@ final class BrainAgent {
                 // rejects non-model reasoning items with a 400.
             }
 
-            // Persist the model's turn output (message and/or calls).
+            // 终审修复（rev.2 上移）：取消检查点必须在 items/rollout 追加之
+            // 前——轮顶（:936）与流事件（:956）两个既有检查点都在追加前触发，
+            // 追加总是成对；检查点若放在追加之后，取消触发的 return 会留下无
+            // 配对输出的孤儿 function_call（items+rollout 双写），按配对不变
+            // 量（pairingSafe 文档）codex Responses 传输会在后续每轮 400，且
+            // 仅在 ≥80 项压缩时自愈。与流事件检查点同形：已取消即丢弃未持久
+            // 化输出，且不再派发任何工具（dismissForSource 只扫已安装请求，
+            // 派发前复查拦住未安装的审批/提问）。
+            if Task.isCancelled {
+                outcome.userCancelled = true
+                finish(nil, usage: nil)
+                return
+            }
+
+            // Persist the model's turn output (message and/or calls) — 追加
+            // 纳入 itemsLock（§5.5）：ingest 写点并行后无锁 append 是 UB。
             if !streamingText.isEmpty {
-                items.append(.message(role: "assistant", content: streamingText))
+                itemsLock.withLock {
+                    items.append(.message(role: "assistant", content: streamingText))
+                }
                 writer?.append(item: .message(role: "assistant", content: streamingText))
             }
             for call in pendingCalls {
-                items.append(.functionCall(callID: call.callID, name: call.name,
-                                           arguments: call.argumentsJSON))
+                itemsLock.withLock {
+                    items.append(.functionCall(callID: call.callID, name: call.name,
+                                               arguments: call.argumentsJSON))
+                }
                 writer?.append(item: .functionCall(callID: call.callID, name: call.name,
                                                    arguments: call.argumentsJSON))
             }
@@ -871,7 +1025,7 @@ final class BrainAgent {
                 let streamed = streamingText
                 streamingText = ""
                 let message: String? = turnFinal ?? (streamed.isEmpty ? nil : streamed)
-                if let finalText = message, !finalText.isEmpty {
+                if let finalText = message, !finalText.isEmpty, announcesToPet {
                     // Full answer, and it stays until the next turn replaces
                     // it (hideAfter 0). The old prefix(90) cut answers short
                     // in the pet bubble; the bubble itself scrolls now.
@@ -901,7 +1055,9 @@ final class BrainAgent {
                         // Pose only — the old "→ tool" TEXT fought the bubble
                         // contract ("bubble shows results, not progress") in
                         // the QuickChat path; tool names live in the transcript.
-                        PetBus.shared.setState(.scanning)
+                        if self.announcesToPet {
+                            PetBus.shared.setState(.scanning)
+                        }
                         let output = await BrainTools.dispatch(call: call, context: context) { event in
                             notify(event)
                         }
@@ -928,12 +1084,16 @@ final class BrainAgent {
                     // output that merely starts with "image:" never matches.
                     let dataURL = String(output.output.dropFirst("image:".count))
                     let summary = Self.imageSummary(dataURL)
-                    items.append(.functionCallOutput(callID: output.callID, output: summary))
+                    itemsLock.withLock {
+                        items.append(.functionCallOutput(callID: output.callID, output: summary))
+                        items.append(.imageItem(callID: output.callID, dataURL: dataURL))
+                    }
                     writer?.append(item: .functionCallOutput(callID: output.callID, output: summary))
-                    items.append(.imageItem(callID: output.callID, dataURL: dataURL))
                     writer?.append(item: .imageItem(callID: output.callID, dataURL: dataURL))
                 } else {
-                    items.append(.functionCallOutput(callID: output.callID, output: output.output))
+                    itemsLock.withLock {
+                        items.append(.functionCallOutput(callID: output.callID, output: output.output))
+                    }
                     writer?.append(item: .functionCallOutput(callID: output.callID, output: output.output))
                 }
             }
@@ -989,13 +1149,89 @@ final class BrainAgent {
             plan: plan,
             execSessions: execSessions,
             networkAccess: networkAccess,
-            writableRoots: writableRoots
+            writableRoots: writableRoots,
+            source: taskSource
         )
+    }
+
+    // MARK: - Parallel task support (设计文档 §5.5 / §5.9 / §5.12)
+
+    /// 主 transcript 的唯一外部写入口之一（任务 prompt，提交时落盘）：纯任务
+    /// 会话重启后 prompt 行也在。惰性 beginSession 复用 submit 语义；items
+    /// 追加在 itemsLock 内，与 runLoop/compact 写点互斥。
+    func ingestUserMessage(text: String, images: [String]) {
+        let writer = itemsLock.withLock { () -> BrainRollout.Writer? in
+            if writer == nil { beginSession() }
+            items.append(.message(role: "user", content: text))
+            for dataURL in images {
+                items.append(.imageItem(callID: "user", dataURL: dataURL))
+            }
+            return self.writer
+        }
+        writer?.append(item: .message(role: "user", content: text))
+        for dataURL in images {
+            writer?.append(item: .imageItem(callID: "user", dataURL: dataURL))
+        }
+    }
+
+    /// 主 transcript 的唯一外部写入口之二（任务结果卡，结束时落盘）。
+    func ingestTaskResult(taskID: String, title: String, status: String,
+                          summary: String, usage: BrainUsage?) {
+        let item = BrainResponseItem.taskResult(
+            taskID: taskID, title: title, status: status,
+            summary: summary, usageTokens: usage.map { $0.totalTokens })
+        let writer = itemsLock.withLock { () -> BrainRollout.Writer? in
+            if writer == nil { beginSession() }
+            items.append(item)
+            return self.writer
+        }
+        writer?.append(item: item)
+    }
+
+    /// 任务车道子 agent（§5.12/§5.9）：独立实例、独立 rollout 文件；
+    /// 模型/沙盒设置在 spawn 时快照——主 agent 运行中的改动只影响下一个任务。
+    func makeTaskChild(taskID: String) -> BrainAgent {
+        let child = BrainAgent(model: model, settings: settings)
+        child.sandboxMode = sandboxMode
+        child.approvalPolicy = approvalPolicy
+        child.cwd = cwd
+        child.maxTurnsPerSubmit = maxTurnsPerSubmit
+        child.networkAccess = networkAccess
+        child.writableRoots = writableRoots
+        child.webSearchEnabled = webSearchEnabled
+        // 子会话不自行拨 MCP：clients 从父实例拷贝共享（BrainMCPClient 是串行
+        // queue 保护的 @unchecked Sendable，并行 dispatch 安全），工具清单拷贝
+        // 后只读——specs 与 dispatch 都齐了，也无重复连接。
+        child.mcpEnabled = false
+        child.mcpClients = mcpClients
+        child.mcpToolInfos = mcpToolInfos
+        child.sessionID = "\(sessionID)-t\(taskID.dropFirst("task-".count))"
+        child.originator = BrainRollout.taskOriginator
+        child.taskSource = taskID
+        return child
+    }
+
+    /// 无主 agent 可挂时的兜底子 agent（§5.2 startChild）。
+    static func makeDefaultChild(taskID: String) -> BrainAgent {
+        let child = BrainAgent()
+        child.sessionID = "\(child.sessionID)-t\(taskID.dropFirst("task-".count))"
+        child.originator = BrainRollout.taskOriginator
+        child.taskSource = taskID
+        return child
     }
 
     /// Serializes transcript mutations: emit(.planUpdated) fires from PARALLEL
     /// tool children while runLoop appends — unguarded Array writes race.
     private let itemsLock = NSLock()
+
+    /// 会话文件已被 deleteAll 删除（ChatSessionStore 经调度器账本或 store 直达
+    /// 本实例调用）：Writer 失效，后续 append（取消后展开中的工具输出、异步
+    /// 结账的 task_result 行）直接丢弃——否则 Writer 兜底分支会用单条记录
+    /// 重建无 sessionMeta 头的孤儿 JSONL（load() 读到即 nil、侧栏不可见、
+    /// 无删除入口）。锁序 itemsLock→appendLock 与 beginSession/ingest 一致。
+    func invalidateRollout() {
+        itemsLock.withLock { writer?.invalidate() }
+    }
 
     private func emit(_ event: BrainEvent) {
         onEvent?(event)

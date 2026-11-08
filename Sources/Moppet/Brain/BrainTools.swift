@@ -346,6 +346,11 @@ enum BrainTools {
         /// reported here so `TurnOutcome.approvalDenied` has a source. Nil in
         /// headless/test contexts — recording is optional, never load-bearing.
         var recordApproval: (@Sendable (ApprovalEvent) -> Void)? = nil
+        /// 归属标签（设计文档 §5.7）：任务子 agent 传 taskID，审批/提问卡片
+        /// 据此派生「等待你」归属；主 agent 及旧调用点 nil（默认值，构造点
+        /// 零破坏）。Brain 的清洁工具审批走 runCleaningTool → requestApproval，
+        /// source 经同一 Context 天然可达。
+        var source: String? = nil
     }
 
     /// Executes one tool call. Returns output text for the model. A return
@@ -488,7 +493,8 @@ enum BrainTools {
             emit(.approvalResolved(approved: false))
             return false
         }
-        let approved = await ApprovalCenter.shared.request(title: "Brain · \(title)", detail: detail)
+        let approved = await ApprovalCenter.shared.request(
+            title: "Brain · \(title)", detail: detail, source: context.source)
         emit(.approvalResolved(approved: approved))
         // Single adjudication point: button, Esc-dismiss and the 15-minute
         // timeout all resolve through the line above, so the growth ledger
@@ -625,10 +631,21 @@ enum BrainTools {
                 "cleaning tool \(call.name)",
                 prettyArgs(args), call: call, context: context, emit: emit)
             guard approved else { return "error: user declined \(call.name)" }
+            // 终审修复：批准返回与 execute 之间任务可能已被取消（批准卡可因
+            // cancel 落在最后一个 runLoop 检查点之后而照常弹出并获批准）——
+            // 已取消任务不得执行破坏性清理。Task.isCancelled 经 TaskGroup 从
+            // runLoop 的 runTask 传导，agent.cancel 即标记。
+            if Task.isCancelled {
+                return "error: task cancelled — \(call.name) not executed"
+            }
             // Approval already granted natively — clear ToolRegistry's gate.
             args["confirmed"] = true
         }
-        return try await ToolRegistry.execute(name: call.name, args: args, approval: .confirmedFlag)
+        // quiet（§5.8）：后台任务子 agent（source 非空）的工具公告静音——
+        // 不顶掉主对话的流式气泡，也不重新弹出已点掉的 QuickChat 气泡。
+        return try await ToolRegistry.execute(
+            name: call.name, args: args, approval: .confirmedFlag,
+            quiet: context.source != nil)
     }
 
     private static func prettyArgs(_ args: [String: Any]) -> String {
@@ -823,7 +840,8 @@ enum BrainTools {
                 header: String((raw["header"] as? String) ?? id).prefix(12).description,
                 question: question, options: options))
         }
-        guard let answers = await UserInputCenter.shared.request(questions: questions) else {
+        guard let answers = await UserInputCenter.shared.request(
+            questions: questions, source: context.source) else {
             return "error: user did not answer (dismissed or timed out) — proceed with a safe default or explain what you need"
         }
         return questions.compactMap { q in

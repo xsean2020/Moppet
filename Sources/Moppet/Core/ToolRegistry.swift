@@ -35,7 +35,11 @@ enum ToolRegistry {
         let description: String
         let params: [Param]
         let destructive: Bool
-        let handler: ([String: Any], ApprovalMode) async throws -> String
+        /// 第三参 `quiet`（设计文档 §5.8）：true = 本调用属于后台任务子 agent，
+        /// 工具路径的 PetBus 公告静音——不顶掉流式气泡、不重置
+        /// streamingDismissed（PetBus.say 的副作用）。handler 由 execute
+        /// 单点调用（quiet 为值传参），漏改编译失败。
+        let handler: ([String: Any], ApprovalMode, Bool) async throws -> String
 
         /// JSON Schema object for OpenAI tool-calling / MCP inputSchema.
         var jsonSchema: [String: Any] {
@@ -101,7 +105,10 @@ enum ToolRegistry {
     }
 
     /// Execute a tool by name. `args` values come straight from JSON.
-    static func execute(name: String, args: [String: Any], approval: ApprovalMode) async throws -> String {
+    /// `quiet`（§5.8）：后台任务子 agent 的调用传 true——工具路径的 PetBus
+    /// 写全部静音；主 agent / MCP / AIAgent 路径默认 false 零变化。
+    static func execute(name: String, args: [String: Any], approval: ApprovalMode,
+                        quiet: Bool = false) async throws -> String {
         guard let tool = tool(named: name) else {
             throw ToolError(message: "unknown tool: \(name)")
         }
@@ -124,9 +131,9 @@ enum ToolRegistry {
                 guard confirmed else { throw ToolError(message: "user declined \(name)") }
             }
         }
-        PetBus.shared.setState(.thinking)
-        defer { PetBus.shared.settle() }
-        return try await tool.handler(args, approval)
+        if !quiet { PetBus.shared.setState(.thinking) }
+        defer { if !quiet { PetBus.shared.settle() } }
+        return try await tool.handler(args, approval, quiet)
     }
 
     private static func describeArgs(_ args: [String: Any]) -> String {
@@ -164,7 +171,7 @@ enum ToolRegistry {
             name: "disk_status",
             description: "Get overall disk usage of the boot volume (total, used, free, fraction).",
             params: [], destructive: false
-        ) { _, _ in
+        ) { _, _, _ in
             let d = DiskInfo.snapshot()
             return table([
                 ("volume", d.volumeName),
@@ -178,7 +185,7 @@ enum ToolRegistry {
             name: "system_status",
             description: "Live system metrics: CPU usage, memory pressure, network rates, battery, uptime.",
             params: [], destructive: false
-        ) { _, _ in
+        ) { _, _, _ in
             _ = SystemStatus.network  // prime rate sampling
             _ = SystemStatus.cpu      // prime delta sampling
             try? await Task.sleep(nanoseconds: 300_000_000)
@@ -203,7 +210,7 @@ enum ToolRegistry {
             name: "list_clean_rules",
             description: "List all built-in cleaning sections and items with their path patterns and deletion modes.",
             params: [], destructive: false
-        ) { _, _ in
+        ) { _, _, _ in
             RuleLibrary.sections.map { section in
                 "\(section.title) [\(section.id)]\n" + section.items.map { item in
                     "  - \(item.name) [\(item.id)] \(item.pattern) (\(item.mode.rawValue))"
@@ -219,19 +226,21 @@ enum ToolRegistry {
                 Param("items", "array", "Specific item ids to scan (takes precedence over sections)"),
             ],
             destructive: false
-        ) { args, _ in
+        ) { args, _, quiet in
             let selected = resolveItems(sections: strArray(args, "sections"), items: strArray(args, "items"))
             guard !selected.isEmpty else {
                 throw ToolError(message:
                     "no matching clean items for sections=\(strArray(args, "sections") ?? []) items=\(strArray(args, "items") ?? [])"
                     + " — available section ids: \(RuleLibrary.sections.map(\.id).joined(separator: ", "))")
             }
-            PetBus.shared.say("Scanning \(selected.count) locations…", state: .scanning)
+            if !quiet { PetBus.shared.say("Scanning \(selected.count) locations…", state: .scanning) }
             let results = await ScanEngine.scan(items: selected)
             let token = UUID()
             let findings = results.flatMap(\.findings)
             pendingStore(token, findings)
-            PetBus.shared.say("Found \(findings.count) paths (\(findings.reduce(0) { $0 + $1.bytes }.bytesFormatted))", state: .celebrating)
+            if !quiet {
+                PetBus.shared.say("Found \(findings.count) paths (\(findings.reduce(0) { $0 + $1.bytes }.bytesFormatted))", state: .celebrating)
+            }
 
             var text = "Scan complete (nothing deleted). Scanned scope: \(selected.map(\.id).joined(separator: ", "))\n"
             for r in results where !r.findings.isEmpty {
@@ -252,14 +261,14 @@ enum ToolRegistry {
                 Param("confirmation_token", "string", "Token returned by scan_clean", required: true),
             ],
             destructive: true
-        ) { args, _ in
+        ) { args, _, quiet in
             guard let tokenString = str(args, "confirmation_token"),
                   let token = UUID(uuidString: tokenString),
                   let findings = pendingTake(token) else {
                 throw ToolError(message: "invalid or expired confirmation_token — run scan_clean first")
             }
             guard !findings.isEmpty else { throw ToolError(message: "nothing to delete") }
-            PetBus.shared.say("Cleaning \(findings.count) items…", state: .cleaning)
+            if !quiet { PetBus.shared.say("Cleaning \(findings.count) items…", state: .cleaning) }
             let outcomes = await CleanExecutor.clean(findings: findings)
             let freed = outcomes.filter(\.success).reduce(0) { $0 + $1.bytes }
             let failed = outcomes.filter { !$0.success }
@@ -275,7 +284,7 @@ enum ToolRegistry {
                                     success: $0.success, error: $0.error)
                 }, source: .aiAgent)
             HistoryStore.append(record)
-            PetBus.shared.say("Freed \(freed.bytesFormatted) 🎉", state: .celebrating)
+            if !quiet { PetBus.shared.say("Freed \(freed.bytesFormatted) 🎉", state: .celebrating) }
             var text = "Freed \(freed.bytesFormatted) across \(outcomes.count - failed.count) items."
             if !failed.isEmpty {
                 text += "\n\(failed.count) failures:\n" + failed.prefix(5).map {
@@ -291,7 +300,7 @@ enum ToolRegistry {
             description: "Rank the largest direct children of a directory (default: home).",
             params: [Param("path", "string", "Directory to analyze (absolute path, default ~)")],
             destructive: false
-        ) { args, _ in
+        ) { args, _, _ in
             let target: URL
             if let p = str(args, "path"), p.hasPrefix("/") {
                 target = URL(fileURLWithPath: p)
@@ -312,7 +321,7 @@ enum ToolRegistry {
                 Param("limit", "number", "Max results (default 20)"),
             ],
             destructive: false
-        ) { args, _ in
+        ) { args, _, _ in
             let minMB = max(1, min(num(args, "min_mb") ?? 500, 1_000_000))
             let limit = max(1, min(Int(num(args, "limit") ?? 20), 200))
             let files = await LargeFilesEngine.find(
@@ -329,7 +338,7 @@ enum ToolRegistry {
             description: "Find regenerable build artifacts (node_modules, target, dist, .gradle, Pods, …) under developer directories. Report-only.",
             params: [Param("roots", "array", "Directories to search (default: ~/Projects, ~/Developer, ~/dev, ~/code, ~/work, ~/src)")],
             destructive: false
-        ) { args, _ in
+        ) { args, _, _ in
             let roots = (strArray(args, "roots") ?? []).map { URL(fileURLWithPath: ($0.hasPrefix("~") ? NSHomeDirectory() + $0.dropFirst() : $0)) }
             let effective = roots.isEmpty ? PurgeEngine.defaultRoots() : roots
             guard !effective.isEmpty else { return "No developer roots found." }
@@ -346,7 +355,7 @@ enum ToolRegistry {
             description: "Permanently delete the listed artifact directories (regenerable build output). Destructive — confirm with the user first.",
             params: [Param("paths", "array", "Absolute artifact directory paths from find_project_artifacts", required: true)],
             destructive: true
-        ) { args, _ in
+        ) { args, _, _ in
             guard let paths = strArray(args, "paths"), !paths.isEmpty else {
                 throw ToolError(message: "paths required")
             }
@@ -367,7 +376,7 @@ enum ToolRegistry {
             name: "list_apps",
             description: "List installed applications with bundle IDs and sizes (largest first).",
             params: [], destructive: false
-        ) { _, _ in
+        ) { _, _, _ in
             let apps = UninstallEngine.listApps().prefix(40)
             return apps.enumerated().map { i, app in
                 "\(i + 1). \(app.name) [\(app.bundleID ?? "-")] — \(app.bytes.bytesFormatted) @ \(app.url.path)"
@@ -379,7 +388,7 @@ enum ToolRegistry {
             description: "Find files related to an app by bundle id (preferences, caches, containers, support data). Report-only.",
             params: [Param("bundle_id", "string", "Bundle identifier, e.g. com.example.app", required: true)],
             destructive: false
-        ) { args, _ in
+        ) { args, _, _ in
             guard let bundleID = str(args, "bundle_id") else { throw ToolError(message: "bundle_id required") }
             let files = UninstallEngine.relatedFiles(appName: bundleID, bundleID: bundleID)
             if files.isEmpty { return "No related files found." }
@@ -395,7 +404,7 @@ enum ToolRegistry {
                 Param("remove_data", "boolean", "Also remove related user data (default false)"),
             ],
             destructive: true
-        ) { args, _ in
+        ) { args, _, _ in
             guard let appPath = str(args, "app_path"), appPath.hasSuffix(".app") else {
                 throw ToolError(message: "app_path must point at a .app bundle")
             }
@@ -439,7 +448,7 @@ enum ToolRegistry {
             name: "optimize_catalog",
             description: "List available system maintenance tasks. Some require an admin password prompt.",
             params: [], destructive: false
-        ) { _, _ in
+        ) { _, _, _ in
             OptimizeEngine.catalog.map { "· \($0.id) — \($0.title)\($0.requiresAdmin ? " (admin)" : "")" }
                 .joined(separator: "\n")
         })
@@ -449,7 +458,7 @@ enum ToolRegistry {
             description: "Run a maintenance task by id. Admin-requiring tasks must be run from the app UI (password prompt) — the AI can only run non-admin tasks.",
             params: [Param("task_id", "string", "Task id from optimize_catalog", required: true)],
             destructive: true   // restarts Finder/Dock etc.
-        ) { args, _ in
+        ) { args, _, _ in
             guard let taskID = str(args, "task_id") else { throw ToolError(message: "task_id required") }
             guard let task = OptimizeEngine.catalog.first(where: { $0.id == taskID }) else {
                 throw ToolError(message: "unknown task")
@@ -466,7 +475,7 @@ enum ToolRegistry {
             description: "Recent clean runs with freed bytes and per-run summaries.",
             params: [Param("limit", "number", "Max runs (default 5)")],
             destructive: false
-        ) { args, _ in
+        ) { args, _, _ in
             // Model-controlled number: clamp before it reaches suffix() —
             // a negative limit is a precondition trap, not an error.
             let limit = max(0, min(Int(num(args, "limit") ?? 5), 200))
@@ -482,7 +491,7 @@ enum ToolRegistry {
             name: "whitelist_list",
             description: "List user whitelist glob patterns (paths that must never be touched).",
             params: [], destructive: false
-        ) { _, _ in
+        ) { _, _, _ in
             let patterns = SafetyGuard.loadWhitelistPatterns()
             return patterns.isEmpty ? "Whitelist is empty." : patterns.joined(separator: "\n")
         })
@@ -494,7 +503,7 @@ enum ToolRegistry {
             // The whitelist is the "never touch" contract itself — rewriting it
             // is at least as destructive as any deletion it guards.
             destructive: true
-        ) { args, _ in
+        ) { args, _, _ in
             guard let pattern = str(args, "pattern"), !pattern.isEmpty else {
                 throw ToolError(message: "pattern required")
             }
@@ -510,7 +519,7 @@ enum ToolRegistry {
             description: "Remove a glob pattern from the user whitelist.",
             params: [Param("pattern", "string", "Glob pattern to remove", required: true)],
             destructive: true
-        ) { args, _ in
+        ) { args, _, _ in
             guard let pattern = str(args, "pattern") else { throw ToolError(message: "pattern required") }
             var patterns = SafetyGuard.loadWhitelistPatterns()
             guard let idx = patterns.firstIndex(of: pattern) else { return "Not in whitelist." }
@@ -525,7 +534,7 @@ enum ToolRegistry {
             description: "Check whether a path would be allowed to be deleted by the safety layer (protected prefixes, categories, whitelist).",
             params: [Param("path", "string", "Absolute path", required: true)],
             destructive: false
-        ) { args, _ in
+        ) { args, _, _ in
             guard let path = str(args, "path") else { throw ToolError(message: "path required") }
             let verdict = SafetyGuard.checkDeletable(URL(fileURLWithPath: path))
             return verdict.allowed ? "ALLOWED" : "DENIED — \(verdict.reason ?? "?")"
@@ -536,7 +545,7 @@ enum ToolRegistry {
             name: "scan_launch_items",
             description: "List third-party launch items (user/global LaunchAgents and LaunchDaemons) with their disabled/loaded state. Apple com.apple.* system items are excluded. Read-only.",
             params: [], destructive: false
-        ) { _, _ in
+        ) { _, _, _ in
             let (items, hidden) = await LaunchItemsEngine.scan()
             guard !items.isEmpty else {
                 return "No third-party launch items found\(hidden > 0 ? " (\(hidden) Apple system items hidden)" : "")."
@@ -555,7 +564,7 @@ enum ToolRegistry {
                 Param("dry_run", "boolean", "Report what would happen without changing anything"),
             ],
             destructive: true
-        ) { args, _ in
+        ) { args, _, _ in
             guard let identifier = str(args, "item"), !identifier.isEmpty else {
                 throw ToolError(message: "item required — run scan_launch_items and pass the exact label or path")
             }
@@ -573,7 +582,7 @@ enum ToolRegistry {
             name: "scan_slim",
             description: "Scan installed apps for universal binaries carrying Intel code (x86_64/i386 slices) on Apple Silicon. Read-only; returns each app's path and the bytes its Intel slices occupy.",
             params: [], destructive: false
-        ) { _, _ in
+        ) { _, _, _ in
             let candidates = await SlimEngine.scan()
             guard !candidates.isEmpty else {
                 return "No universal apps with Intel code found (Intel Macs and App Store/Apple/running apps are skipped)."
@@ -592,7 +601,7 @@ enum ToolRegistry {
                 Param("dry_run", "boolean", "Report what would happen without changing anything"),
             ],
             destructive: true
-        ) { args, _ in
+        ) { args, _, _ in
             guard let requested = strArray(args, "apps"), !requested.isEmpty else {
                 throw ToolError(message: "apps required — run scan_slim and pass the exact paths")
             }
@@ -629,7 +638,7 @@ enum ToolRegistry {
             name: "scan_space_hogs",
             description: "Report the big system-level space consumers a file scan can't see: APFS/Time Machine local snapshots, Docker disk usage, Homebrew old-version preview, and read-only sizes of iOS backups / Mail / Messages (never deleted). Read-only.",
             params: [], destructive: false
-        ) { _, _ in
+        ) { _, _, _ in
             var text = ""
             let snapshots = await SnapshotEngine.list()
             text += "APFS local snapshots: \(snapshots.count)\n"
@@ -671,7 +680,7 @@ enum ToolRegistry {
                 Param("dates", "array", "Exact snapshot date tokens, e.g. [\"2026-10-27-123456\"]", required: true),
             ],
             destructive: true
-        ) { args, _ in
+        ) { args, _, _ in
             guard let dates = strArray(args, "dates"), !dates.isEmpty else {
                 throw ToolError(message: "dates required — run scan_space_hogs first and pass exact tokens")
             }
@@ -705,7 +714,7 @@ enum ToolRegistry {
             name: "docker_prune",
             description: "Run `docker system prune -f`: removes STOPPED containers, unused networks, dangling images and build cache. Running containers and volumes are never touched. Confirm with the user first.",
             params: [], destructive: true
-        ) { _, _ in
+        ) { _, _, _ in
             let output = try await DockerEngine.prune()
             HistoryStore.append(CleanRecord(
                 date: Date(), sectionTitles: ["Space Hogs"],
@@ -720,7 +729,7 @@ enum ToolRegistry {
             name: "brew_cleanup",
             description: "Run `brew cleanup`: removes old Cellar versions and expired downloads. Rollback means reinstalling. Confirm with the user first.",
             params: [], destructive: true
-        ) { _, _ in
+        ) { _, _, _ in
             let output = try await HomebrewEngine.run()
             HistoryStore.append(CleanRecord(
                 date: Date(), sectionTitles: ["Space Hogs"],
@@ -736,7 +745,7 @@ enum ToolRegistry {
             name: "scan_orphans",
             description: "Find Library leftovers (caches, preferences, containers…) of apps that are NO LONGER installed. Conservative: Apple items, vendor helpers of installed apps, and anything touched in the last 30 days are excluded. Read-only.",
             params: [], destructive: false
-        ) { _, _ in
+        ) { _, _, _ in
             let orphans = await OrphanResidueEngine.scan()
             guard !orphans.isEmpty else { return "No orphan residue found." }
             let total = orphans.reduce(0) { $0 + $1.bytes }
@@ -752,7 +761,7 @@ enum ToolRegistry {
                 Param("paths", "array", "Exact orphan paths from scan_orphans", required: true),
             ],
             destructive: true
-        ) { args, _ in
+        ) { args, _, _ in
             guard let requested = strArray(args, "paths"), !requested.isEmpty else {
                 throw ToolError(message: "paths required — run scan_orphans and pass the exact paths")
             }
@@ -806,7 +815,7 @@ enum ToolRegistry {
                 Param("app_path", "boolean", "Also measure the same hosts through URLSession — includes the system proxy/PAC; the gap vs the direct path is what the tunnel costs"),
             ],
             destructive: false
-        ) { args, _ in
+        ) { args, _, _ in
             let requested = (strArray(args, "hosts") ?? [])
                 .map { $0.trimmingCharacters(in: .whitespaces) }
                 .filter { !$0.isEmpty }
@@ -839,7 +848,7 @@ enum ToolRegistry {
                 Param("dry_run", "boolean", "Build and return the plan without applying it"),
             ],
             destructive: true
-        ) { args, _ in
+        ) { args, _, _ in
             // Underscore aliases accepted: the design doc named the actions
             // dns_switch/proxy_off/mtu_fix/dns_flush.
             let raw = str(args, "action")?.replacingOccurrences(of: "_", with: "-")
