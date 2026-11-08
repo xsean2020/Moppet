@@ -1656,6 +1656,61 @@ enum BrainSmokeTest {
             expect("approval: queued request times out after presentation", second == false)
             expect("approval: no pending left after timeout",
                    ApprovalCenter.shared.pending == nil)
+
+            // 7f) 依赖链（§依赖调度）：信号词任务排队等前置，前置完成自动
+            //     接续并把结果摘要注入 prompt；前置被取消 → 后继结账取消。
+            let depTurn: [BrainStreamEvent] = [
+                // 助手消息只从 textDelta 累积落盘——没有 delta 的脚本轮
+                // summarize 拿不到文本（真实模型必有 delta，脚本要模拟到位）。
+                .textDelta("占用最大的是 XCache，12GB"),
+                .completed(finalMessage: "占用最大的是 XCache，12GB",
+                           usage: BrainUsage(inputTokens: 1, outputTokens: 1)),
+            ]
+            let chainModel = ScriptedModel(scripted: [depTurn, depTurn])
+            let chainAgent = BrainAgent(model: chainModel)
+            let chainScheduler = BrainTaskScheduler()
+            chainScheduler.mainAgent = chainAgent
+            chainScheduler.maxConcurrent = 2
+            let prereqID = chainScheduler.submitTask("分析磁盘占用的大头", images: [])
+            let chainedID = chainScheduler.submitTask("基于刚才的结果把占用最大的三个缓存删掉", images: [])
+            expect("dependency: marker task queues behind prerequisite",
+                   chainScheduler.tasks.first { $0.id == chainedID }?.runState == .queued
+                   && chainScheduler.tasks.first { $0.id == chainedID }?.dependencies == [prereqID],
+                   "\(chainScheduler.tasks.map { "\($0.id):\($0.runState.rawValue):\($0.dependencies)" })")
+            deadline = Date().addingTimeInterval(8)
+            while chainScheduler.recentEnded.count < 2 && Date() < deadline {
+                try? await Task.sleep(nanoseconds: 20_000_000)
+            }
+            expect("dependency: chained task auto-runs after prerequisite finishes",
+                   chainScheduler.recentEnded.count == 2
+                   && chainScheduler.recentEnded.allSatisfy { $0.outcome == .completed },
+                   "\(chainScheduler.recentEnded.map(\.outcome.rawValue))")
+            let chainedPrompt = chainModel.receivedUserTexts.last ?? ""
+            expect("dependency: prerequisite result injected into chained prompt",
+                   chainedPrompt.contains("分析磁盘占用的大头")
+                   && chainedPrompt.contains("占用最大的是 XCache"),
+                   String(chainedPrompt.prefix(160)))
+
+            // 取消链：前置被用户取消 → 后继不自动执行，直接结账取消。
+            chainScheduler.maxConcurrent = 1
+            let cancelA = chainScheduler.submitTask("任务甲", images: [])
+            let cancelB = chainScheduler.submitTask("接着任务甲继续收尾", images: [])
+            expect("dependency: dependent stays queued while prerequisite runs",
+                   chainScheduler.tasks.first { $0.id == cancelB }?.runState == .queued,
+                   "\(chainScheduler.tasks.map { "\($0.id):\($0.runState.rawValue)" })")
+            var cancelDeadline = Date().addingTimeInterval(3)
+            while chainScheduler.tasks.first { $0.id == cancelA }?.runState != .running,
+                  Date() < cancelDeadline {
+                try? await Task.sleep(nanoseconds: 20_000_000)
+            }
+            chainScheduler.cancelTask(id: cancelA)
+            cancelDeadline = Date().addingTimeInterval(5)
+            while !chainScheduler.recentEnded.contains(where: { $0.id == cancelB }) && Date() < cancelDeadline {
+                try? await Task.sleep(nanoseconds: 20_000_000)
+            }
+            expect("dependency: cancelled prerequisite cancels its dependent",
+                   chainScheduler.recentEnded.contains { $0.id == cancelB && $0.outcome == .cancelled },
+                   "\(chainScheduler.recentEnded.suffix(2).map { "\($0.id):\($0.outcome.rawValue)" })")
         }
         trace("scheduler section done")
 

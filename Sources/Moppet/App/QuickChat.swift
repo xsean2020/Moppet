@@ -59,7 +59,7 @@ final class QuickChat {
 
     func submit(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, !active else { return }
+        guard !trimmed.isEmpty else { return }
         // Pre-flight: the old path submitted unconfigured requests and let the
         // SDK surface a raw error 8s later, with no path to fix it.
         if !AISettings.load().isConfigured {
@@ -72,6 +72,8 @@ final class QuickChat {
         // Slash commands run locally (codex TUI parity) — output goes to the
         // pet bubble; UI-only ones point at the chat window. The bar stays:
         // only a blank-space click / Esc / pet-reclick close it.
+        // slash 在 active 门之前：本地命令任何时刻都可用（原实现在门后，
+        // 流式期间被静默吞掉）。
         if trimmed.hasPrefix("/") {
             let command = trimmed.split(separator: " ").first.map(String.init) ?? trimmed
             Task { @MainActor in
@@ -79,6 +81,15 @@ final class QuickChat {
                     ?? String(format: L("%@ is chat-window only — double-click the pet to open it"), command)
                 PetBus.shared.say(result, state: .talking, hideAfter: 0)
             }
+            return
+        }
+        // §并行入口：弹框空闲 → 本地流式问答（既有 UX）；弹框忙 → 不再静默
+        // 丢弃，转投共享调度器的任务车道并行执行（结果落聊天窗任务行 +
+        // PetBus 聚合公告）——两个入口的问题从此默认并行处理。
+        if active {
+            ChatSessionStore.shared.scheduler.submitTask(trimmed, images: [])
+            PetBus.shared.say(L("Busy — routed to a parallel task; result lands in the chat window."),
+                              state: .scanning, hideAfter: 4)
             return
         }
         // Pick up provider/model changes made anywhere (chat window, Settings)

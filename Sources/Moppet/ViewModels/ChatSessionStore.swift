@@ -6,10 +6,12 @@ import Observation
 /// parallel-task scheduler (设计文档 §5.10): the conversation lane keeps the
 /// single live `brain`; the task lane spawns child agents per task.
 /// @MainActor（§5.12）：scheduler 是 @MainActor，store 的状态本就只在主线程
-/// 变更（refresh 的 MainActor.run），唯一构造点是 ChatView 的 @State。
+/// 变更（refresh 的 MainActor.run）。共享单例（§并行入口）：宠物弹框忙时把
+/// 新问题转投任务车道，需要触达与聊天窗口同一个 scheduler——全 app 一份。
 @MainActor
 @Observable
 final class ChatSessionStore {
+    static let shared = ChatSessionStore()
 
     struct SessionInfo: Identifiable, Equatable {
         let id: String

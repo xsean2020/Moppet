@@ -156,11 +156,19 @@ struct SDKChatModel: BrainModel {
 /// Deterministic model for `--brain-smoke`: plays back canned turns.
 final class ScriptedModel: BrainModel {
     private var scripted: [[BrainStreamEvent]]
+    /// 每轮收到的 history 尾部 user 文本（依赖上下文注入等 prompt 断言用）。
+    private(set) var receivedUserTexts: [String] = []
     init(scripted: [[BrainStreamEvent]]) { self.scripted = scripted }
 
     func streamTurn(system: String, developer: String,
                     history: [BrainResponseItem],
                     specs: [BrainTools.Spec]) async throws -> AsyncThrowingStream<BrainStreamEvent, Error> {
+        if let lastUser = history.reversed().first(where: {
+            if case .message("user", _) = $0 { return true }
+            return false
+        }), case .message("user", let userText) = lastUser {
+            receivedUserTexts.append(userText)
+        }
         guard !scripted.isEmpty else {
             return AsyncThrowingStream { continuation in
                 Task {

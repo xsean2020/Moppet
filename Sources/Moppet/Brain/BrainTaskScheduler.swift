@@ -26,6 +26,12 @@ struct BrainTask: Identifiable, Equatable {
     var lastToolName: String?
     var usage: BrainUsage?
     var retried: Int = 0
+    /// 依赖链（§依赖调度）：本任务的前置任务 id——全部 ended 才会被 pump
+    /// 启动（依赖中的任务留在 queued，前 didFinishTask 的 pump 自动接续）。
+    var dependencies: [String] = []
+    /// 结账摘要（finishTask 写入）：依赖本任务的后继者启动时以此注入上下文，
+    /// 让「基于上一步」类任务真正拿到上一步的产出。
+    var resultSummary: String?
 
     /// stage.ts:9-21 直译。hasPendingAsk 由调度器从 Approval/UserInput 中心
     /// **查询**派生（§5.7），不依赖事件到达顺序。
@@ -119,18 +125,59 @@ final class BrainTaskScheduler {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty || !images.isEmpty else { return "" }
         let firstLine = trimmed.split(separator: "\n").first.map(String.init) ?? trimmed
-        let task = BrainTask(
+        var task = BrainTask(
             id: "task-" + UUID().uuidString.prefix(8).lowercased(),
             title: String(firstLine.trimmingCharacters(in: .whitespaces).prefix(48)),
             prompt: text,
             images: images,
             createdAt: Date())
+        // 依赖分析先于入队（§依赖调度）：pump 据此决定立即并行还是排队接续。
+        task.dependencies = analyzeDependencies(prompt: trimmed)
         tasks.append(task)
         taskTargets[task.id] = mainAgent
         mainAgent?.ingestUserMessage(text: text, images: images)
         onTaskEvent?(.taskQueued(taskID: task.id, title: task.title))
         pump()
         return task.id
+    }
+
+    // MARK: - 依赖分析（自动链式执行）
+
+    /// 续接/指代信号词：新 prompt 命中 → 依赖既有任务而非立即并行。
+    static let dependencyMarkers: [String] = [
+        "继续", "接着", "然后", "之后", "基于", "参考", "刚才", "之前",
+        "上一步", "上面", "前面", "按上面", "用上面", "上次", "那个",
+    ]
+    /// 英文信号词走词边界匹配，避免 strengthen 之类误命中。
+    static let dependencyMarkersASCII = ["continue", "then", "based on", "previous", "above"]
+
+    /// 提交时分析新任务对既有任务的依赖（确定性启发式，零延迟零成本）：
+    /// 1) prompt 命中某活动任务标题的显著片段（≥4 字符）→ 依赖该任务（最具体，取最近）；
+    /// 2) prompt 命中信号词 → 依赖最近一个活动任务；无活动任务则依赖最近
+    ///    结束的任务（结果已就绪 → 依赖即刻满足，启动时注入结果上下文）；
+    /// 3) 无信号 → 独立任务，立即并行（默认并行）。
+    func analyzeDependencies(prompt: String) -> [String] {
+        let lowered = prompt.lowercased()
+        let hasMarker = Self.dependencyMarkers.contains { lowered.contains($0) }
+            || Self.dependencyMarkersASCII.contains {
+                lowered.range(of: "\\b\($0)\\b", options: .regularExpression) != nil
+            }
+        for task in tasks.reversed() where task.runState != .ended {
+            let title = task.title.trimmingCharacters(in: .whitespaces)
+            if title.count >= 4, prompt.contains(title) { return [task.id] }
+        }
+        guard hasMarker else { return [] }
+        if let lastActive = tasks.last(where: { $0.runState != .ended }) { return [lastActive.id] }
+        if let lastEnded = recentEnded.last { return [lastEnded.id] }
+        return []
+    }
+
+    /// 依赖是否全部满足（全部已从活动表结账移除）。pump 的启动门控之一；
+    /// recentEnded 容量滚动的旧依赖视为已完成过（找不到 ≠ 永久阻塞）。
+    func dependenciesSatisfied(_ task: BrainTask) -> Bool {
+        task.dependencies.allSatisfy { depID in
+            !tasks.contains { $0.id == depID }
+        }
     }
 
     /// 单飞调度（passes.ts:56-62 直译）：并发请求合并；无定时器。
@@ -142,10 +189,21 @@ final class BrainTaskScheduler {
             return
         }
         pumping = true
+        // 依赖链上被用户取消的前置 → 后继直接结账取消：不自动执行被叫停的链
+        // （快照后结账，避免迭代中突变；finishTask 尾部的 pump 经 pumpAgain 单飞）。
+        let cancelledDeps = Set(recentEnded.filter { $0.outcome == .cancelled }.map { $0.id })
+        let orphaned = tasks.filter {
+            $0.runState == .queued && $0.dependencies.contains(where: { cancelledDeps.contains($0) })
+        }
+        for task in orphaned {
+            finishTask(task.id, child: nil, target: taskTargets[task.id])
+        }
         while true {
             let running = tasks.filter { $0.runState == .running }.count
             guard running < maxConcurrent,
-                  let next = tasks.first(where: { $0.runState == .queued }) else { break }
+                  let next = tasks.first(where: {
+                      $0.runState == .queued && dependenciesSatisfied($0)
+                  }) else { break }
             startChild(next)
         }
         pumping = false
@@ -168,8 +226,19 @@ final class BrainTaskScheduler {
         }
         onTaskEvent?(.taskStarted(taskID: task.id, title: task.title))
         refreshTaskSummary(event: L("Starting task:") + " \(task.title)")
-        let run = Task { [weak self, child, task] in
-            var prompt = task.prompt
+        // 依赖结果注入（§依赖调度）：前置任务已结账（pump 门控保证），把其
+        // 结果摘要前置到 prompt——「基于上一步」类任务真正衔接上一步产出。
+        let dependencyContext = task.dependencies.compactMap { depID -> String? in
+            guard let dep = recentEnded.first(where: { $0.id == depID }) else { return nil }
+            let summary = dep.resultSummary ?? ""
+            let clipped = summary.count > 800 ? String(summary.prefix(800)) + "…" : summary
+            return "前置任务「\(dep.title)」（\(dep.outcome.rawValue)）：\n\(clipped)"
+        }
+        let effectivePrompt = dependencyContext.isEmpty
+            ? task.prompt
+            : dependencyContext.joined(separator: "\n\n") + "\n\n---\n\n以下是本次任务：\n" + task.prompt
+        let run = Task { [weak self, child, task, effectivePrompt] in
+            var prompt = effectivePrompt
             var images = task.images
             var attempt = 0
             while !Task.isCancelled {
@@ -222,12 +291,13 @@ final class BrainTaskScheduler {
         task.runState = .ended
         task.lastError = child?.lastError
         task.usage = child?.lastUsage
+        let summary = Self.summarize(child, outcome: task.outcome)
+        task.resultSummary = summary             // 依赖本任务的后继者启动时注入
         tasks.removeAll { $0.id == id }
         recentEnded.append(task)
         if recentEnded.count > 10 { recentEnded.removeFirst() }
         children[id] = nil                       // 释放子 agent（deinit stopAll）与账本
         taskTargets[id] = nil                    // 释放目标快照
-        let summary = Self.summarize(child, outcome: task.outcome)
         target?.ingestTaskResult(taskID: task.id, title: task.title,
                                  status: task.outcome.rawValue, summary: summary,
                                  usage: task.usage)

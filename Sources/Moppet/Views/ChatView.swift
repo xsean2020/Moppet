@@ -72,7 +72,7 @@ enum SessionSwitchIntent: Identifiable {
 /// streaming markdown, native approval dialogs for destructive tools,
 /// slash commands, image attachments and structured model questions.
 struct ChatView: View {
-    @State private var store = ChatSessionStore()
+    @State private var store = ChatSessionStore.shared
     @State private var aiSettings = AISettings.load()
     @State private var draft = ""
     @State private var sessionToDelete: ChatSessionStore.SessionInfo?
@@ -1088,13 +1088,23 @@ struct ChatView: View {
         guard !trimmed.isEmpty || !images.isEmpty else { return }
         draft = ""
         attachments = []
-        // §5.6 三路分流：slash → handleSlash；taskMode → 任务车道；其余 →
-        // 人车道（scheduler.submitPerson：空闲即发、忙即排队——不再直调
-        // brain.submit，消除「用户直发与 pump 续发竞速」的第三条路径）。
+        // §5.6 三路分流 + §并行入口：slash → handleSlash；taskMode → 任务
+        // 车道；人车道忙（主 turn 流式中）→ 新提交自动升任务车道（默认并行，
+        // 不再排队干等），纯续接词除外——≤6 字的「继续/接着」几乎必然指当前
+        // 对话上下文，排队人车道语义才正确；闲 → 人车道（对话原样）。
         if taskMode {
             store.scheduler.submitTask(trimmed, images: images)
             store.syncCurrentSession()
             taskMode = false
+        } else if store.brain.isRunning {
+            let isShortFollowUp = trimmed.count <= 6
+                && BrainTaskScheduler.dependencyMarkers.contains { trimmed.contains($0) }
+            if isShortFollowUp {
+                store.scheduler.submitPerson(trimmed, images: images)
+            } else {
+                store.scheduler.submitTask(trimmed, images: images)
+                store.syncCurrentSession()
+            }
         } else {
             store.scheduler.submitPerson(trimmed, images: images)
         }
