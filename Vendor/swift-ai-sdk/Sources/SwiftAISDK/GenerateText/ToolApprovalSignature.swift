@@ -10,18 +10,25 @@ import AISDKProvider
  verified before an approved call from client-supplied history executes.
  */
 public struct ToolApprovalSecret: Sendable, ExpressibleByStringLiteral {
-    let key: SymmetricKey
+    /// Swift 6.0 编译兼容补丁（Xcode 16.x）：旧 SDK 的 CryptoKit.SymmetricKey
+    /// 未标注 Sendable，存 Data、使用时按需构造（O(1) 字节包装，HMAC 结果
+    /// 不变）；新 SDK 已自带 Sendable，行为一致。
+    let keyData: Data
 
     public init(_ secret: String) {
-        key = SymmetricKey(data: Data(secret.utf8))
+        keyData = Data(secret.utf8)
     }
 
     public init(_ secret: Data) {
-        key = SymmetricKey(data: secret)
+        keyData = secret
     }
 
     public init(stringLiteral value: String) {
         self.init(value)
+    }
+
+    var key: SymmetricKey {
+        SymmetricKey(data: keyData)
     }
 }
 

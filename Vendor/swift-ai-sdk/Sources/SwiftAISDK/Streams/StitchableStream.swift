@@ -26,20 +26,38 @@ enum StitchableStreamError: Error, LocalizedError {
     }
 }
 
+/// Swift 6.0 编译兼容补丁（Xcode 16.x）：旧 SDK 的
+/// `AsyncThrowingStream.Continuation.Termination` 非 Sendable，不能跨入
+/// @Sendable 闭包；此镜像枚举无可关联值，编译器自动推断 Sendable。
+enum TerminationReason {
+    case finished
+    case cancelled
+    case other
+}
+
 public func createStitchableStream<Element: Sendable>() -> StitchableStream<Element> {
     let controller = StitchableStreamController<Element>()
 
-    let rawStream = AsyncThrowingStream<Element, Error> { continuation in
-        Task {
-            await controller.initialize(continuation: continuation)
-        }
-
-        continuation.onTermination = { termination in
+        let rawStream = AsyncThrowingStream<Element, Error> { continuation in
             Task {
-                await controller.handleTermination(termination)
+                await controller.initialize(continuation: continuation)
+            }
+
+            continuation.onTermination = { termination in
+                // Swift 6.0 编译兼容补丁：Termination 枚举在旧 SDK 非
+                // Sendable，不能被 @Sendable Task 闭包捕获；在此先解构成
+                // 本地 Sendable 小枚举（关联错误值本就被丢弃），再传进 Task。
+                let reason: TerminationReason
+                switch termination {
+                case .finished: reason = .finished
+                case .cancelled: reason = .cancelled
+                @unknown default: reason = .other
+                }
+                Task {
+                    await controller.handleTermination(reason)
+                }
             }
         }
-    }
 
     let stream = createAsyncIterableStream(
         source: rawStream,
@@ -96,14 +114,14 @@ actor StitchableStreamController<Element: Sendable> {
     }
 
     func handleTermination(
-        _ termination: AsyncThrowingStream<Element, Error>.Continuation.Termination
+        _ reason: TerminationReason
     ) async {
-        switch termination {
+        switch reason {
         case .finished:
             await close()
         case .cancelled:
             await terminate()
-        @unknown default:
+        case .other:
             break
         }
     }
