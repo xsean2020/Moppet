@@ -1161,7 +1161,7 @@ final class BrainAgent {
     /// 追加在 itemsLock 内，与 runLoop/compact 写点互斥。
     func ingestUserMessage(text: String, images: [String]) {
         let writer = itemsLock.withLock { () -> BrainRollout.Writer? in
-            if writer == nil { beginSession() }
+            if self.writer == nil { beginSession() }
             items.append(.message(role: "user", content: text))
             for dataURL in images {
                 items.append(.imageItem(callID: "user", dataURL: dataURL))
@@ -1181,7 +1181,7 @@ final class BrainAgent {
             taskID: taskID, title: title, status: status,
             summary: summary, usageTokens: usage.map { $0.totalTokens })
         let writer = itemsLock.withLock { () -> BrainRollout.Writer? in
-            if writer == nil { beginSession() }
+            if self.writer == nil { beginSession() }
             items.append(item)
             return self.writer
         }
