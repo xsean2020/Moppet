@@ -1,0 +1,29 @@
+name: build
+
+# Intel Mac 编译问题排查：仓库依赖 swift-ai-sdk 要求 swift-tools-version 6.0。
+# 两个矩阵腿分别覆盖「旧工具链画像」（Xcode 15.4 / Swift 5.10 —— 旧 Intel Mac
+# 上最常见的版本）与「最低可用工具链」（Xcode 16.2 / Swift 6.0）。
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            xcode: "15.4"
+          - os: macos-14
+            xcode: "16.2"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode
+        run: sudo xcode-select -s "/Applications/Xcode_${{ matrix.xcode }}.app/Contents/Developer"
+      - name: Toolchain version
+        run: swift --version
+      - name: Build (debug)
+        run: swift build
