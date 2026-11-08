@@ -91,7 +91,8 @@ final class BrainMCPClient: @unchecked Sendable {
         process.standardOutput = stdoutPipe
         process.standardError = FileHandle.nullDevice
         try process.run()
-        weak let weakSelf = self
+        // weak let 是 Swift 6.2（SE-0481）语法，Xcode 16.x 拒绝——用 var 兼容
+        weak var weakSelf = self
         process.terminationHandler = { _ in
             // Server died: every pending request must fail NOW, not hang the
             // waiting brain turn until forever.
