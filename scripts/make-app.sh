@@ -6,7 +6,14 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 echo "→ building release…"
-swift build -c release --disable-sandbox
+# UNIVERSAL=1 打出 arm64+x86_64 双架构通用二进制（可直接拷去 Intel Mac 运行；
+# 那台机器无需安装 Xcode 16+——仓库依赖 swift-ai-sdk 要求 tools 6.0，
+# 在旧 Xcode 的 Intel Mac 上本地编译会报 tools version 不匹配）。
+if [ "${UNIVERSAL:-0}" = "1" ]; then
+  swift build -c release --disable-sandbox --arch arm64 --arch x86_64
+else
+  swift build -c release --disable-sandbox
+fi
 
 APP="$ROOT/dist/Moppet.app"
 rm -rf "$APP"
