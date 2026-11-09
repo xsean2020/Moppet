@@ -100,9 +100,9 @@ struct ChatView: View {
     @State private var taskStripExpanded = true
     /// Expanded reasoning summaries.
     @State private var expandedReasoning: Set<Int> = []
-    /// 「任务」chip（§5.6）：开着时发送的输入成为并行任务而非对话消息。
-    /// 默认关——对话式消息不排队成任务。
-    @State private var taskMode = false
+    /// 「任务」chip 已移除：super-agent 的入口只有一条——
+    /// 主 turn 流式中提交自动升级为并行任务，空闲时就是普通对话。
+    /// 不再需要用户手动切换车道。
     /// 切会话确认（§5.10）：有运行中任务/排队人消息时先弹 sheet。
     @State private var confirmingSessionSwitch: SessionSwitchIntent?
     /// User-defined provider profiles, snapshotted once per change instead of
@@ -967,22 +967,7 @@ struct ChatView: View {
                 // Secondary action first, primary (Send) rightmost.
                 CircleIconButton(icon: "arrow.counterclockwise") { confirmSessionSwitch(.new) }
                     .help(L("New chat"))
-                // 「任务」chip（§5.6）：默认关。开着时发送走任务车道（scheduler
-                // submitTask——slot 模型并行执行），否则走对话车道。
-                Button {
-                    taskMode.toggle()
-                } label: {
-                    Label(L("Task"), systemImage: "list.bullet.rectangle")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(taskMode ? .white : Airi.neutral500)
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 5)
-                        .background(Capsule().fill(taskMode ? Airi.primary : Airi.neutral100))
-                }
-                .buttonStyle(.plain)
-                .help(L("Send as a parallel task — runs on its own agent with its own rollout; the result returns to this transcript"))
-                // §5.6：Send 永远可发——忙时由 scheduler 的 trySubmit 原子占位/
-                // 排队仲裁，不再 disabled。
+                // Send 永远可发：忙时自动转任务车道并行执行。
                 AiriButton(title: L("Send"), icon: "arrow.up.circle.fill") { send() }
             }
             .padding(Airi.space3)
@@ -1088,15 +1073,10 @@ struct ChatView: View {
         guard !trimmed.isEmpty || !images.isEmpty else { return }
         draft = ""
         attachments = []
-        // §5.6 三路分流 + §并行入口：slash → handleSlash；taskMode → 任务
-        // 车道；人车道忙（主 turn 流式中）→ 新提交自动升任务车道（默认并行，
-        // 不再排队干等），纯续接词除外——≤6 字的「继续/接着」几乎必然指当前
-        // 对话上下文，排队人车道语义才正确；闲 → 人车道（对话原样）。
-        if taskMode {
-            store.scheduler.submitTask(trimmed, images: images)
-            store.syncCurrentSession()
-            taskMode = false
-        } else if store.brain.isRunning {
+        // 单入口：主 turn 流式中 → 新提交自动升并行任务（默认并行，不再排队
+        // 干等），纯续接词除外——≤6 字的「继续/接着」几乎必然指当前对话上下文，
+        // 排队人车道语义才正确；空闲 → 普通对话。
+        if store.brain.isRunning {
             let isShortFollowUp = trimmed.count <= 6
                 && BrainTaskScheduler.dependencyMarkers.contains { trimmed.contains($0) }
             if isShortFollowUp {

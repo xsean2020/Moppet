@@ -301,27 +301,10 @@ final class BrainTaskScheduler {
         target?.ingestTaskResult(taskID: task.id, title: task.title,
                                  status: task.outcome.rawValue, summary: summary,
                                  usage: task.usage)
-        // PetBus 聚合公告（§5.8 显示优化）：不再逐条 say() 抢占气泡——
-        // 计数 + 最近事件一行，经 announceTask 的呈现纪律（不打断流式/审批、
-        // 一批事件只弹一次、点掉后安静）。子 agent 自身静音。
-        switch task.outcome {
-        case .completed:
-            if tasks.isEmpty {
-                // 批次收尾：突破点掉状态庆祝一次，气泡随后自动隐藏
-                refreshTaskSummary(event: L("Task done:") + " \(task.title)",
-                                   state: .celebrating, force: true)
-            } else {
-                refreshTaskSummary(event: "✓ " + task.title)
-            }
-        case .failed:
-            var failedLine = "✗ " + task.title
-            if let error = task.lastError { failedLine += " — " + String(error.prefix(60)) }
-            refreshTaskSummary(event: failedLine, state: .sad, force: true)
-        case .cancelled:
-            refreshTaskSummary(event: "– " + task.title)
-        case .none:
-            break
-        }
+        // 任务结果是独立的队列条目：宠物气泡一次显示一条，多条用 next/prev
+        // 翻看；运行/排队进度仍由 announceTask 负责，不会顶掉正在看的结果。
+        PetBus.shared.enqueueTaskAnswer(taskID: task.id, title: task.title,
+                                        text: summary, status: task.outcome.rawValue)
         onTaskEvent?(.taskEnded(taskID: task.id, title: task.title, status: task.outcome.rawValue))
         pump()
     }

@@ -1714,6 +1714,30 @@ enum BrainSmokeTest {
         }
         trace("scheduler section done")
 
+        // MARK: pet task-result queue (one at a time, next/prev)
+        PetBus.shared.say("reset", state: .idle)
+        PetBus.shared.enqueueTaskAnswer(taskID: "pet-q1", title: "One",
+                                        text: "first", status: "completed")
+        expect("pet queue: first result shows",
+               PetBus.shared.showingTaskAnswer
+                   && PetBus.shared.currentTaskAnswer?.id == "pet-q1")
+        expect("pet queue: results stay until the user dismisses them",
+               PetBus.shared.messageHideInterval == 0)
+        PetBus.shared.enqueueTaskAnswer(taskID: "pet-q2", title: "Two",
+                                        text: "second", status: "completed")
+        expect("pet queue: new result appends without stealing the current result",
+               PetBus.shared.taskAnswerCount == 2
+                   && PetBus.shared.currentTaskAnswer?.id == "pet-q1")
+        PetBus.shared.nextTaskAnswer()
+        expect("pet queue: next moves to the second result",
+               PetBus.shared.currentTaskAnswer?.id == "pet-q2")
+        PetBus.shared.previousTaskAnswer()
+        expect("pet queue: previous moves back to the first result",
+               PetBus.shared.currentTaskAnswer?.id == "pet-q1")
+        PetBus.shared.say("done")
+        expect("pet queue: a normal message clears the queue",
+               PetBus.shared.taskAnswerCount == 0)
+
         // cleanup
         HarnessStore.rootOverride = nil
         try? FileManager.default.removeItem(at: workspace)

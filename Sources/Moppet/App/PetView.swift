@@ -1094,7 +1094,10 @@ struct PetView: View {
     /// hidden, wide enough for the whole bubble card while it shows.
     private var targetPanelWidth: CGFloat {
         guard bubbleVisible else { return PetSettings.currentSize.width }
-        return max(PetSettings.currentSize.width, bubbleWidth + 24)
+        // The queue nav can be wider than a very short bubble; reserve its
+        // width so the panel never clips the capsule.
+        let nav: CGFloat = bus.showingTaskAnswer && bus.taskAnswerCount > 1 ? 120 : 0
+        return max(PetSettings.currentSize.width, max(bubbleWidth, nav) + 24)
     }
 
     // MARK: Vertical budget
@@ -1170,7 +1173,9 @@ struct PetView: View {
 
     private var targetPanelHeight: CGFloat {
         guard bubbleVisible else { return PetSettings.currentSize.height }
-        return max(PetSettings.currentSize.height, bubbleCardHeight + 4 + moleHeight + 6)
+        let nav: CGFloat = bus.showingTaskAnswer && bus.taskAnswerCount > 1 ? 30 : 0
+        return max(PetSettings.currentSize.height,
+                   bubbleCardHeight + nav + 4 + moleHeight + 6)
     }
 
     private var targetPanelSize: CGSize {
@@ -1209,10 +1214,47 @@ struct PetView: View {
         max(96, min(208, panelHeight * 0.62))
     }
 
+    /// 任务结果队列导航：仅在有多条结果时出现，一次只看一条。
+    private var taskAnswerNav: some View {
+        HStack(spacing: 10) {
+            Button { bus.previousTaskAnswer() } label: {
+                Image(systemName: "chevron.left")
+                    .frame(width: 18, height: 18)
+            }
+            .buttonStyle(.plain)
+            .disabled(!bus.canGoPreviousTaskAnswer)
+            .help(L("Previous task result"))
+
+            Text("\(bus.taskAnswerIndex + 1) / \(bus.taskAnswerCount)")
+                .font(.system(size: 10, weight: .medium))
+                .monospacedDigit()
+
+            Button { bus.nextTaskAnswer() } label: {
+                Image(systemName: "chevron.right")
+                    .frame(width: 18, height: 18)
+            }
+            .buttonStyle(.plain)
+            .disabled(!bus.canGoNextTaskAnswer)
+            .help(L("Next task result"))
+        }
+        .foregroundStyle(Airi.neutral700)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 4)
+        // The nav sits outside the card, so it needs its own hit region —
+        // otherwise the pet panel's pass-through hitTest treats it as empty
+        // desktop and the next/prev buttons never receive the click.
+        .background(HitRegion())
+        .background(Capsule().fill(Airi.cardBackground))
+        .overlay(Capsule().strokeBorder(Airi.neutral200.opacity(0.7), lineWidth: 1))
+    }
+
     private var bubble: some View {
         Group {
             if bubbleVisible {
-                VStack {
+                VStack(spacing: 4) {
+                    if bus.showingTaskAnswer && bus.taskAnswerCount > 1 {
+                        taskAnswerNav
+                    }
                     // Markdown rendering — AI answers arrive as markdown
                     // (bold, lists, code) and leaked literal markers as plain
                     // Text ("**最快的办法：**"). Same engine as the chat

@@ -46,6 +46,27 @@ final class PetBus {
     /// 用户点掉过任务摘要：普通任务进度不再重开气泡（聊天窗口的任务条
     /// 才是常驻视图），失败与批次收尾仍各突破一次。
     private var taskSummaryDismissed = false
+
+    /// 任务结果队列（并行任务显示优化）：每个任务完成时入队一条，气泡一次
+    /// 只显示一条；多条结果用 next/prev 翻看，避免后到的结果把前一条顶掉。
+    struct TaskAnswer: Identifiable, Equatable {
+        let id: String          // taskID
+        let title: String
+        let text: String
+        let status: String      // completed / failed / cancelled
+    }
+    private(set) var taskAnswers: [TaskAnswer] = []
+    private(set) var taskAnswerIndex = 0
+    /// True when the bubble currently shows a task RESULT (not the aggregate
+    /// progress line from announceTask).
+    private(set) var showingTaskAnswer = false
+
+    var taskAnswerCount: Int { taskAnswers.count }
+    var currentTaskAnswer: TaskAnswer? {
+        taskAnswers.indices.contains(taskAnswerIndex) ? taskAnswers[taskAnswerIndex] : nil
+    }
+    var canGoPreviousTaskAnswer: Bool { taskAnswerIndex > 0 }
+    var canGoNextTaskAnswer: Bool { taskAnswerIndex + 1 < taskAnswers.count }
     /// Pending auto-settle for one-shot states (celebration loops forever
     /// otherwise — the completion announcement has nothing downstream to
     /// call settle()). Lock-guarded: `say` is called from task-group threads
@@ -71,6 +92,7 @@ final class PetBus {
     func say(_ text: String, state: PetState? = nil, hideAfter: TimeInterval? = nil) {
         let body = Self.nonBlank(text)
         applyOnMain {
+            self.resetTaskAnswers()
             self.streamingDismissed = false
             self.taskSummaryOnBubble = false   // 非任务内容接管气泡
             self.message = body
@@ -123,6 +145,7 @@ final class PetBus {
     func beginStreamingTurn(placeholder: String = PetBus.streamingPlaceholder) {
         let body = Self.nonBlank(placeholder, fallback: PetBus.streamingPlaceholder)
         applyOnMain {
+            self.resetTaskAnswers()
             self.streamingTurnActive = true
             self.streamingDismissed = false
             self.taskSummaryOnBubble = false   // 流式回答接管气泡
@@ -203,11 +226,14 @@ final class PetBus {
         let pose = state ?? .scanning
         applyOnMain {
             guard !self.streamingTurnActive, ApprovalCenter.shared.pending == nil else { return }
+            // 正在看某条任务结果时，进度行让位——结果不能被后到的运行状态顶掉。
+            if self.showingTaskAnswer, !force { return }
             if self.taskSummaryOnBubble, !force {
                 self.message = line          // 原地更新：气泡不重弹、计时器不重置
                 return
             }
             if self.taskSummaryDismissed, !force { return }
+            self.showingTaskAnswer = false
             self.taskSummaryOnBubble = true
             self.taskSummaryDismissed = false
             self.streamingDismissed = false
@@ -223,12 +249,91 @@ final class PetBus {
         }
     }
 
+    /// 任务完成：结果单独入队，气泡一次显示一条。
+    ///
+    /// - 已在看某条结果：新结果只追加到队列尾部，不抢走当前阅读位置；
+    /// - 气泡空闲/已被点掉：显示最新一条，`next/prev` 可回看队列里的其他结果。
+    func enqueueTaskAnswer(taskID: String, title: String, text: String, status: String) {
+        let body = Self.nonBlank(text)
+        applyOnMain {
+            let wasShowing = self.showingTaskAnswer
+            let answer = TaskAnswer(id: taskID, title: title, text: body, status: status)
+            if let index = self.taskAnswers.firstIndex(where: { $0.id == taskID }) {
+                self.taskAnswers[index] = answer
+                if wasShowing { self.taskAnswerIndex = index }
+            } else {
+                self.taskAnswers.append(answer)
+                if self.taskAnswers.count > 20 {
+                    let dropped = self.taskAnswers.count - 20
+                    self.taskAnswers.removeFirst(dropped)
+                    self.taskAnswerIndex = max(0, self.taskAnswerIndex - dropped)
+                }
+                if !wasShowing { self.taskAnswerIndex = self.taskAnswers.count - 1 }
+            }
+            guard !wasShowing else { return }
+            self.showCurrentTaskAnswer()
+        }
+    }
+
+    /// 气泡上的任务结果往前翻。
+    func previousTaskAnswer() {
+        applyOnMain {
+            guard self.taskAnswerIndex > 0 else { return }
+            self.taskAnswerIndex -= 1
+            self.showCurrentTaskAnswer()
+        }
+    }
+
+    /// 气泡上的任务结果往后翻。
+    func nextTaskAnswer() {
+        applyOnMain {
+            guard self.taskAnswerIndex + 1 < self.taskAnswers.count else { return }
+            self.taskAnswerIndex += 1
+            self.showCurrentTaskAnswer()
+        }
+    }
+
+    private func showCurrentTaskAnswer() {
+        guard let answer = currentTaskAnswer else { return }
+        // 流式回答 / 审批优先；结果留在队列里，等下一次任务事件或用户翻页再显示。
+        guard !streamingTurnActive, ApprovalCenter.shared.pending == nil else {
+            showingTaskAnswer = false
+            return
+        }
+        showingTaskAnswer = true
+        taskSummaryOnBubble = true
+        taskSummaryDismissed = false
+        streamingDismissed = false
+        message = "**\(answer.title)**\n\n\(answer.text)"
+        messageID = UUID()
+        // 任务结果不自动消失：用户要逐条翻看，消失时机由「点掉」决定。
+        messageHideInterval = 0
+        if answer.status == "failed" {
+            state = .sad
+            scheduleSettle(after: 4.0)
+        } else if answer.status == "cancelled" {
+            state = .idle
+            cancelSettle()
+        } else {
+            state = .celebrating
+            scheduleSettle(after: 3.2)
+        }
+    }
+
+    private func resetTaskAnswers() {
+        guard !taskAnswers.isEmpty || showingTaskAnswer else { return }
+        taskAnswers.removeAll()
+        taskAnswerIndex = 0
+        showingTaskAnswer = false
+    }
+
     /// 气泡被隐藏（自动计时 / 用户点掉）时由 PetView 调用：正在显示的若是
     /// 任务摘要，记为「已点掉」——后续普通任务进度不再重开气泡。
     func noteBubbleHidden() {
         applyOnMain {
             if self.taskSummaryOnBubble { self.taskSummaryDismissed = true }
             self.taskSummaryOnBubble = false
+            self.showingTaskAnswer = false
         }
     }
 
