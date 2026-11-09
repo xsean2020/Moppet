@@ -18,7 +18,7 @@ actor AsyncStreamBroadcaster<Element: Sendable> {
     private var terminalState: TerminalState?
 
     func register() -> AsyncThrowingStream<Element, Error> {
-        AsyncThrowingStream { continuation in
+        AsyncThrowingStream { [self] continuation in
             let identifier = UUID()
 
             Task { [weak self] in
@@ -26,7 +26,7 @@ actor AsyncStreamBroadcaster<Element: Sendable> {
                 await self.addContinuation(continuation, id: identifier)
             }
 
-            continuation.onTermination = { _ in
+            continuation.onTermination = { [self] _ in
                 Task { [weak self] in
                     await self?.removeContinuation(id: identifier)
                 }

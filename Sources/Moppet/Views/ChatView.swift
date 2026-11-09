@@ -1280,9 +1280,12 @@ struct ChatView: View {
                         .monospacedDigit()
                 }
             }
-            Text(summary)
-                .font(Airi.captionFont)
-                .foregroundStyle(Airi.neutral700)
+            Markdown(summary)
+                .markdownTheme(.basic)
+                .markdownTextStyle {
+                    FontSize(12)
+                    ForegroundColor(Airi.neutral700)
+                }
                 .lineLimit(6)
             if let ended, ended.canRetry {
                 AiriButton(title: L("Retry"), icon: "arrow.clockwise", variant: .secondary) {

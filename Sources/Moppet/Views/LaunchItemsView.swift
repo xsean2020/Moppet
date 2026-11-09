@@ -49,11 +49,7 @@ struct LaunchItemsView: View {
                     if !outcomes.isEmpty { outcomeList }
                     if !items.isEmpty { footerNote }
                 }
-                .padding(.horizontal, Airi.space4)
-                .padding(.top, Airi.space3)
-                .padding(.bottom, Airi.space4)
-                .frame(maxWidth: 720)
-                .frame(maxWidth: .infinity)
+                .pageColumn()
             }
         }
         .background(Airi.pageBackground.opacity(0.001))

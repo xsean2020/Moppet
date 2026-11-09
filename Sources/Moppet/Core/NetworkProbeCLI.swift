@@ -28,21 +28,21 @@ enum NetworkProbeCLI {
         setvbuf(stdout, nil, _IONBF, 0)
 
         let args = CommandLine.arguments
-        let samples = intValue(args, "--samples") ?? 5
+        let samples = CLIArgs.int(args, "--samples") ?? 5
         let wantJSON = args.contains("--json")
         let wantThroughput = args.contains("--throughput")
         let wantProcesses = args.contains("--processes")
         let wantAppPath = args.contains("--app-path")
-        let procInterval = max(2, min(intValue(args, "--interval") ?? 5, 30))
-        let hosts = stringValue(args, "--hosts")?
+        let procInterval = max(2, min(CLIArgs.int(args, "--interval") ?? 5, 30))
+        let hosts = CLIArgs.string(args, "--hosts")?
             .split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
             ?? ["speed.cloudflare.com", "www.apple.com", "www.baidu.com"]
 
         let compare = args.contains("--compare")
-        let command = stringValue(args, "--run")
-        let rounds = intValue(args, "--rounds") ?? 6
-        let controlIP = stringValue(args, "--control-ip")
+        let command = CLIArgs.string(args, "--run")
+        let rounds = CLIArgs.int(args, "--rounds") ?? 6
+        let controlIP = CLIArgs.string(args, "--control-ip")
         let record = !args.contains("--no-record")
 
         let semaphore = DispatchSemaphore(value: 0)
@@ -795,7 +795,7 @@ enum NetworkProbeCLI {
     /// change, and a second `resume()` on the same continuation is a crash.
     private static func currentPath(timeout: TimeInterval = 2) async -> PathSummary? {
         let monitor = NWPathMonitor()
-        let gate = ResumeGate()
+        let gate = OneShotGate()
         return await withCheckedContinuation {
             (continuation: CheckedContinuation<PathSummary?, Never>) in
             monitor.pathUpdateHandler = { path in
@@ -809,19 +809,6 @@ enum NetworkProbeCLI {
                 monitor.cancel()
                 continuation.resume(returning: nil)
             }
-        }
-    }
-
-    /// Single-shot gate: whoever gets there first wins, everyone else is a
-    /// no-op. Shared by the path probe and any future async bridge.
-    private final class ResumeGate: @unchecked Sendable {
-        private let lock = NSLock()
-        private var claimed = false
-        func claim() -> Bool {
-            lock.lock(); defer { lock.unlock() }
-            if claimed { return false }
-            claimed = true
-            return true
         }
     }
 
@@ -865,20 +852,6 @@ enum NetworkProbeCLI {
         guard let s = NetworkEngine.Stats.of(values) else { return nil }
         return StatsRow(n: s.n, median: s.median, mad: s.mad, p95: s.p95)
     }
-
-    private static func intValue(_ args: [String], _ flag: String) -> Int? {
-        guard let index = args.firstIndex(of: flag), index + 1 < args.count else { return nil }
-        return Int(args[index + 1])
-    }
-
-    private static func stringValue(_ args: [String], _ flag: String) -> String? {
-        guard let index = args.firstIndex(of: flag), index + 1 < args.count else { return nil }
-        return args[index + 1]
-    }
-
-    /// Internal for the checkup CLI's flag reads — same parsing, one source.
-    static func flagInt(_ args: [String], _ flag: String) -> Int? { intValue(args, flag) }
-    static func flagString(_ args: [String], _ flag: String) -> String? { stringValue(args, flag) }
 }
 
 extension NetworkProbeCLI.Report {

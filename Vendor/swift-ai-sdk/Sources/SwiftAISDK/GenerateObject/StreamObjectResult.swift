@@ -184,7 +184,7 @@ public final class StreamObjectResult<PartialValue: Sendable, ResultValue: Senda
             source: AsyncThrowingStream { continuation in
                 let worker = Task {
                     do {
-                        var iterator = base.makeAsyncIterator()
+                        let iterator = base.makeAsyncIterator()
                         while let part = try await iterator.next() {
                             switch part {
                             case .object(let value):
@@ -214,7 +214,7 @@ public final class StreamObjectResult<PartialValue: Sendable, ResultValue: Senda
             source: AsyncThrowingStream { continuation in
                 let worker = Task {
                     do {
-                        var iterator = base.makeAsyncIterator()
+                        let iterator = base.makeAsyncIterator()
                         while let part = try await iterator.next() {
                             switch part {
                             case .textDelta(let delta):
@@ -243,7 +243,7 @@ public final class StreamObjectResult<PartialValue: Sendable, ResultValue: Senda
         return AsyncThrowingStream { continuation in
             let worker = Task {
                 do {
-                    var iterator = stream.makeAsyncIterator()
+                    let iterator = stream.makeAsyncIterator()
                     while let chunk = try await iterator.next() {
                         continuation.yield(chunk)
                     }
@@ -280,7 +280,7 @@ public extension StreamObjectResult where PartialValue == [String: JSONValue] {
             source: AsyncThrowingStream { continuation in
                 let worker = Task {
                     do {
-                        var iterator = stream.makeAsyncIterator()
+                        let iterator = stream.makeAsyncIterator()
                         while let chunk = try await iterator.next() {
                             do {
                                 let data = try JSONValue.object(chunk).toJSONData(prettyPrinted: false, sortedKeys: false)

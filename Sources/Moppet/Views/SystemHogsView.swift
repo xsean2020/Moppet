@@ -65,11 +65,7 @@ struct SystemHogsView: View {
                     snapshotsCard
                     readOnlyCard
                 }
-                .padding(.horizontal, Airi.space4)
-                .padding(.top, Airi.space3)
-                .padding(.bottom, Airi.space4)
-                .frame(maxWidth: 720)
-                .frame(maxWidth: .infinity)
+                .pageColumn()
             }
         }
         .background(Airi.pageBackground.opacity(0.001))
@@ -347,12 +343,7 @@ struct SystemHogsView: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.top, 6)
         }
-        .padding(10)
-        .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
-            .fill(Airi.neutral50.opacity(0.35)))
-        .padding(.leading, 52)
-        .padding(.trailing, 14)
-        .padding(.bottom, 12)
+        .detailPanel()
     }
 
     private var brewGroup: some View {
@@ -408,12 +399,7 @@ struct SystemHogsView: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.top, 6)
         }
-        .padding(10)
-        .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
-            .fill(Airi.neutral50.opacity(0.35)))
-        .padding(.leading, 52)
-        .padding(.trailing, 14)
-        .padding(.bottom, 12)
+        .detailPanel()
     }
 
     // MARK: - Snapshots
@@ -495,12 +481,7 @@ struct SystemHogsView: View {
             }
             .padding(.top, 8)
         }
-        .padding(10)
-        .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
-            .fill(Airi.neutral50.opacity(0.35)))
-        .padding(.leading, 52)
-        .padding(.trailing, 14)
-        .padding(.bottom, 12)
+        .detailPanel()
     }
 
     private var allSnapshotsSelected: Bool {
@@ -774,5 +755,26 @@ struct SystemHogsView: View {
         case .mail: return "envelope"
         case .messages: return "message"
         }
+    }
+}
+
+// MARK: - Detail panel
+
+/// Indented sub-panel under an engine row (Docker, Homebrew, snapshots).
+private struct DetailPanel: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .padding(10)
+            .background(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Airi.neutral50.opacity(0.35)))
+            .padding(.leading, 52)
+            .padding(.trailing, 14)
+            .padding(.bottom, 12)
+    }
+}
+
+private extension View {
+    func detailPanel() -> some View {
+        modifier(DetailPanel())
     }
 }

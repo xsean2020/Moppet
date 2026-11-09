@@ -188,7 +188,7 @@ actor StitchableStreamController<Element: Sendable> {
         while let stream = await nextStream() {
             currentStream = stream
             do {
-                var iterator = stream.makeAsyncIterator()
+                let iterator = stream.makeAsyncIterator()
                 while let value = try await iterator.next() {
                     continuation?.yield(value)
                     if isTerminated {

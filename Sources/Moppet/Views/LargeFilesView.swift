@@ -288,19 +288,12 @@ struct LargeFilesView: View {
     /// NSOpenPanel rather than a text field: the folder must exist, and the
     /// picker starts at the last saved folder so repeat scans are one click.
     private func pickCustomRoots() {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = true
-        panel.canCreateDirectories = false
-        panel.title = L("Choose folders to scan")
-        panel.prompt = L("Add")
-        if let last = customRoots.last {
-            panel.directoryURL = URL(fileURLWithPath: last)
-        }
-        guard panel.runModal() == .OK else { return }
+        let start = customRoots.last.map { URL(fileURLWithPath: $0) }
+        guard let urls = DirectoryPicker.chooseDirectories(
+            title: L("Choose folders to scan"), prompt: L("Add"), startingAt: start)
+        else { return }
         var roots = customRoots
-        for url in panel.urls {
+        for url in urls {
             let path = url.standardizedFileURL.path
             if !roots.contains(path) { roots.append(path) }
         }

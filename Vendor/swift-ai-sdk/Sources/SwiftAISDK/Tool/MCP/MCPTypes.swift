@@ -455,7 +455,7 @@ public enum ToolContent: Codable, Sendable {
     case unknown(JSONValue)
 
     public struct TextContent: Codable, Sendable {
-        public let type: String = "text"
+        public var type: String = "text"
         public let text: String
 
         public init(text: String) {
@@ -464,7 +464,7 @@ public enum ToolContent: Codable, Sendable {
     }
 
     public struct ImageContent: Codable, Sendable {
-        public let type: String = "image"
+        public var type: String = "image"
         public let data: String // base64
         public let mimeType: String
 
@@ -475,7 +475,7 @@ public enum ToolContent: Codable, Sendable {
     }
 
     public struct EmbeddedResource: Codable, Sendable {
-        public let type: String = "resource"
+        public var type: String = "resource"
         public let resource: ResourceContents
 
         public init(resource: ResourceContents) {

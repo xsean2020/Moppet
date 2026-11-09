@@ -22,9 +22,12 @@ struct BrainGrowthCard: View {
     /// Editable daily token cap (GrowthSettings.dailyTokens). The ledger reads
     /// it on every `canSpend`, so a change applies to the next model call.
     @State private var dailyBudget = GrowthSettings.dailyTokens
+    /// Max parallel tasks (BrainTaskScheduler.maxConcurrent). The scheduler
+    /// reads UserDefaults on init and its didSet clamps + persists + pumps,
+    /// so writing here takes effect immediately on the shared scheduler.
+    @State private var maxConcurrent = BrainTaskScheduler.defaultMaxConcurrent
     @State private var version = 0
     @State private var lastSummary = ""
-    @State private var lastParent = 0
     @State private var badRatio = ""
     @State private var canaryLine = ""
     @State private var skillNames: [String] = []
@@ -95,6 +98,7 @@ struct BrainGrowthCard: View {
                     footer: GrowthPaths.root.path)
 
                 budgetRow
+                concurrencyRow
 
                 if !badRatio.isEmpty {
                     Text(badRatio)
@@ -236,58 +240,59 @@ struct BrainGrowthCard: View {
     /// `GrowthLedger.canSpend` reads `GrowthSettings.dailyTokens` on every
     /// model call, so a change takes effect on the next turn (no restart).
     private var budgetRow: some View {
-        HStack(alignment: .center, spacing: Airi.space3) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(L("Daily spend limit"))
-                    .font(Airi.captionFont)
-                    .foregroundStyle(Airi.neutral700)
-                Text(L("Hard cap on what the growth loop may spend per day — it stops once the cap is reached."))
-                    .font(.system(size: 10))
-                    .foregroundStyle(Airi.neutral500)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: Airi.space2)
-            HStack(spacing: 6) {
-                TextField("", value: $dailyBudget, format: .number.grouping(.automatic))
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 12, design: .monospaced))
-                    .multilineTextAlignment(.trailing)
-                    .frame(width: 86)
-                    .padding(.vertical, 3)
-                    .padding(.horizontal, 6)
-                    .background(RoundedRectangle(cornerRadius: 6).fill(Airi.neutral50))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 6)
-                            .strokeBorder(Airi.neutral200, lineWidth: 1)
-                    )
-                Text("tk")
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(Airi.neutral400)
-                Stepper("", value: $dailyBudget, in: Self.budgetRange, step: 25_000)
-                    .labelsHidden()
-                    .controlSize(.small)
-            }
-        }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 4)
-        .onChange(of: dailyBudget) { _, _ in commitBudget() }
+        NumberSettingRow(
+            title: L("Daily spend limit"),
+            subtitle: L("Hard cap on what the growth loop may spend per day — it stops once the cap is reached."),
+            value: $dailyBudget,
+            range: Self.budgetRange,
+            step: 25_000,
+            unit: "tk",
+            onChange: commitBudget)
+    }
+
+    /// Max parallel tasks — editable here instead of only living in UserDefaults.
+    /// `BrainTaskScheduler.maxConcurrent.didSet` clamps (1…8), persists, and
+    /// calls `pump()` so queued tasks immediately fill the new slot.
+    private var concurrencyRow: some View {
+        NumberSettingRow(
+            title: L("Max parallel tasks"),
+            subtitle: L("How many tasks can run at once. Extra tasks queue until a slot opens up."),
+            value: $maxConcurrent,
+            range: Self.concurrencyRange,
+            step: 1,
+            onChange: commitConcurrency)
     }
 
     private static let budgetRange: ClosedRange<Int> = 10_000...1_000_000
+    private static let concurrencyRange: ClosedRange<Int> = 1...8
 
     /// Clamp + persist, then refresh so the "Spent today" row and its usage
     /// bar follow the new cap immediately.
     private func commitBudget() {
-        let clamped = min(Self.budgetRange.upperBound,
-                          max(Self.budgetRange.lowerBound, dailyBudget))
-        if clamped != dailyBudget { dailyBudget = clamped }
-        guard GrowthSettings.dailyTokens != clamped else { return }
-        GrowthSettings.dailyTokens = clamped
+        let next = clamped(dailyBudget, to: Self.budgetRange)
+        if next != dailyBudget { dailyBudget = next }
+        guard GrowthSettings.dailyTokens != next else { return }
+        GrowthSettings.dailyTokens = next
         refresh()
+    }
+
+    /// Clamp + persist + apply to the shared scheduler so queued tasks fill
+    /// the new slot immediately.
+    private func commitConcurrency() {
+        let next = clamped(maxConcurrent, to: Self.concurrencyRange)
+        if next != maxConcurrent { maxConcurrent = next }
+        let scheduler = ChatSessionStore.shared.scheduler
+        guard scheduler.maxConcurrent != next else { return }
+        scheduler.maxConcurrent = next
+    }
+
+    private func clamped(_ value: Int, to range: ClosedRange<Int>) -> Int {
+        min(range.upperBound, max(range.lowerBound, value))
     }
 
     private func refresh() {
         let tree = HarnessStore.load()
+        maxConcurrent = ChatSessionStore.shared.scheduler.maxConcurrent
         alwaysOn = HarnessSurface.alwaysOnChars(tree)
         let skills = SkillCatalog.skills(tree: tree)
         skillNames = skills.map(\.name)
@@ -301,7 +306,6 @@ struct BrainGrowthCard: View {
         let versions = PromotionGate.versions()
         version = versions.last?.version ?? 0
         lastSummary = versions.last?.summary ?? ""
-        lastParent = versions.last?.parent ?? 0
 
         // Gate ③ status: what is being watched right now (or last fired).
         if let canary = CanaryWatcher.state() {
@@ -320,6 +324,60 @@ struct BrainGrowthCard: View {
         } else {
             badRatio = ""
         }
+    }
+}
+
+// MARK: - Numeric setting row
+
+/// Label + subtitle on the left, right-aligned number field and stepper on
+/// the right. Shared by the budget and concurrency controls.
+private struct NumberSettingRow: View {
+    let title: String
+    let subtitle: String
+    @Binding var value: Int
+    let range: ClosedRange<Int>
+    let step: Int
+    var unit: String? = nil
+    let onChange: () -> Void
+
+    var body: some View {
+        HStack(alignment: .center, spacing: Airi.space3) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(Airi.captionFont)
+                    .foregroundStyle(Airi.neutral700)
+                Text(subtitle)
+                    .font(.system(size: 10))
+                    .foregroundStyle(Airi.neutral500)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: Airi.space2)
+            HStack(spacing: 6) {
+                TextField("", value: $value, format: .number.grouping(.automatic))
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12, design: .monospaced))
+                    .multilineTextAlignment(.trailing)
+                    .frame(width: 86)
+                    .padding(.vertical, 3)
+                    .padding(.horizontal, 6)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Airi.neutral50))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .strokeBorder(Airi.neutral200, lineWidth: 1)
+                    )
+                if let unit {
+                    Text(unit)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(Airi.neutral400)
+                }
+                Stepper("", value: $value, in: range, step: step)
+                    .labelsHidden()
+                    .controlSize(.small)
+            }
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 4)
+        .onChange(of: value) { _, _ in onChange() }
     }
 }
 

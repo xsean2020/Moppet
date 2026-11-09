@@ -28,15 +28,15 @@ enum NetworkFixCLI {
         setvbuf(stdout, nil, _IONBF, 0)
 
         let args = CommandLine.arguments
-        let actionName = stringValue(args, "--action")
-        let dnsTargets = stringValue(args, "--dns")?
+        let actionName = CLIArgs.string(args, "--action")
+        let dnsTargets = CLIArgs.string(args, "--dns")?
             .split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty } ?? []
-        let desiredMTU = intValue(args, "--mtu") ?? 1400
+        let desiredMTU = CLIArgs.int(args, "--mtu") ?? 1400
         let dryRun = args.contains("--dry-run")
         let confirmed = args.contains("--yes")
-        let rounds = max(2, intValue(args, "--rounds") ?? 6)
-        let host = stringValue(args, "--host") ?? "www.apple.com"
+        let rounds = max(2, CLIArgs.int(args, "--rounds") ?? 6)
+        let host = CLIArgs.string(args, "--host") ?? "www.apple.com"
         let wantJSON = args.contains("--json")
 
         let semaphore = DispatchSemaphore(value: 0)
@@ -364,18 +364,6 @@ enum NetworkFixCLI {
                 success: success,
                 error: success ? nil : (message.isEmpty ? "not kept" : message))],
             source: .network))
-    }
-
-    // MARK: - Helpers
-
-    private static func intValue(_ args: [String], _ flag: String) -> Int? {
-        guard let index = args.firstIndex(of: flag), index + 1 < args.count else { return nil }
-        return Int(args[index + 1])
-    }
-
-    private static func stringValue(_ args: [String], _ flag: String) -> String? {
-        guard let index = args.firstIndex(of: flag), index + 1 < args.count else { return nil }
-        return args[index + 1]
     }
 }
 

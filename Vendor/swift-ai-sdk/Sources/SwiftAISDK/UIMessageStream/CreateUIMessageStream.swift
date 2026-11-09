@@ -171,7 +171,7 @@ final class UIMessageStreamState {
                 self.mergeFinished(id: identifier)
             }
 
-            var iterator = stream.makeAsyncIterator()
+            let iterator = stream.makeAsyncIterator()
             do {
                 while let value = try await iterator.next() {
                     self.enqueue(value)

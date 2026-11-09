@@ -68,11 +68,6 @@ enum Scheduler {
 
     /// Builds the launchd plist. `executablePath` must be absolute.
     static func plistXML(settings: Settings, executablePath: String) -> String {
-        func esc(_ s: String) -> String {
-            s.replacingOccurrences(of: "&", with: "&amp;")
-                .replacingOccurrences(of: "<", with: "&lt;")
-                .replacingOccurrences(of: ">", with: "&gt;")
-        }
         var calendar = "<key>Hour</key><integer>\(max(0, min(settings.hour, 23)))</integer>"
         calendar += "<key>Minute</key><integer>0</integer>"
         if settings.frequency == .weekly {
@@ -86,13 +81,13 @@ enum Scheduler {
             <key>Label</key><string>\(label)</string>
             <key>ProgramArguments</key>
             <array>
-                <string>\(esc(executablePath))</string>
+                <string>\(Launchd.xmlEscaped(executablePath))</string>
                 <string>--scheduled-clean</string>
             </array>
             <key>StartCalendarInterval</key>
             <dict>\(calendar)</dict>
-            <key>StandardOutPath</key><string>\(esc(logURL.path))</string>
-            <key>StandardErrorPath</key><string>\(esc(logURL.path))</string>
+            <key>StandardOutPath</key><string>\(Launchd.xmlEscaped(logURL.path))</string>
+            <key>StandardErrorPath</key><string>\(Launchd.xmlEscaped(logURL.path))</string>
         </dict>
         </plist>
         """
@@ -117,19 +112,14 @@ enum Scheduler {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try plistXML(settings: settings, executablePath: executable)
             .write(to: plistURL, atomically: true, encoding: .utf8)
-        let uid = getuid()
         // bootout ignores "not loaded" failures; bootstrap must succeed.
-        _ = try? await OptimizeEngine.shell(
-            "launchctl bootout gui/\(uid)/\(label) 2>/dev/null || true")
-        _ = try await OptimizeEngine.shell(
-            "launchctl bootstrap gui/\(uid) '\(plistURL.path)'")
+        await Launchd.bootout(label)
+        try await Launchd.bootstrap(label, plistURL: plistURL)
         settings.save()
     }
 
     static func uninstall() async {
-        let uid = getuid()
-        _ = try? await OptimizeEngine.shell(
-            "launchctl bootout gui/\(uid)/\(label) 2>/dev/null || true")
+        await Launchd.bootout(label)
         try? FileManager.default.removeItem(at: plistURL)
         Settings.load().withEnabled(false).save()
     }

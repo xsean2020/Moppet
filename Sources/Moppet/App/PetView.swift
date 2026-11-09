@@ -788,16 +788,7 @@ struct PetBubbleCard: View {
         .frame(width: width)
         // Marks the card as clickable content for PetPanelHostingView's
         // pass-through hit-testing (the panel is wider than the mole).
-        .background(HitRegion())
-        .background(
-            RoundedRectangle(cornerRadius: Airi.radiusCard, style: .continuous)
-                .fill(Airi.cardBackground)
-                .shadow(color: .black.opacity(0.1), radius: 8, y: 3)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: Airi.radiusCard, style: .continuous)
-                .strokeBorder(Airi.neutral200.opacity(0.6), lineWidth: 1)
-        )
+        .petCardSurface(border: Airi.neutral200.opacity(0.6))
     }
 
     private var content: some View {
@@ -1310,16 +1301,7 @@ struct PetView: View {
                 }
                 .padding(8)
                 .frame(width: 236, alignment: .leading)
-                .background(HitRegion())
-                .background(
-                    RoundedRectangle(cornerRadius: Airi.radiusCard, style: .continuous)
-                        .fill(Airi.cardBackground)
-                        .shadow(color: .black.opacity(0.1), radius: 8, y: 3)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: Airi.radiusCard, style: .continuous)
-                        .strokeBorder(Airi.primary.opacity(0.4), lineWidth: 1)
-                )
+                .petCardSurface(border: Airi.primary.opacity(0.4))
                 .transition(.scale(scale: 0.9, anchor: .top).combined(with: .opacity))
                 .onAppear {
                     if answeredRequestID != request.id {
@@ -1368,21 +1350,40 @@ struct PetView: View {
                 }
                 .padding(8)
                 .frame(width: 236, alignment: .leading)
-                .background(HitRegion())
-                .background(
-                    RoundedRectangle(cornerRadius: Airi.radiusCard, style: .continuous)
-                        .fill(Airi.cardBackground)
-                        .shadow(color: .black.opacity(0.1), radius: 8, y: 3)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: Airi.radiusCard, style: .continuous)
-                        .strokeBorder(Airi.danger.opacity(0.4), lineWidth: 1)
-                )
+                .petCardSurface(border: Airi.danger.opacity(0.4))
                 .transition(.scale(scale: 0.9, anchor: .top).combined(with: .opacity))
             }
         }
         .animation(.spring(response: 0.25, dampingFraction: 0.8),
                    value: ApprovalCenter.shared.pending == nil)
+    }
+}
+
+// MARK: - Pet card surface
+
+/// Shared chrome for the floating pet cards: click-through hit region,
+/// rounded fill + shadow, and a one-pixel tinted border.
+private struct PetCardSurface: ViewModifier {
+    let border: Color
+
+    func body(content: Content) -> some View {
+        content
+            .background(HitRegion())
+            .background(
+                RoundedRectangle(cornerRadius: Airi.radiusCard, style: .continuous)
+                    .fill(Airi.cardBackground)
+                    .shadow(color: .black.opacity(0.1), radius: 8, y: 3)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: Airi.radiusCard, style: .continuous)
+                    .strokeBorder(border, lineWidth: 1)
+            )
+    }
+}
+
+private extension View {
+    func petCardSurface(border: Color) -> some View {
+        modifier(PetCardSurface(border: border))
     }
 }
 

@@ -264,7 +264,7 @@ public func makeArrayOutputStrategy<ElementResult>(
         createElementStream: { original in
             createAsyncIterableStream(source: AsyncThrowingStream<ElementResult, Error> { continuation in
                 Task {
-                    var iterator = original.makeAsyncIterator()
+                    let iterator = original.makeAsyncIterator()
                     var published = 0
 
                     do {

@@ -38,7 +38,7 @@ enum OpenAIChatToolPreparer {
         case .required: choice = .string("required")
         case .tool(let name):
             choice = .object(["type": .string("function"), "function": .object(["name": .string(name)])])
-        case .none: choice = nil
+        case nil: choice = nil
         }
         return OpenAIChatPreparedTools(tools: .array(prepared), toolChoice: choice, warnings: warnings)
     }

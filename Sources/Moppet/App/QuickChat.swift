@@ -313,8 +313,15 @@ struct QuickChatInputView: View {
                 .foregroundStyle(Airi.neutral900)
                 .focused($focused)
                 .onSubmit { send() }
-            CircleIconButton(icon: quick.active ? "stop.fill" : "arrow.up.circle.fill") {
-                if quick.active { quick.stop() } else { send() }
+            CircleIconButton(icon: quick.active && draft.trimmingCharacters(
+                in: .whitespacesAndNewlines).isEmpty
+                ? "stop.fill" : "arrow.up.circle.fill") {
+                if quick.active && draft.trimmingCharacters(
+                    in: .whitespacesAndNewlines).isEmpty {
+                    quick.stop()
+                } else {
+                    send()
+                }
             }
         }
         .padding(.horizontal, 16)
@@ -350,12 +357,11 @@ struct QuickChatInputView: View {
     }
 
     private func send() {
-        // Gate BEFORE clearing: `quick.submit` is a silent no-op while a
-        // previous turn streams (button shows stop), so an ungated Return
-        // would swallow the typed text. Keep the draft; it can be sent once
-        // the current turn finishes.
+        // Busy no longer blocks sending: QuickChat.submit routes a draft typed
+        // during a streaming turn to the parallel task lane. Only an empty
+        // draft turns the trailing button into Stop.
         let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, !quick.active else { return }
+        guard !trimmed.isEmpty else { return }
         draft = ""
         quick.submit(trimmed)
     }

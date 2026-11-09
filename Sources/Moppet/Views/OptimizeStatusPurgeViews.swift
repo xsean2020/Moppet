@@ -29,11 +29,7 @@ struct OptimizeView: View {
                     }
                     if !results.isEmpty { outputCard }
                 }
-                .padding(.horizontal, Airi.space4)
-                .padding(.top, Airi.space3)
-                .padding(.bottom, Airi.space4)
-                .frame(maxWidth: 720)
-                .frame(maxWidth: .infinity)
+                .pageColumn()
             }
         }
         .background(Airi.pageBackground.opacity(0.001))
@@ -286,11 +282,7 @@ struct StatusView: View {
                     quadrantDetailCard
                     processCard
                 }
-                .padding(.horizontal, Airi.space4)
-                .padding(.top, Airi.space3)
-                .padding(.bottom, Airi.space4)
-                .frame(maxWidth: 720)
-                .frame(maxWidth: .infinity)
+                .pageColumn()
                 // Adaptive sizing (requirement: 自适应窗口大小): the board's
                 // whole 440-pt coordinate system scales as ONE unit — every
                 // quadrant ratio, arc band and font keeps its designed
@@ -1374,19 +1366,14 @@ struct PurgeView: View {
     /// click. "/" and the home folder are rejected for the same reason the old
     /// text field rejected them: walking them is not a project scan.
     private func pickRoots() {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = true
-        panel.canCreateDirectories = false
-        panel.title = L("Choose folders to scan")
-        panel.prompt = L("Add")
-        panel.directoryURL = roots.last ?? FileManager.default.homeDirectoryForCurrentUser
-        guard panel.runModal() == .OK else { return }
+        let start = roots.last ?? FileManager.default.homeDirectoryForCurrentUser
+        guard let urls = DirectoryPicker.chooseDirectories(
+            title: L("Choose folders to scan"), prompt: L("Add"), startingAt: start)
+        else { return }
 
         var next = roots
         var rejected = false
-        for url in panel.urls.map(\.standardizedFileURL) {
+        for url in urls.map(\.standardizedFileURL) {
             guard url.path != "/", url.path != NSHomeDirectory() else {
                 rejected = true
                 continue

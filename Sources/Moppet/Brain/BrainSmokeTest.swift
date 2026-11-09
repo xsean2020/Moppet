@@ -1699,7 +1699,7 @@ enum BrainSmokeTest {
                    chainScheduler.tasks.first { $0.id == cancelB }?.runState == .queued,
                    "\(chainScheduler.tasks.map { "\($0.id):\($0.runState.rawValue)" })")
             var cancelDeadline = Date().addingTimeInterval(3)
-            while chainScheduler.tasks.first { $0.id == cancelA }?.runState != .running,
+            while chainScheduler.tasks.first(where: { $0.id == cancelA })?.runState != .running,
                   Date() < cancelDeadline {
                 try? await Task.sleep(nanoseconds: 20_000_000)
             }

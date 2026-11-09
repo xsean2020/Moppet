@@ -33,7 +33,7 @@ public func pipeTextStreamToResponse(
         headers: normalisedHeaders
     )
 
-    Task {
+    _ = Task {
         try await writeToServerResponse(response: response, stream: textStream)
     }
 }

@@ -274,13 +274,7 @@ struct SettingsCard<Content: View>: View {
         )
         // One-pixel sheen along the top edge — glass cards read lit from
         // above; opacity is low enough to stay subtle in dark mode.
-        .overlay(alignment: .top) {
-            LinearGradient(colors: [.white.opacity(0.10), .clear],
-                           startPoint: .top, endPoint: .bottom)
-                .frame(height: 1)
-                .clipShape(RoundedRectangle(cornerRadius: Airi.radiusCard, style: .continuous))
-                .allowsHitTesting(false)
-        }
+        .cardSheen()
     }
 }
 
@@ -323,6 +317,45 @@ struct GroupedCard<Content: View>: View {
                     .clipShape(RoundedRectangle(cornerRadius: Airi.radiusCard, style: .continuous))
                     .allowsHitTesting(false)
             }
+    }
+}
+
+/// The one-pixel top-edge sheen shared by `SettingsCard` and `GroupedCard`.
+private struct CardSheen: ViewModifier {
+    func body(content: Content) -> some View {
+        content.overlay(alignment: .top) {
+            LinearGradient(colors: [.white.opacity(0.10), .clear],
+                           startPoint: .top, endPoint: .bottom)
+                .frame(height: 1)
+                .clipShape(RoundedRectangle(cornerRadius: Airi.radiusCard, style: .continuous))
+                .allowsHitTesting(false)
+        }
+    }
+}
+
+private extension View {
+    func cardSheen() -> some View {
+        modifier(CardSheen())
+    }
+}
+
+/// Centered, width-capped content column used by every full page.
+struct PageColumn: ViewModifier {
+    var maxWidth: CGFloat = 720
+
+    func body(content: Content) -> some View {
+        content
+            .padding(.horizontal, Airi.space4)
+            .padding(.top, Airi.space3)
+            .padding(.bottom, Airi.space4)
+            .frame(maxWidth: maxWidth)
+            .frame(maxWidth: .infinity)
+    }
+}
+
+extension View {
+    func pageColumn(maxWidth: CGFloat = 720) -> some View {
+        modifier(PageColumn(maxWidth: maxWidth))
     }
 }
 

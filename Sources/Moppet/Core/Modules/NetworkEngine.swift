@@ -760,7 +760,7 @@ enum NetworkEngine {
         let start = Date()
         // Single-shot gate: whichever of the three paths lands first resumes;
         // everyone else is a no-op (same shape as the probe's ResumeGate).
-        let gate = ProbeGate()
+        let gate = OneShotGate()
         return await withCheckedContinuation {
             (continuation: CheckedContinuation<AppPathProbe?, Never>) in
             // Called from three escaping closures — the @Sendable marking is
@@ -806,18 +806,6 @@ enum NetworkEngine {
                 _ = session
                 complete(nil)
             }
-        }
-    }
-
-    /// Single-shot claim gate shared by the app-path probe's three finishers.
-    private final class ProbeGate: @unchecked Sendable {
-        private let lock = NSLock()
-        private var claimed = false
-        func claim() -> Bool {
-            lock.lock(); defer { lock.unlock() }
-            if claimed { return false }
-            claimed = true
-            return true
         }
     }
 

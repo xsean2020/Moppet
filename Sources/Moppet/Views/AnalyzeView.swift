@@ -390,17 +390,8 @@ struct AnalyzeView: View {
                 // a 500-row directory (500 sorts of 500 rows) and the list
                 // visibly jittered; the final sort below still leaves it
                 // perfectly ordered.
-                var lastSort = Date.distantPast
-                for await entry in stream {
-                    guard let target = nodesByPath[entry.id] else { continue }
-                    target.bytes = entry.bytes
-                    target.fileCount = entry.fileCount
-                    target.sizePending = false
-                    // Newly measured folders rise into their sorted place.
-                    if Date().timeIntervalSince(lastSort) > 0.15 {
-                        lastSort = Date()
-                        node.children.sort { $0.bytes > $1.bytes }
-                    }
+                await drainSizeStream(stream, nodesByPath: nodesByPath) {
+                    node.children.sort { $0.bytes > $1.bytes }
                 }
             }
             // Zero-byte entries never stream an update (topChildren skips
@@ -408,6 +399,26 @@ struct AnalyzeView: View {
             // on "Measuring…" forever.
             node.children.forEach { $0.sizePending = false }
             node.children.sort { $0.bytes > $1.bytes }
+        }
+    }
+
+    /// Apply streamed sizes to the matching nodes and re-sort the visible list
+    /// at most ~7×/s (sorting on every entry was O(n² log n) and jittered).
+    private func drainSizeStream(_ stream: AsyncStream<ScanEngine.SpaceEntry>,
+                                 nodesByPath: [String: FileNode],
+                                 onEntry: () -> Void = {},
+                                 sort: () -> Void) async {
+        var lastSort = Date.distantPast
+        for await entry in stream {
+            guard let target = nodesByPath[entry.id] else { continue }
+            target.bytes = entry.bytes
+            target.fileCount = entry.fileCount
+            target.sizePending = false
+            onEntry()
+            if Date().timeIntervalSince(lastSort) > 0.15 {
+                lastSort = Date()
+                sort()
+            }
         }
     }
 
@@ -499,17 +510,9 @@ struct AnalyzeView: View {
                     continuation.finish()
                 }
                 // Rows re-sort at most ~7×/s while sizes stream in.
-                var lastSort = Date.distantPast
-                for await entry in stream {
-                    guard let target = nodesByPath[entry.id] else { continue }
-                    target.bytes = entry.bytes
-                    target.fileCount = entry.fileCount
-                    target.sizePending = false
-                    progress?.done += 1
-                    if Date().timeIntervalSince(lastSort) > 0.15 {
-                        lastSort = Date()
-                        rootChildren.sort { $0.bytes > $1.bytes }
-                    }
+                await drainSizeStream(stream, nodesByPath: nodesByPath,
+                                      onEntry: { progress?.done += 1 }) {
+                    rootChildren.sort { $0.bytes > $1.bytes }
                 }
             }
             // Clear state only for a healthy finish: a cancelled task

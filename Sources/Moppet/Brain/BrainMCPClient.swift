@@ -91,12 +91,10 @@ final class BrainMCPClient: @unchecked Sendable {
         process.standardOutput = stdoutPipe
         process.standardError = FileHandle.nullDevice
         try process.run()
-        // weak let 是 Swift 6.2（SE-0481）语法，Xcode 16.x 拒绝——用 var 兼容
-        weak var weakSelf = self
-        process.terminationHandler = { _ in
+        process.terminationHandler = { [weak self] _ in
             // Server died: every pending request must fail NOW, not hang the
             // waiting brain turn until forever.
-            guard let self = weakSelf else { return }
+            guard let self else { return }
             self.queue.async { self.failAllPending(BrainError("MCP server '\(serverName)' exited")) }
         }
         stdoutPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
@@ -164,7 +162,7 @@ final class BrainMCPClient: @unchecked Sendable {
             throw BrainError("cannot encode MCP request")
         }
         return try await withCheckedThrowingContinuation { continuation in
-            self.queue.async {
+            self.queue.async { [self] in
                 guard self.process.isRunning else {
                     continuation.resume(throwing: BrainError("MCP server '\(self.serverName)' is not running"))
                     return

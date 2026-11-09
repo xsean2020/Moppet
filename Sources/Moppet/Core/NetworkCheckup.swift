@@ -30,11 +30,6 @@ enum NetworkCheckup {
     /// launchd rejects JSON and wants XML (see Scheduler for the same trap);
     /// values are clamped so a bad UI value cannot corrupt the plist.
     static func plistXML(executablePath: String, weekday: Int, hour: Int) -> String {
-        func esc(_ s: String) -> String {
-            s.replacingOccurrences(of: "&", with: "&amp;")
-                .replacingOccurrences(of: "<", with: "&lt;")
-                .replacingOccurrences(of: ">", with: "&gt;")
-        }
         return """
         <?xml version="1.0" encoding="UTF-8"?>
         <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -43,7 +38,7 @@ enum NetworkCheckup {
             <key>Label</key><string>\(label)</string>
             <key>ProgramArguments</key>
             <array>
-                <string>\(esc(executablePath))</string>
+                <string>\(Launchd.xmlEscaped(executablePath))</string>
                 <string>--net-report</string>
             </array>
             <key>StartCalendarInterval</key>
@@ -52,8 +47,8 @@ enum NetworkCheckup {
                 <key>Hour</key><integer>\(max(0, min(hour, 23)))</integer>
                 <key>Minute</key><integer>0</integer>
             </dict>
-            <key>StandardOutPath</key><string>\(esc(logURL.path))</string>
-            <key>StandardErrorPath</key><string>\(esc(logURL.path))</string>
+            <key>StandardOutPath</key><string>\(Launchd.xmlEscaped(logURL.path))</string>
+            <key>StandardErrorPath</key><string>\(Launchd.xmlEscaped(logURL.path))</string>
         </dict>
         </plist>
         """
@@ -74,19 +69,14 @@ enum NetworkCheckup {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try plistXML(executablePath: executable, weekday: weekday, hour: hour)
             .write(to: plistURL, atomically: true, encoding: .utf8)
-        let uid = getuid()
         // bootout ignores "not loaded"; bootstrap must succeed or the caller
         // sees why (same contract as Scheduler.install).
-        _ = try? await OptimizeEngine.shell(
-            "launchctl bootout gui/\(uid)/\(label) 2>/dev/null || true")
-        _ = try await OptimizeEngine.shell(
-            "launchctl bootstrap gui/\(uid) '\(plistURL.path)'")
+        await Launchd.bootout(label)
+        try await Launchd.bootstrap(label, plistURL: plistURL)
     }
 
     static func uninstall() async {
-        let uid = getuid()
-        _ = try? await OptimizeEngine.shell(
-            "launchctl bootout gui/\(uid)/\(label) 2>/dev/null || true")
+        await Launchd.bootout(label)
         try? FileManager.default.removeItem(at: plistURL)
     }
 
@@ -198,7 +188,7 @@ extension NetworkProbeCLI {
     static func runTrend() -> Never {
         setvbuf(stdout, nil, _IONBF, 0)
         let args = CommandLine.arguments
-        let host = flagString(args, "--hosts")?
+        let host = CLIArgs.string(args, "--hosts")?
             .split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }.first
         let samples = NetworkReference.NetworkSampleStore.load()
@@ -237,9 +227,9 @@ extension NetworkProbeCLI {
 enum NetworkCheckupCLI {
     static func run() -> Never {
         let args = CommandLine.arguments
-        let sub = NetworkProbeCLI.flagString(args, "--net-checkup") ?? "status"
-        let weekday = NetworkProbeCLI.flagInt(args, "--weekday") ?? 1
-        let hour = NetworkProbeCLI.flagInt(args, "--hour") ?? 9
+        let sub = CLIArgs.string(args, "--net-checkup") ?? "status"
+        let weekday = CLIArgs.int(args, "--weekday") ?? 1
+        let hour = CLIArgs.int(args, "--hour") ?? 9
         let semaphore = DispatchSemaphore(value: 0)
         Task {
             switch sub {

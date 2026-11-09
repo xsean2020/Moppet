@@ -548,29 +548,9 @@ struct SettingsView: View {
                         TextField(ai.vendor.defaultBaseURL ?? "https://…/v1", text: $ai.baseURL)
                             .textFieldStyle(.plain)
                     }
-                    labeledField(L("Model"), field: .model) {
-                        TextField(ai.vendor.defaultModel, text: $ai.model)
-                            .textFieldStyle(.plain)
-                    }
-                    ModelCatalogEditor(vendor: ai.vendor)
-                    if ai.vendor.needsAPIKey {
-                        labeledField(L("API Key"), field: .apiKey) {
-                            SecureField("sk-…", text: $ai.apiKey)
-                                .textFieldStyle(.plain)
-                        }
-                    }
+                    modelFields
                 } else {
-                    labeledField(L("Model"), field: .model) {
-                        TextField(ai.vendor.defaultModel, text: $ai.model)
-                            .textFieldStyle(.plain)
-                    }
-                    ModelCatalogEditor(vendor: ai.vendor)
-                    if ai.vendor.needsAPIKey {
-                        labeledField(L("API Key"), field: .apiKey) {
-                            SecureField("sk-…", text: $ai.apiKey)
-                                .textFieldStyle(.plain)
-                        }
-                    }
+                    modelFields
                 }
                 HStack(spacing: Airi.space2) {
                     AiriButton(title: L("Save"), icon: "tray.and.arrow.down") {
@@ -618,6 +598,23 @@ struct SettingsView: View {
     @State private var draftNew: AIProviderProfile?
     /// Edit flow for the active custom provider (opened from the … menu).
     @State private var editingProfile: AIProviderProfile?
+
+    /// Model + catalog + optional API key — identical for native and
+    /// chat-completions providers.
+    @ViewBuilder
+    private var modelFields: some View {
+        labeledField(L("Model"), field: .model) {
+            TextField(ai.vendor.defaultModel, text: $ai.model)
+                .textFieldStyle(.plain)
+        }
+        ModelCatalogEditor(vendor: ai.vendor)
+        if ai.vendor.needsAPIKey {
+            labeledField(L("API Key"), field: .apiKey) {
+                SecureField("sk-…", text: $ai.apiKey)
+                    .textFieldStyle(.plain)
+            }
+        }
+    }
 
     /// Sheet: new provider draft. Save → upsert + auto-select + close.
     private var providerAddSheet: some View {

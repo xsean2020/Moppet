@@ -174,7 +174,7 @@ public func generateObject<ResultValue, PartialValue, ElementStream>(
         let warnings = generateResult.warnings
         let request = convertGenerateObjectRequestMetadata(generateResult.request)
 
-        logWarnings((warnings ?? []).map { Warning.languageModel($0) })
+        logWarnings(warnings.map { Warning.languageModel($0) })
 
         let stepEndEvent = GenerateObjectStepEndEvent(
             callId: callId,

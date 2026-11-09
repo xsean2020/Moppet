@@ -154,7 +154,9 @@ private func resolveHostAddresses(_ host: String, url: String) async throws -> [
                     0,
                     NI_NUMERICHOST
                 ) == 0 {
-                    addresses.append((String(cString: buffer), info.pointee.ai_family))
+                    addresses.append((String(decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) },
+                                           as: UTF8.self),
+                              info.pointee.ai_family))
                 }
                 cursor = info.pointee.ai_next
             }
