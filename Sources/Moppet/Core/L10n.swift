@@ -326,6 +326,7 @@ private let zh: [String: String] = [
     "Busy — routed to a parallel task; result lands in the chat window.": "忙——已转并行任务，结果见聊天窗口。",
     "Previous task result": "上一个任务结果",
     "Next task result": "下一个任务结果",
+    "Elapsed time": "已用时",
     "Answers stream here · full history lives in the chat window": "回答会在这里流式显示 · 完整历史在聊天窗",
     "⏎ send · Esc close": "⏎ 发送 · Esc 关闭",
     "Provider": "服务商",

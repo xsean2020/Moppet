@@ -154,14 +154,17 @@ struct MoppetApp: App {
         // widens AND grows upward while staying under the screen's top edge —
         // the "wide answer swallowed the pet" regression, at runtime.
         if args.contains("--probe-pet-panel") {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-                let long = String(repeating: "这是一段很长的回答内容，用来验证气泡变宽变高时宠物依然完整显示。",
-                                  count: 10)
-                PetBus.shared.say(long, state: .talking, hideAfter: 0)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+            PetView.debugLongAnswerOnAppear = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                func check(_ attempts: Int) {
                     guard let panel = NSApp.windows.first(where: { $0 is PetPanel }) else {
-                        print("probe-pet-panel: no pet panel")
-                        exit(3)
+                        if attempts < 40 {
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { check(attempts + 1) }
+                        } else {
+                            print("probe-pet-panel: no pet panel")
+                            exit(3)
+                        }
+                        return
                     }
                     let frame = panel.frame
                     let base = PetSettings.currentSize
@@ -171,9 +174,14 @@ struct MoppetApp: App {
                     // stay under the screen's top edge.
                     let grew = frame.width > base.width + 40 && frame.height > base.height + 20
                     let inside = visible.map { frame.maxY <= $0.maxY + 0.5 } ?? true
+                    guard grew || attempts >= 40 else {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { check(attempts + 1) }
+                        return
+                    }
                     print("probe-pet-panel: frame=\(frame) base=\(base) grew=\(grew) insideScreen=\(inside)")
                     exit(grew && inside ? 0 : 2)
                 }
+                check(0)
             }
         }
         // Floater color diagnostics: see Airi.probeFloaterColors.

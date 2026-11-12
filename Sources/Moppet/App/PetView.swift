@@ -917,6 +917,9 @@ enum PetBubbleProbe {
 
 struct PetView: View {
     weak var panel: NSPanel?
+    /// Probe hook (`--probe-pet-panel`): replace the launch greeting with the
+    /// long probe answer so it cannot be overwritten after the panel appears.
+    static var debugLongAnswerOnAppear = false
 
     @State private var bus = PetBus.shared
     @State private var bubbleVisible = false
@@ -1010,6 +1013,13 @@ struct PetView: View {
             PetSceneBridge.shared.applyState(newState)
         }
         .onAppear {
+            if Self.debugLongAnswerOnAppear {
+                let long = String(
+                    repeating: "这是一段很长的回答内容，用来验证气泡变宽变高时宠物依然完整显示。",
+                    count: 10)
+                bus.say(long, state: .talking, hideAfter: 0)
+                return
+            }
             bus.say(String(format: L("Hi! I'm %@ 🦫  Click to chat · double-click for the full window"),
                            PetIdentity.name),
                     state: .talking)
@@ -1096,7 +1106,7 @@ struct PetView: View {
         guard bubbleVisible else { return PetSettings.currentSize.width }
         // The queue nav can be wider than a very short bubble; reserve its
         // width so the panel never clips the capsule.
-        let nav: CGFloat = bus.showingTaskAnswer && bus.taskAnswerCount > 1 ? 120 : 0
+        let nav: CGFloat = bus.showingTaskAnswer && bus.taskAnswerCount > 1 ? 150 : 0
         return max(PetSettings.currentSize.width, max(bubbleWidth, nav) + 24)
     }
 
@@ -1214,12 +1224,33 @@ struct PetView: View {
         max(96, min(208, panelHeight * 0.62))
     }
 
+    private var taskAnswerStatusIcon: String {
+        switch bus.currentTaskAnswer?.status {
+        case "completed": "checkmark.circle.fill"
+        case "failed": "xmark.octagon.fill"
+        default: "stop.circle.fill"
+        }
+    }
+
+    private var taskAnswerStatusColor: Color {
+        switch bus.currentTaskAnswer?.status {
+        case "completed": Airi.success
+        case "failed": Airi.danger
+        default: Airi.neutral400
+        }
+    }
+
     /// 任务结果队列导航：仅在有多条结果时出现，一次只看一条。
     private var taskAnswerNav: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
+            Image(systemName: taskAnswerStatusIcon)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(taskAnswerStatusColor)
+
             Button { bus.previousTaskAnswer() } label: {
                 Image(systemName: "chevron.left")
-                    .frame(width: 18, height: 18)
+                    .frame(width: 20, height: 20)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .disabled(!bus.canGoPreviousTaskAnswer)
@@ -1228,10 +1259,12 @@ struct PetView: View {
             Text("\(bus.taskAnswerIndex + 1) / \(bus.taskAnswerCount)")
                 .font(.system(size: 10, weight: .medium))
                 .monospacedDigit()
+                .contentTransition(.numericText())
 
             Button { bus.nextTaskAnswer() } label: {
                 Image(systemName: "chevron.right")
-                    .frame(width: 18, height: 18)
+                    .frame(width: 20, height: 20)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .disabled(!bus.canGoNextTaskAnswer)

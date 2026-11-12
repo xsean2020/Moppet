@@ -33,6 +33,13 @@ struct BrainTaskCard: View {
             Text(stageLabel)
                 .font(Airi.caption2Font.weight(.medium))
                 .foregroundStyle(stageColor)
+            if stage == .queued || stage == .running {
+                Text(task.createdAt, style: .timer)
+                    .font(Airi.caption2Font)
+                    .foregroundStyle(Airi.neutral400)
+                    .monospacedDigit()
+                    .help(L("Elapsed time"))
+            }
             if stage != .completed && stage != .failed && stage != .cancelled {
                 Button {
                     onCancel()

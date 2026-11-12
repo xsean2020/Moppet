@@ -95,6 +95,8 @@ struct ChatView: View {
     @State private var scrollProxy: ScrollViewProxy?
     /// Expanded tool-output blocks (lineLimit off).
     @State private var expandedOutputs: Set<Int> = []
+    /// Task result cards expanded by taskID (multi-task answers can be long).
+    @State private var expandedTaskResults: Set<String> = []
     /// 任务条折叠（显示优化）：多任务并行时收起普通行，只留「等你处理」
     /// 的行——需要动手的任务不折叠，其余一眼计数。
     @State private var taskStripExpanded = true
@@ -198,6 +200,7 @@ struct ChatView: View {
             // session (ids are offsets, not content)…
             expandedOutputs = []
             expandedReasoning = []
+            expandedTaskResults = []
             // …and the scroll position belongs to the previous transcript.
             autoFollow = true
             Task { @MainActor in
@@ -619,21 +622,6 @@ struct ChatView: View {
                 .help(L("Web search — server-side search on the ChatGPT backend (codex hosted web_search)"))
             }
 
-            if brain.isRunning || store.scheduler.hasActive {
-                AiriButton(title: L("Stop"), icon: "stop.fill", variant: .destructive) {
-                    // §5.2/§5.11（rev.3 #6）：先 stopEverything（清排队人消息 +
-                    // 取消任务）再 brain.cancel()——否则 cancel 的 .turnSettled
-                    // 会把尚未清空的队列立即续发，违背"全部停止"意图。
-                    store.scheduler.stopEverything()
-                    // 主 agent 空闲（仅任务/排队活跃）时不 cancel：idle 上
-                    // cancel 无 turn 可停，只会写 lastError="cancelled"——
-                    // transcript 尾部多出一条无对应 turn 的「Turn cancelled」
-                    // 幻影 note（残留到下一次提交才清位）。按钮扩为 hasActive
-                    // 可见后必须门控，恢复 HEAD 的一一对应。
-                    if brain.isRunning { brain.cancel() }
-                }
-            }
-
             Picker("Approval", selection: Binding(
                 get: { brain.approvalPolicy },
                 set: { store.brain.approvalPolicy = $0 }
@@ -657,6 +645,23 @@ struct ChatView: View {
             .pickerStyle(.menu)
             .labelsHidden()
             .help(L("Sandbox — Read-only · Workspace write: edits limited to the working directory · Full access (danger)"))
+
+            // Stop lives at the far right so its appearance never shifts the
+            // Approval / Sandbox controls beside it while a run is active.
+            if brain.isRunning || store.scheduler.hasActive {
+                AiriButton(title: L("Stop"), icon: "stop.fill", variant: .destructive) {
+                    // §5.2/§5.11（rev.3 #6）：先 stopEverything（清排队人消息 +
+                    // 取消任务）再 brain.cancel()——否则 cancel 的 .turnSettled
+                    // 会把尚未清空的队列立即续发，违背"全部停止"意图。
+                    store.scheduler.stopEverything()
+                    // 主 agent 空闲（仅任务/排队活跃）时不 cancel：idle 上
+                    // cancel 无 turn 可停，只会写 lastError="cancelled"——
+                    // transcript 尾部多出一条无对应 turn 的「Turn cancelled」
+                    // 幻影 note（残留到下一次提交才清位）。按钮扩为 hasActive
+                    // 可见后必须门控，恢复 HEAD 的一一对应。
+                    if brain.isRunning { brain.cancel() }
+                }
+            }
         }
         .padding(.horizontal, Airi.space3)
         .padding(.vertical, Airi.space2)
@@ -964,10 +969,7 @@ struct ChatView: View {
                         return .handled
                     }
                     .onSubmit { send() }
-                // Secondary action first, primary (Send) rightmost.
-                CircleIconButton(icon: "arrow.counterclockwise") { confirmSessionSwitch(.new) }
-                    .help(L("New chat"))
-                // Send 永远可发：忙时自动转任务车道并行执行。
+                // Send is the primary action — rightmost, always enabled.
                 AiriButton(title: L("Send"), icon: "arrow.up.circle.fill") { send() }
             }
             .padding(Airi.space3)
@@ -1241,6 +1243,8 @@ struct ChatView: View {
     private func taskResultCard(taskID: String, title: String, status: String,
                                 summary: String, usageTokens: Int?) -> some View {
         let ended = store.scheduler.recentEnded.first { $0.id == taskID }
+        let isExpanded = expandedTaskResults.contains(taskID)
+        let canExpand = summary.count > 160
         return VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 6) {
                 Image(systemName: status == "completed" ? "checkmark.circle.fill"
@@ -1266,7 +1270,18 @@ struct ChatView: View {
                     FontSize(12)
                     ForegroundColor(Airi.neutral700)
                 }
-                .lineLimit(6)
+                .lineLimit(isExpanded ? nil : 6)
+            if canExpand {
+                Button {
+                    if isExpanded { expandedTaskResults.remove(taskID) }
+                    else { expandedTaskResults.insert(taskID) }
+                } label: {
+                    Text(isExpanded ? L("Show less") : L("Show more"))
+                        .font(Airi.caption2Font)
+                        .foregroundStyle(Airi.primary)
+                }
+                .buttonStyle(.plain)
+            }
             if let ended, ended.canRetry {
                 AiriButton(title: L("Retry"), icon: "arrow.clockwise", variant: .secondary) {
                     _ = store.scheduler.retry(taskID: taskID)
