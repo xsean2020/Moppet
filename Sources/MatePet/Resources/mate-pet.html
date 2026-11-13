@@ -1,0 +1,1699 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Mate Pet</title>
+<style>
+/* One deliberate transparent stage: the WKWebView is composited over the
+   desktop, so every pixel outside the avatar must stay clear. */
+:root {
+  color-scheme: dark;
+  --pink: #ff8fb3;
+  --pink-hot: #ff5f92;
+  --cream: #fff3e6;
+  --ink: #2b1e22;
+  --shadow: rgba(26, 12, 16, .22);
+}
+html, body {
+  margin: 0; width: 100%; height: 100%;
+  background: transparent; overflow: hidden;
+  -webkit-user-select: none; user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-text-size-adjust: 100%;
+}
+#view {
+  position: fixed; inset: 0; width: 100%; height: 100%;
+  display: block; outline: none; touch-action: none;
+  transition: opacity .45s ease;
+}
+#fx { position: fixed; inset: 0; overflow: hidden; pointer-events: none; z-index: 3; }
+
+/* Loading veil: the panel is revealed as soon as the page is alive, so give
+   the 26 MB VRM a calm, non-white place to land. */
+#veil {
+  position: fixed; inset: 0; z-index: 5;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 12px; pointer-events: none;
+  transition: opacity .45s ease;
+}
+#veil.done { opacity: 0; }
+.veil-ring {
+  width: 38px; height: 38px; border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, .18);
+  border-top-color: var(--pink);
+  animation: spin 1.1s linear infinite;
+  box-shadow: 0 0 18px rgba(255, 143, 179, .35);
+}
+.veil-text {
+  font: 11px/1.4 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+  letter-spacing: .12em; color: rgba(255, 255, 255, .62);
+  text-shadow: 0 1px 4px rgba(0, 0, 0, .55);
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Fallback is only visible when the VRM cannot load: a hand-drawn face keeps
+   the desktop pet present instead of leaving an invisible panel. */
+#fallback {
+  position: fixed; inset: 0; z-index: 6;
+  display: none; flex-direction: column; align-items: center; justify-content: center;
+  gap: 10px; pointer-events: none;
+}
+#fallback.on { display: flex; }
+#fallback svg { width: 72%; max-width: 220px; filter: drop-shadow(0 12px 18px rgba(0, 0, 0, .25)); }
+#fallback .fb-error {
+  max-width: 82%; font: 10px/1.5 ui-monospace, "PingFang SC", monospace;
+  color: rgba(255, 190, 200, .85); text-align: center;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, .6);
+  word-break: break-word;
+}
+
+/* Particles live in DOM, not WebGL: cheap, resolution independent, and they
+   can float above the avatar without another render pass. */
+.fx-heart, .fx-star, .fx-zzz, .fx-spark {
+  position: absolute; left: 50%; top: 50%;
+  transform: translate(-50%, 0);
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif;
+  line-height: 1;
+  animation: float-up 1.55s cubic-bezier(.18, .72, .24, 1) forwards;
+  will-change: transform, opacity;
+  text-shadow: 0 2px 8px rgba(0, 0, 0, .18);
+}
+.fx-heart { color: #ff6f9f; font-size: 18px; }
+.fx-star { color: #ffd166; font-size: 16px; }
+.fx-spark { color: #cdefff; font-size: 10px; }
+.fx-zzz { color: #d9ecff; font-size: 17px; font-weight: 700; animation-duration: 2.2s; }
+@keyframes float-up {
+  0%   { opacity: 0; transform: translate(-50%, 0) scale(.55) rotate(0deg); }
+  16%  { opacity: 1; }
+  100% { opacity: 0; transform: translate(calc(-50% + var(--dx, 0px)), var(--dy, -90px)) scale(1.06) rotate(var(--rot, 0deg)); }
+}
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "./vendor/three.module.js",
+    "three/addons/": "./vendor/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="view"></canvas>
+<div id="fx"></div>
+
+<div id="veil">
+  <div class="veil-ring"></div>
+  <div class="veil-text" id="veil-text">正在唤醒…</div>
+</div>
+
+<div id="fallback">
+  <svg viewBox="0 0 200 200" aria-hidden="true">
+    <defs>
+      <radialGradient id="fbFace" cx="50%" cy="42%" r="62%">
+        <stop offset="0" stop-color="#fff2ea"/><stop offset="1" stop-color="#e9cdbd"/>
+      </radialGradient>
+    </defs>
+    <ellipse cx="100" cy="108" rx="62" ry="58" fill="url(#fbFace)" stroke="#c99b8b" stroke-width="3"/>
+    <path d="M48 66 L35 34 L72 52 Z" fill="#e9cdbd" stroke="#c99b8b" stroke-width="3" stroke-linejoin="round"/>
+    <path d="M152 66 L165 34 L128 52 Z" fill="#e9cdbd" stroke="#c99b8b" stroke-width="3" stroke-linejoin="round"/>
+    <ellipse cx="78" cy="104" rx="7" ry="9" fill="#3a2a2c"/>
+    <ellipse cx="122" cy="104" rx="7" ry="9" fill="#3a2a2c"/>
+    <circle cx="80.5" cy="100.5" r="2.2" fill="#fff"/>
+    <circle cx="124.5" cy="100.5" r="2.2" fill="#fff"/>
+    <ellipse cx="100" cy="128" rx="6" ry="4.5" fill="#e2889f"/>
+    <path d="M84 140 Q100 152 116 140" fill="none" stroke="#a86670" stroke-width="3" stroke-linecap="round"/>
+    <circle cx="60" cy="126" r="7" fill="#ff9db7" opacity=".55"/>
+    <circle cx="140" cy="126" r="7" fill="#ff9db7" opacity=".55"/>
+  </svg>
+  <div class="fb-error" id="fb-error"></div>
+</div>
+
+<script>
+// Surface page-level failures to the native side even if the module graph
+// itself fails to parse (the module's own try/catch never runs then).
+window.addEventListener('error', (event) => {
+  try {
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.matePet) {
+      window.webkit.messageHandlers.matePet.postMessage({ type: 'error', message: String(event.message || event.error || 'page error') });
+    }
+  } catch (_) {}
+});
+window.addEventListener('unhandledrejection', (event) => {
+  try {
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.matePet) {
+      window.webkit.messageHandlers.matePet.postMessage({ type: 'error', message: String((event.reason && event.reason.message) || event.reason || 'unhandled rejection') });
+    }
+  } catch (_) {}
+});
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { VRMLoaderPlugin, VRMUtils } from './vendor/three-vrm.module.js';
+import { VRMAnimationLoaderPlugin, createVRMAnimationClip } from './vendor/three-vrm-animation.module.js';
+
+// ---------------------------------------------------------------------------
+// Bridge
+// ---------------------------------------------------------------------------
+
+const bridge = {
+  post(type, payload = {}) {
+    try {
+      if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.matePet) {
+        window.webkit.messageHandlers.matePet.postMessage({ type, ...payload });
+      }
+    } catch (error) {
+      // A missing native handler only happens in a plain browser preview.
+      console.debug('matePet bridge unavailable', error);
+    }
+  },
+  log(message) { this.post('log', { message: String(message) }); },
+  error(error) {
+    const message = error && error.message ? error.message : String(error);
+    this.post('error', { message });
+    console.error('[MatePet]', error);
+  },
+};
+
+
+// ---------------------------------------------------------------------------
+// Small math helpers
+// ---------------------------------------------------------------------------
+
+const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+const lerp = (a, b, t) => a + (b - a) * t;
+const damp = (a, b, lambda, dt) => lerp(a, b, 1 - Math.exp(-lambda * dt));
+const smooth = (t) => t * t * (3 - 2 * t);
+const DEG = Math.PI / 180;
+
+// ---------------------------------------------------------------------------
+// Web Audio: every sound is synthesised in-page (no audio assets, no CDN)
+// ---------------------------------------------------------------------------
+
+class PetAudio {
+  constructor() {
+    this.ctx = null;
+    this.master = null;
+    this.noiseBuffer = null;
+    this.muted = false;
+    this.danceTimer = null;
+    this.danceVoices = [];
+    this.stepIndex = 0;
+  }
+
+  unlock() {
+    try {
+      if (!this.ctx) {
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        if (!Ctx) return;
+        this.ctx = new Ctx();
+        this.master = this.ctx.createGain();
+        this.master.gain.value = this.muted ? 0 : 0.16;
+        this.master.connect(this.ctx.destination);
+      }
+      if (this.ctx.state === 'suspended') this.ctx.resume();
+    } catch (error) {
+      bridge.log('audio unavailable: ' + error.message);
+    }
+  }
+
+  setMuted(muted) {
+    this.muted = !!muted;
+    if (this.master && this.ctx) {
+      this.master.gain.setTargetAtTime(this.muted ? 0 : 0.16, this.ctx.currentTime, 0.02);
+    }
+  }
+
+  tone(f0, f1, duration, type = 'sine', gain = 0.2, delay = 0) {
+    if (!this.ctx || this.muted) return;
+    const t0 = this.ctx.currentTime + delay;
+    const osc = this.ctx.createOscillator();
+    const amp = this.ctx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(Math.max(20, f0), t0);
+    if (f1 && Math.abs(f1 - f0) > 0.5) {
+      osc.frequency.exponentialRampToValueAtTime(Math.max(20, f1), t0 + duration);
+    }
+    amp.gain.setValueAtTime(0.0001, t0);
+    amp.gain.exponentialRampToValueAtTime(Math.max(0.0002, gain), t0 + 0.012);
+    amp.gain.exponentialRampToValueAtTime(0.0001, t0 + duration);
+    osc.connect(amp);
+    amp.connect(this.master);
+    osc.start(t0);
+    osc.stop(t0 + duration + 0.03);
+  }
+
+  noise(duration, gain = 0.12, delay = 0, filterHz = 1800, type = 'highpass') {
+    if (!this.ctx || this.muted) return;
+    if (!this.noiseBuffer) {
+      const length = Math.floor(this.ctx.sampleRate * 1.2);
+      const buffer = this.ctx.createBuffer(1, length, this.ctx.sampleRate);
+      const data = buffer.getChannelData(0);
+      for (let i = 0; i < length; i++) data[i] = Math.random() * 2 - 1;
+      this.noiseBuffer = buffer;
+    }
+    const t0 = this.ctx.currentTime + delay;
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.noiseBuffer;
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = type;
+    filter.frequency.value = filterHz;
+    const amp = this.ctx.createGain();
+    amp.gain.setValueAtTime(0.0001, t0);
+    amp.gain.exponentialRampToValueAtTime(gain, t0 + 0.008);
+    amp.gain.exponentialRampToValueAtTime(0.0001, t0 + duration);
+    src.connect(filter); filter.connect(amp); amp.connect(this.master);
+    src.start(t0); src.stop(t0 + duration + 0.02);
+  }
+
+  poke() {
+    this.unlock();
+    this.tone(960, 1380, 0.075, 'triangle', 0.16, 0);
+    this.tone(1380, 1080, 0.09, 'sine', 0.10, 0.065);
+    this.noise(0.045, 0.05, 0, 3200, 'highpass');
+  }
+
+  happy() {
+    this.unlock();
+    const notes = [523.25, 659.25, 783.99, 1046.5];
+    notes.forEach((f, i) => this.tone(f, f, 0.09, 'triangle', 0.13, i * 0.055));
+    this.tone(1568, 2093, 0.18, 'sine', 0.06, 0.22);
+  }
+
+  pet() {
+    this.unlock();
+    // A low purr: 46 Hz carrier with a 22 Hz amplitude tremolo.
+    if (!this.ctx || this.muted) return;
+    const t0 = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const trem = this.ctx.createOscillator();
+    const tremGain = this.ctx.createGain();
+    const amp = this.ctx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.value = 46;
+    trem.type = 'sine';
+    trem.frequency.value = 22;
+    tremGain.gain.value = 0.045;
+    amp.gain.value = 0.0001;
+    amp.gain.exponentialRampToValueAtTime(0.11, t0 + 0.08);
+    amp.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.7);
+    trem.connect(tremGain); tremGain.connect(amp.gain);
+    osc.connect(amp); amp.connect(this.master);
+    osc.start(t0); trem.start(t0);
+    osc.stop(t0 + 0.75); trem.stop(t0 + 0.75);
+    this.noise(0.25, 0.025, 0.02, 320, 'lowpass');
+  }
+
+  chibi(on) {
+    this.unlock();
+    const base = on ? 1 : -1;
+    const notes = on ? [880, 1174, 1568, 2093] : [1568, 1174, 880, 659];
+    notes.forEach((f, i) => this.tone(f, f * (1 + 0.03 * base), 0.1, 'sine', 0.10, i * 0.05));
+    this.noise(0.2, 0.05, 0.05, 4200, 'highpass');
+  }
+
+  step() {
+    this.noise(0.035, 0.035, 0, 900, 'bandpass');
+  }
+
+  hide() {
+    this.unlock();
+    this.tone(520, 240, 0.24, 'sine', 0.08, 0);
+    this.noise(0.18, 0.04, 0.02, 1400, 'lowpass');
+  }
+
+  danceStart() {
+    this.unlock();
+    if (!this.ctx || this.danceTimer) return;
+    this.stepIndex = 0;
+    const BPM = 112;
+    const stepMs = (60 / BPM) * 500 / 2; // eighth-note-ish grid
+    const tick = () => {
+      if (!this.ctx) return;
+      const s = this.stepIndex % 16;
+      const t = this.ctx.currentTime;
+      // Kick on 0 and 8, snare-ish noise on 4 and 12, hats every other step.
+      if (s === 0 || s === 8) {
+        this.tone(150, 48, 0.12, 'sine', 0.22);
+      }
+      if (s === 4 || s === 12) {
+        this.noise(0.07, 0.11, 0, 1600, 'highpass');
+      }
+      if (s % 2 === 0) {
+        this.noise(0.025, 0.025, 0, 6500, 'highpass');
+      }
+      const bass = [55, 55, 65.4, 65.4, 73.4, 73.4, 49, 49][Math.floor(s / 2) % 8];
+      if (s % 4 === 0) this.tone(bass, bass, 0.22, 'sawtooth', 0.07);
+      const lead = [523.25, 659.25, 783.99, 659.25, 880, 783.99, 659.25, 587.33];
+      if (s % 2 === 0) this.tone(lead[(this.stepIndex / 2 | 0) % lead.length], 0, 0.12, 'triangle', 0.035);
+      this.stepIndex++;
+    };
+    tick();
+    this.danceTimer = setInterval(tick, stepMs);
+  }
+
+  danceStop() {
+    if (this.danceTimer) {
+      clearInterval(this.danceTimer);
+      this.danceTimer = null;
+    }
+  }
+}
+
+const audio = new PetAudio();
+
+// ---------------------------------------------------------------------------
+// DOM particles
+// ---------------------------------------------------------------------------
+
+const fxLayer = document.getElementById('fx');
+
+function spawnParticle(kind, xPercent, yPercent) {
+  const el = document.createElement('div');
+  el.className = 'fx-' + kind;
+  el.textContent = kind === 'heart' ? '♥' : kind === 'star' ? '★' : kind === 'zzz' ? 'Z' : '✦';
+  el.style.left = (xPercent == null ? 40 + Math.random() * 22 : xPercent) + '%';
+  el.style.top = (yPercent == null ? 46 + Math.random() * 12 : yPercent) + '%';
+  el.style.setProperty('--dx', (Math.random() * 64 - 32).toFixed(1) + 'px');
+  el.style.setProperty('--dy', (-76 - Math.random() * 64).toFixed(1) + 'px');
+  el.style.setProperty('--rot', (Math.random() * 56 - 28).toFixed(1) + 'deg');
+  fxLayer.appendChild(el);
+  setTimeout(() => el.remove(), 2400);
+}
+
+function burst(kind, count = 4, xPercent, yPercent) {
+  for (let i = 0; i < count; i++) {
+    setTimeout(() => spawnParticle(kind, xPercent, yPercent), i * 70);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Three.js stage
+// ---------------------------------------------------------------------------
+
+const canvas = document.getElementById('view');
+const renderer = new THREE.WebGLRenderer({
+  canvas,
+  alpha: true,
+  antialias: true,
+  powerPreference: 'high-performance',
+  premultipliedAlpha: true,
+  // The character probe reads the drawing buffer with canvas.toDataURL;
+  // without this WebKit may hand back a cleared (blank) buffer.
+  preserveDrawingBuffer: true,
+});
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.setSize(window.innerWidth, window.innerHeight, false);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.02;
+renderer.setClearColor(0x000000, 0);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(30, window.innerWidth / Math.max(1, window.innerHeight), 0.05, 40);
+camera.position.set(0, 0.85, 3.6);
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.42));
+scene.add(new THREE.HemisphereLight(0xffffff, 0x7b8aa0, 1.15));
+
+const keyLight = new THREE.DirectionalLight(0xfff5ec, 2.0);
+keyLight.position.set(1.6, 2.4, 2.2);
+scene.add(keyLight);
+
+const fillLight = new THREE.DirectionalLight(0xdfeaff, 0.65);
+fillLight.position.set(-2.2, 1.2, 1.4);
+scene.add(fillLight);
+
+const rimLight = new THREE.DirectionalLight(0xffd7e4, 1.35);
+rimLight.position.set(-0.6, 1.8, -2.4);
+scene.add(rimLight);
+
+function makeShadowTexture() {
+  const c = document.createElement('canvas');
+  c.width = c.height = 256;
+  const g = c.getContext('2d');
+  const grad = g.createRadialGradient(128, 128, 8, 128, 128, 122);
+  grad.addColorStop(0, 'rgba(0,0,0,.34)');
+  grad.addColorStop(0.55, 'rgba(0,0,0,.15)');
+  grad.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 256, 256);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+const shadow = new THREE.Mesh(
+  new THREE.PlaneGeometry(1.25, 0.72),
+  new THREE.MeshBasicMaterial({
+    map: makeShadowTexture(), transparent: true, opacity: 0.95,
+    depthWrite: false, side: THREE.DoubleSide,
+  })
+);
+shadow.rotation.x = -Math.PI / 2;
+shadow.position.y = 0.002;
+shadow.renderOrder = -1;
+scene.add(shadow);
+
+const avatarRoot = new THREE.Group();
+scene.add(avatarRoot);
+
+// ---------------------------------------------------------------------------
+// Rig: pose, expressions, look-at, procedural actions
+// ---------------------------------------------------------------------------
+
+const BONE_NAMES = [
+  'hips', 'spine', 'chest', 'upperChest', 'neck', 'head',
+  'leftShoulder', 'rightShoulder',
+  'leftUpperArm', 'rightUpperArm', 'leftLowerArm', 'rightLowerArm', 'leftHand', 'rightHand',
+  'leftUpperLeg', 'rightUpperLeg', 'leftLowerLeg', 'rightLowerLeg',
+  'leftFoot', 'rightFoot', 'leftToes', 'rightToes',
+  'leftEye', 'rightEye',
+];
+
+class PetRig {
+  constructor(vrm) {
+    this.vrm = vrm;
+    this.root = avatarRoot;
+    this.bones = {};
+    this.raw = {};
+    this.base = {};
+    this.offset = {};
+    this.baseOffset = {
+      leftShoulder: [0, 0, -0.035],
+      rightShoulder: [0, 0, 0.035],
+      leftUpperArm: [-0.02, -0.10, -1.16],
+      rightUpperArm: [-0.02, 0.10, 1.16],
+      leftLowerArm: [0.02, -0.30, -0.14],
+      rightLowerArm: [0.02, 0.30, 0.14],
+      leftHand: [0, 0, -0.05],
+      rightHand: [0, 0, 0.05],
+      leftUpperLeg: [0.01, 0, 0.015],
+      rightUpperLeg: [0.01, 0, -0.015],
+    };
+
+    for (const name of BONE_NAMES) {
+      const bone = vrm.humanoid.getNormalizedBoneNode(name);
+      if (bone) {
+        this.bones[name] = bone;
+        this.base[name] = bone.quaternion.clone();
+        this.offset[name] = new THREE.Euler();
+      }
+      const raw = vrm.humanoid.getRawBoneNode(name);
+      if (raw) this.raw[name] = raw;
+    }
+
+    this.expressionManager = vrm.expressionManager || null;
+    this.expressionNames = this.expressionManager
+      ? this.expressionManager.expressions.map((expression) => expression.expressionName)
+      : [];
+    this.expressionSet = new Set(this.expressionNames);
+    this.expressionCurrent = {};
+    this.expressionNames.forEach((name) => { this.expressionCurrent[name] = 0; });
+
+    const pick = (names) => names.find((name) => this.expressionSet.has(name)) || null;
+    this.expr = {
+      happy: pick(['happy', 'joy', 'Joy', 'Fun']),
+      sad: pick(['sad', 'sorrow', 'Sorrow', 'Sorrow2']),
+      relaxed: pick(['relaxed', 'Fun', 'Fun2']),
+      surprised: pick(['surprised', 'Fun2', 'Fun']),
+      angry: pick(['angry', 'Angry']),
+      blink: pick(['blink', 'Blink']),
+      blinkLeft: pick(['blinkLeft', 'Blink_L']),
+      blinkRight: pick(['blinkRight', 'Blink_R']),
+      aa: pick(['aa', 'A']),
+      ih: pick(['ih', 'I']),
+      ou: pick(['ou', 'U']),
+      ee: pick(['ee', 'E']),
+      oh: pick(['oh', 'O']),
+      lookUp: pick(['lookUp', 'LookUp']),
+      lookDown: pick(['lookDown', 'LookDown']),
+      lookLeft: pick(['lookLeft', 'LookLeft']),
+      lookRight: pick(['lookRight', 'LookRight']),
+      heart: pick(['Heart']),
+      star: pick(['Star']),
+      niyari: pick(['Niyari']),
+      wink: pick(['Wink']),
+    };
+    this.expressionTarget = {};
+
+    // three-vrm's look-at (when the VRM defines it) owns the eye bones; if
+    // absent, the normalized eye bones are driven manually with a small range.
+    this.vrmLookAt = vrm.lookAt || null;
+    this.lookAtTarget = new THREE.Object3D();
+    scene.add(this.lookAtTarget);
+    if (this.vrmLookAt) {
+      this.vrmLookAt.target = this.lookAtTarget;
+      this.vrmLookAt.autoUpdate = true;
+    }
+
+    this.state = 'idle';
+    this.talking = false;
+    this.talkingUntil = 0;
+    this.sayText = '';
+    this.visemeClock = 0;
+    this.visemeIndex = 0;
+    this.look = { x: 0.5, y: 0.5 };
+    this.lookYaw = 0;
+    this.lookPitch = 0;
+
+    this.dragActive = false;
+    this.dragEnergy = { x: 0, y: 0 };
+    this.lean = 0;
+
+    this.mode = null;
+    this.modeStart = 0;
+    this.modeUntil = 0;
+    this.pokeStart = -10000;
+    this.pokeRegion = 'body';
+    this.pokeCount = 0;
+    this.petStart = -10000;
+    this.gesture = null;
+    this.nextGesture = performance.now() + 7000 + Math.random() * 6000;
+    this.nextBlink = performance.now() + 1800 + Math.random() * 2200;
+    this.blinkStart = -10000;
+    this.blink = 0;
+
+    this.chibi = 0;
+    this.chibiTarget = 0;
+    this.lastChibiFit = -1;
+    this.groundOffset = 0;
+
+    this.walkDir = 0;
+    this.lastStepIndex = -1;
+
+    this.jump = 0;
+    this.cameraGoal = new THREE.Vector3(0, 0.85, 3.6);
+    this.cameraLook = new THREE.Vector3(0, 0.85, 0);
+
+    this.baseY = 0;
+    this.modeY = 0;
+
+    this.mixer = new THREE.AnimationMixer(vrm.scene);
+    this.bakedClips = {};
+    this.clipsReady = false;
+    this.currentClip = null;
+    this.clipPlaying = false;
+    this.idleClipIndex = 0;
+    this.nextIdleSwitch = performance.now() + 12000;
+    this.mixer.addEventListener('finished', () => {
+      if (this.mode || this.dragActive || this.walkDir !== 0) return;
+      this.playStateClip();
+    });
+
+    this.applyBasePose();
+    this.measureGround();
+    this.fitCamera(0);
+  }
+
+  // ---- pose primitives -----------------------------------------------------
+
+  addRot(name, x, y, z) {
+    const euler = this.offset[name];
+    if (!euler) return;
+    euler.x += x || 0;
+    euler.y += y || 0;
+    euler.z += z || 0;
+  }
+
+  addBase(name) {
+    const base = this.baseOffset[name];
+    if (!base) return;
+    this.addRot(name, base[0], base[1], base[2]);
+  }
+
+  applyBasePose() {
+    for (const name of Object.keys(this.baseOffset)) this.addBase(name);
+  }
+
+  applyPoseToBones() {
+    const q = new THREE.Quaternion();
+    const euler = new THREE.Euler();
+    for (const name of Object.keys(this.bones)) {
+      const bone = this.bones[name];
+      const offset = this.offset[name];
+      euler.copy(offset);
+      q.setFromEuler(euler);
+      bone.quaternion.copy(this.base[name]).multiply(q);
+    }
+  }
+
+  // ---- look-at -------------------------------------------------------------
+
+  setLook(x, y) {
+    this.look.x = clamp(x, 0, 1);
+    this.look.y = clamp(y, 0, 1);
+  }
+
+  applyLook(t, dt) {
+    const asleep = this.state === 'sleeping';
+    const yaw = (this.look.x * 2 - 1) * 38 * DEG;
+    const pitch = -(this.look.y * 2 - 1) * 24 * DEG;
+    const targetYaw = asleep ? 0 : yaw;
+    const targetPitch = asleep ? 0 : pitch;
+
+    this.lookYaw = damp(this.lookYaw, targetYaw, 9, dt);
+    this.lookPitch = damp(this.lookPitch, targetPitch, 9, dt);
+
+    const weight = asleep ? 0.15 : 1;
+    if (!this.clipPlaying) {
+      this.addRot('head', this.lookPitch * 0.85 * weight, this.lookYaw * 0.85 * weight, 0);
+      this.addRot('neck', this.lookPitch * 0.25 * weight, this.lookYaw * 0.28 * weight, 0);
+      this.addRot('chest', 0, this.lookYaw * 0.12 * weight, 0);
+      this.addRot('spine', 0, this.lookYaw * 0.10 * weight, 0);
+    }
+
+    // If the VRM has no look-at extension, rotate the normalized eye bones.
+    if (!this.vrmLookAt) {
+      this.addRot('leftEye', this.lookPitch * 0.35, this.lookYaw * 0.32, 0);
+      this.addRot('rightEye', this.lookPitch * 0.35, this.lookYaw * 0.32, 0);
+    }
+
+    // Move the look-at target in world space; the head carries the target,
+    // so this is an offset around the chest-facing direction.
+    const targetY = 1.32 + this.lookPitch * 0.6;
+    const targetX = this.lookYaw * 1.2;
+    this.lookAtTarget.position.set(targetX, targetY, 2.6);
+  }
+
+  // ---- blinking ------------------------------------------------------------
+
+  applyBlink(now) {
+    if (now > this.nextBlink) {
+      this.blinkStart = now;
+      this.nextBlink = now + 2100 + Math.random() * 3900;
+      if (Math.random() < 0.18) this.nextBlink = now + 420;
+    }
+    const progress = (now - this.blinkStart) / 150;
+    let value = 0;
+    if (progress >= 0 && progress <= 1) {
+      value = progress < 0.5 ? smooth(progress * 2) : 1 - smooth((progress - 0.5) * 2);
+    }
+    if (this.state === 'sleeping') value = 1;
+    this.blink = value;
+    if (this.expr.blink) this.setExpr(this.expr.blink, value);
+  }
+
+  // ---- expressions ---------------------------------------------------------
+
+  setExpr(name, value) {
+    if (!name) return;
+    this.expressionTarget[name] = Math.max(this.expressionTarget[name] || 0, clamp(value, 0, 1));
+  }
+
+  commitExpressions(dt) {
+    if (!this.expressionManager) return;
+    for (const name of this.expressionNames) {
+      const target = this.expressionTarget[name] || 0;
+      const current = damp(this.expressionCurrent[name] || 0, target, 12, dt);
+      this.expressionCurrent[name] = current;
+      this.expressionManager.setValue(name, current);
+    }
+    this.expressionTarget = {};
+  }
+
+  // ---- state poses ---------------------------------------------------------
+
+  applyIdle(t) {
+    const breath = Math.sin(t * 1.65);
+    const sway = Math.sin(t * 0.48);
+    const shift = Math.sin(t * 0.23);
+
+    this.addRot('spine', -0.012 + breath * 0.012, sway * 0.025, shift * 0.018);
+    this.addRot('chest', breath * 0.018, sway * 0.018, 0);
+    this.addRot('neck', -0.008, sway * 0.02, 0);
+    this.addRot('head', -0.006 + breath * 0.008, sway * 0.045, -shift * 0.018);
+
+    this.addRot('leftUpperArm', Math.sin(t * 0.9) * 0.025 + breath * 0.008, 0, -0.02);
+    this.addRot('rightUpperArm', Math.sin(t * 0.9 + 1.4) * 0.025 + breath * 0.008, 0, 0.02);
+    this.addRot('leftLowerArm', 0, -0.02 + Math.sin(t * 1.1) * 0.012, 0);
+    this.addRot('rightLowerArm', 0, 0.02 + Math.sin(t * 1.1 + 1.2) * 0.012, 0);
+
+    this.addRot('hips', 0, 0, shift * 0.012);
+    this.addRot('leftUpperLeg', 0, 0, shift * 0.015);
+    this.addRot('rightUpperLeg', 0, 0, shift * 0.015);
+  }
+
+  applyState(t, dt) {
+    this.applyIdle(t);
+    const state = this.state;
+
+    if (state === 'thinking') {
+      this.addRot('head', -0.08, 0.2, 0.16);
+      this.addRot('neck', 0.02, 0.1, 0.08);
+      this.addRot('spine', -0.03, 0.04, 0.03);
+      this.addRot('rightUpperArm', -0.15, 0.65, 0.48);
+      this.addRot('rightLowerArm', 0.5, -0.35, -0.95);
+      this.addRot('rightHand', 0.1, -0.2, 0.1);
+      this.setExpr(this.expr.relaxed, 0.55);
+      this.setExpr(this.expr.lookUp, 0.45);
+    } else if (state === 'talking') {
+      this.addRot('head', -0.04 + Math.sin(t * 3.1) * 0.035,
+                  0.03 + Math.sin(t * 1.7) * 0.05,
+                  Math.sin(t * 2.3) * 0.035);
+      this.addRot('chest', Math.sin(t * 3.1) * 0.012, 0, 0);
+      this.addRot('leftUpperArm', 0, -0.14 + Math.sin(t * 2.2) * 0.04, 0.08);
+      this.addRot('rightUpperArm', 0, 0.14 + Math.sin(t * 2.2 + 1.3) * 0.04, -0.08);
+      this.addRot('leftLowerArm', 0.06, -0.12, 0.05);
+      this.addRot('rightLowerArm', 0.06, 0.12, -0.05);
+      this.setExpr(this.expr.happy, 0.35);
+    } else if (state === 'scanning') {
+      const sweep = Math.sin(t * 1.15);
+      this.addRot('head', -0.03, sweep * 0.48, 0.06);
+      this.addRot('neck', 0, sweep * 0.22, 0);
+      this.addRot('chest', 0, sweep * 0.10, 0);
+      this.addRot('rightUpperArm', -0.1, 0.9, 0.95);
+      this.addRot('rightLowerArm', 0.4, -0.4, -1.1);
+      this.addRot('rightHand', 0.2, 0, 0);
+      this.setExpr(this.expr.lookLeft, sweep < 0 ? 0.5 : 0);
+      this.setExpr(this.expr.lookRight, sweep > 0 ? 0.5 : 0);
+    } else if (state === 'cleaning') {
+      const scrub = Math.sin(t * 8.5);
+      this.addRot('spine', 0.09, 0, 0);
+      this.addRot('chest', 0.05, 0, 0);
+      this.addRot('head', 0.06, 0, 0);
+      this.addRot('leftUpperArm', -0.72, -0.55, 0.35);
+      this.addRot('rightUpperArm', -0.72, 0.55, -0.35);
+      this.addRot('leftLowerArm', 0.35, -0.65 + scrub * 0.12, -0.18);
+      this.addRot('rightLowerArm', 0.35, 0.65 - scrub * 0.12, 0.18);
+      this.setExpr(this.expr.angry, 0.16);
+    } else if (state === 'celebrating') {
+      this.addRot('head', -0.08, 0, 0.04);
+      this.addRot('leftUpperArm', -0.3, 0.2, 2.15);
+      this.addRot('rightUpperArm', -0.3, -0.2, -2.15);
+      this.addRot('leftLowerArm', 0, -0.2, 0.2);
+      this.addRot('rightLowerArm', 0, 0.2, -0.2);
+      this.jump = Math.abs(Math.sin(t * 6.2)) * 0.095;
+      this.setExpr(this.expr.happy, 1);
+      this.setExpr(this.expr.star, 0.8);
+      this.setExpr(this.expr.heart, 0.35);
+      if (Math.random() < dt * 6) spawnParticle('star', 34 + Math.random() * 32, 34 + Math.random() * 20);
+    } else if (state === 'sleeping') {
+      this.addRot('head', 0.20, 0.16, 0.22);
+      this.addRot('neck', 0.08, 0.08, 0.08);
+      this.addRot('spine', 0.05, 0, 0.03);
+      this.addRot('chest', 0.03 + Math.sin(t * 1.1) * 0.015, 0, 0);
+      this.addRot('leftUpperArm', 0.05, 0.1, 0.06);
+      this.addRot('rightUpperArm', 0.05, -0.1, -0.06);
+      this.addRot('leftLowerArm', 0.1, -0.1, 0.1);
+      this.addRot('rightLowerArm', 0.1, 0.1, -0.1);
+      this.setExpr(this.expr.blink, 1);
+      this.setExpr(this.expr.relaxed, 0.6);
+      if (Math.random() < dt * 0.8) spawnParticle('zzz', 58 + Math.random() * 10, 42);
+    } else if (state === 'sad') {
+      this.addRot('head', 0.26, -0.05, -0.04);
+      this.addRot('neck', 0.12, 0, 0);
+      this.addRot('spine', 0.10, 0, 0);
+      this.addRot('chest', 0.08, 0, 0);
+      this.addRot('leftUpperArm', 0.14, -0.06, -0.12);
+      this.addRot('rightUpperArm', 0.14, 0.06, 0.12);
+      this.addRot('leftLowerArm', 0.16, 0, 0);
+      this.addRot('rightLowerArm', 0.16, 0, 0);
+      this.setExpr(this.expr.sad, 1);
+    } else {
+      this.setExpr(this.expr.happy, 0.10 + 0.04 * Math.sin(t * 0.6));
+    }
+
+    // Sleeping/talking both keep the body's idle breath; only the pose above
+    // is state-specific.
+    if (state === 'sleeping') {
+      const breath = Math.sin(t * 1.1) * 0.012;
+      this.addRot('chest', breath, 0, 0);
+    }
+  }
+
+  // ---- gestures ------------------------------------------------------------
+
+  applyGesture(now) {
+    if (this.mode || this.dragActive) return;
+    if (!this.gesture && now > this.nextGesture) {
+      const kinds = ['lookAround', 'stretch', 'fixHair', 'weightShift'];
+      const kind = kinds[Math.floor(Math.random() * kinds.length)];
+      const duration = kind === 'lookAround' ? 1.4 : 1.8;
+      this.gesture = { kind, start: now, duration };
+      this.nextGesture = now + 8000 + Math.random() * 9000;
+    }
+    if (!this.gesture) return;
+
+    const p = (now - this.gesture.start) / 1000 / this.gesture.duration;
+    if (p >= 1) { this.gesture = null; return; }
+    const envelope = Math.sin(Math.PI * clamp(p, 0, 1));
+
+    if (this.gesture.kind === 'lookAround') {
+      const angle = Math.sin(p * Math.PI * 2) * 0.32 * envelope;
+      this.addRot('head', -0.03 * envelope, angle, 0);
+      this.addRot('neck', 0, angle * 0.3, 0);
+    } else if (this.gesture.kind === 'stretch') {
+      this.addRot('leftUpperArm', 0, 0, 1.35 * envelope);
+      this.addRot('rightUpperArm', 0, 0, -1.35 * envelope);
+      this.addRot('leftLowerArm', 0, -0.2 * envelope, 0.2 * envelope);
+      this.addRot('rightLowerArm', 0, 0.2 * envelope, -0.2 * envelope);
+      this.addRot('head', -0.1 * envelope, 0, 0);
+    } else if (this.gesture.kind === 'fixHair') {
+      this.addRot('rightUpperArm', -0.2, 0.55, 0.85 * envelope);
+      this.addRot('rightLowerArm', 0.4, -0.2, -1.25 * envelope);
+      this.addRot('head', -0.04, 0.08, 0.10 * envelope);
+    } else {
+      const shift = Math.sin(p * Math.PI * 2) * 0.06 * envelope;
+      this.addRot('hips', 0, 0, shift);
+      this.addRot('spine', 0, 0, -shift * 0.4);
+      this.addRot('head', 0, 0, -shift * 0.3);
+    }
+  }
+
+  // ---- talking / visemes ---------------------------------------------------
+
+  applyTalking(now, dt) {
+    const speaking = this.talking && now < this.talkingUntil;
+    if (!speaking) return;
+    this.visemeClock -= dt;
+    if (this.visemeClock <= 0) {
+      this.visemeClock = 0.07 + Math.random() * 0.08;
+      this.visemeIndex = (this.visemeIndex + 1 + Math.floor(Math.random() * 4)) % 5;
+    }
+    const vowel = [this.expr.aa, this.expr.ih, this.expr.ou, this.expr.ee, this.expr.oh][this.visemeIndex];
+    const amount = 0.42 + 0.22 * Math.abs(Math.sin(now * 0.025));
+    this.setExpr(vowel, amount);
+  }
+
+  // ---- drag ----------------------------------------------------------------
+
+  dragBegan() {
+    this.dragActive = true;
+    this.dragEnergy.x = 0;
+    this.dragEnergy.y = 0;
+    this.playClip('drag', true);
+  }
+
+  dragMoved(dx, dy) {
+    this.dragEnergy.x = this.dragEnergy.x * 0.45 + dx * 0.55;
+    this.dragEnergy.y = this.dragEnergy.y * 0.45 + dy * 0.55;
+  }
+
+  dragEnded(vx, vy) {
+    this.dragActive = false;
+    this.dragEnergy.x = clamp(vx * 0.004, -2.2, 2.2);
+    this.dragEnergy.y = clamp(vy * 0.004, -2.2, 2.2);
+    this.lean = clamp(-this.dragEnergy.x * 0.10, -0.42, 0.42);
+    this.playStateClip();
+  }
+
+  applyDrag(t, dt) {
+    const energy = this.dragEnergy;
+    const lean = clamp(-energy.x * 0.11, -0.4, 0.4);
+    this.lean = damp(this.lean, lean, 9, dt);
+    this.addRot('hips', 0, 0, lean * 0.35);
+    this.addRot('spine', clamp(energy.y * 0.02, -0.12, 0.12), 0, lean * 0.5);
+    this.addRot('chest', 0, 0, lean * 0.25);
+    this.addRot('head', clamp(-energy.y * 0.015, -0.1, 0.1), lean * 0.2, -lean * 0.35);
+
+    this.addRot('leftUpperArm', -0.25, -0.2, 1.75);
+    this.addRot('rightUpperArm', -0.25, 0.2, -1.75);
+    this.addRot('leftLowerArm', 0.25, -0.4, -0.35);
+    this.addRot('rightLowerArm', 0.25, 0.4, 0.35);
+
+    const kick = Math.sin(t * 9) * 0.22;
+    this.addRot('leftUpperLeg', -kick * 0.6, 0, 0);
+    this.addRot('rightUpperLeg', kick * 0.6, 0, 0);
+    this.addRot('leftLowerLeg', 0.35 + kick * 0.2, 0, 0);
+    this.addRot('rightLowerLeg', 0.35 - kick * 0.2, 0, 0);
+    this.setExpr(this.expr.surprised, 0.6);
+  }
+
+  // ---- poke / petting ------------------------------------------------------
+
+  poke(region, count) {
+    this.pokeStart = performance.now();
+    this.pokeRegion = region;
+    this.pokeCount = count;
+    if (region === 'head') {
+      burst('heart', 2, 52 + (Math.random() * 12 - 6), 34);
+      this.setExpr(this.expr.happy, 0.9);
+      this.setExpr(this.expr.wink, count >= 2 ? 0.8 : 0);
+      audio.poke();
+      this.playOneShot('laugh');
+    } else {
+      burst('star', 2, 50, 58);
+      this.setExpr(this.expr.surprised, 0.8);
+      audio.poke();
+      this.playOneShot('happy');
+    }
+  }
+
+  pet() {
+    this.petStart = performance.now();
+    burst('heart', 6, 52, 36);
+    this.setExpr(this.expr.happy, 1);
+    this.setExpr(this.expr.wink, 0.9);
+    this.setExpr(this.expr.heart, 0.8);
+    audio.pet();
+    this.playOneShot('laugh');
+  }
+
+  applyPoke(now) {
+    const elapsed = now - this.pokeStart;
+    if (elapsed > 620) return;
+    const k = 1 - elapsed / 620;
+    const direction = Math.sin(elapsed * 0.02) > 0 ? 1 : -1;
+    if (this.pokeRegion === 'head') {
+      this.addRot('head', -0.22 * k, direction * 0.18 * k, 0.24 * k);
+      this.addRot('neck', -0.06 * k, direction * 0.08 * k, 0.08 * k);
+      this.addRot('spine', 0, 0, -0.04 * k);
+    } else {
+      this.jump += Math.sin((elapsed / 620) * Math.PI) * 0.016;
+      this.addRot('spine', -0.06 * k, 0, 0);
+      this.addRot('leftUpperArm', 0, 0, 0.22 * k);
+      this.addRot('rightUpperArm', 0, 0, -0.22 * k);
+    }
+  }
+
+  applyPet(now) {
+    const elapsed = now - this.petStart;
+    if (elapsed > 1200) return;
+    const k = Math.sin((elapsed / 1200) * Math.PI);
+    this.addRot('head', -0.08 * k, 0.12 * k, 0.12 * k);
+    this.addRot('chest', 0.03 * k, 0, 0);
+    this.setExpr(this.expr.relaxed, 0.7 * k);
+  }
+
+  // ---- dance / walk / hide -------------------------------------------------
+
+  play(action) {
+    const now = performance.now();
+    switch (action) {
+      case 'dance':
+        this.mode = 'dance';
+        this.modeStart = now;
+        this.modeUntil = now + 9000;
+        audio.danceStart();
+        burst('star', 4, 50, 40);
+        this.playClip('dance_0' + (1 + Math.floor(Math.random() * 4)), true);
+        break;
+      case 'hide':
+        this.stopClip();
+        this.mode = 'hide';
+        this.modeStart = now;
+        this.modeUntil = now + 650;
+        audio.hide();
+        break;
+      case 'appear':
+        this.stopClip();
+        this.mode = 'appear';
+        this.modeStart = now;
+        this.modeUntil = now + 650;
+        document.getElementById('view').style.opacity = '0';
+        setTimeout(() => { document.getElementById('view').style.opacity = '1'; }, 30);
+        break;
+      case 'wake':
+        this.stopClip();
+        this.mode = 'wake';
+        this.modeStart = now;
+        this.modeUntil = now + 900;
+        audio.happy();
+        break;
+      case 'poke':
+        this.poke('body', 1);
+        break;
+      case 'pet':
+        this.pet();
+        break;
+      case 'stretch':
+        this.stopClip();
+        this.mode = 'stretch';
+        this.modeStart = now;
+        this.modeUntil = now + 1500;
+        break;
+      case 'wave':
+        this.stopClip();
+        this.mode = 'wave';
+        this.modeStart = now;
+        this.modeUntil = now + 1800;
+        break;
+      case 'chibiOn':
+        this.setChibi(true);
+        break;
+      case 'chibiOff':
+        this.setChibi(false);
+        break;
+      case 'walkLeft':
+        this.walkDir = -1;
+        this.playClip('walk_left', true);
+        break;
+      case 'walkRight':
+        this.walkDir = 1;
+        this.playClip('walk_right', true);
+        break;
+      case 'stopWalk':
+        this.walkDir = 0;
+        this.playStateClip();
+        break;
+      default:
+        break;
+    }
+  }
+
+  endMode() {
+    if (this.mode === 'dance') {
+      audio.danceStop();
+      this.stopClip();
+    }
+    if (this.mode === 'hide') bridge.post('hideFinished');
+    this.mode = null;
+    this.playStateClip();
+  }
+
+  applyMode(now, t, dt) {
+    if (!this.mode) return false;
+    const elapsed = (now - this.modeStart) / 1000;
+    const total = (this.modeUntil - this.modeStart) / 1000;
+
+    if (this.mode === 'dance') {
+      const beat = t * 5.4;
+      const side = Math.sin(beat);
+      this.addRot('hips', 0, 0, side * 0.18);
+      this.addRot('spine', 0.03 * Math.cos(beat), 0, -side * 0.12);
+      this.addRot('chest', 0, 0, -side * 0.08);
+      this.addRot('neck', -0.03, side * 0.12, 0);
+      this.addRot('head', -0.06 + Math.abs(Math.sin(beat)) * 0.06, side * 0.20, -side * 0.08);
+      const arm = Math.sin(beat);
+      this.addRot('leftUpperArm', -0.35, 0.1, 1.35 + arm * 0.65);
+      this.addRot('rightUpperArm', -0.35, -0.1, -1.35 - arm * 0.65);
+      this.addRot('leftLowerArm', 0.2, -0.4, 0.2 + arm * 0.2);
+      this.addRot('rightLowerArm', 0.2, 0.4, -0.2 - arm * 0.2);
+      const step = Math.sin(beat * 2);
+      this.addRot('leftUpperLeg', -step * 0.25, 0, 0);
+      this.addRot('rightUpperLeg', step * 0.25, 0, 0);
+      this.addRot('leftLowerLeg', 0.25 + step * 0.15, 0, 0);
+      this.addRot('rightLowerLeg', 0.25 - step * 0.15, 0, 0);
+      this.jump = Math.abs(Math.sin(beat)) * 0.035;
+      this.setExpr(this.expr.happy, 1);
+      this.setExpr(this.expr.star, 0.65);
+      return true;
+    }
+
+    if (this.mode === 'hide') {
+      const p = clamp(elapsed / total, 0, 1);
+      const drop = smooth(p);
+      this.modeY = -drop * 0.95;
+      this.addRot('head', 0.25 * drop, 0, 0.18 * drop);
+      this.addRot('spine', 0.18 * drop, 0, 0);
+      this.setExpr(this.expr.sad, 0.4);
+      return true;
+    }
+
+    if (this.mode === 'appear') {
+      const p = clamp(elapsed / total, 0, 1);
+      const rise = 1 - smooth(p);
+      this.modeY = -rise * 0.8;
+      this.addRot('head', -0.05 * (1 - p), 0, 0);
+      return true;
+    }
+
+    if (this.mode === 'wake') {
+      const p = clamp(elapsed / total, 0, 1);
+      const stretch = Math.sin(p * Math.PI);
+      this.addRot('leftUpperArm', 0, 0, 1.1 * stretch);
+      this.addRot('rightUpperArm', 0, 0, -1.1 * stretch);
+      this.addRot('head', -0.08 * stretch, 0, 0);
+      this.setExpr(this.expr.happy, 0.7 * stretch);
+      return true;
+    }
+
+    if (this.mode === 'stretch') {
+      const p = clamp(elapsed / total, 0, 1);
+      const stretch = Math.sin(p * Math.PI);
+      this.addRot('leftUpperArm', 0, 0, 1.65 * stretch);
+      this.addRot('rightUpperArm', 0, 0, -1.65 * stretch);
+      this.addRot('leftLowerArm', 0, -0.35 * stretch, 0.3 * stretch);
+      this.addRot('rightLowerArm', 0, 0.35 * stretch, -0.3 * stretch);
+      this.addRot('head', -0.14 * stretch, 0, 0);
+      this.jump = 0.02 * stretch;
+      this.setExpr(this.expr.relaxed, 0.55 * stretch);
+      return true;
+    }
+
+    if (this.mode === 'wave') {
+      const p = clamp(elapsed / total, 0, 1);
+      const wave = Math.sin(p * Math.PI * 6) * 0.22;
+      this.addRot('rightUpperArm', -0.35, 0.3, 1.75);
+      this.addRot('rightLowerArm', 0, 0.1, -0.95 + wave);
+      this.addRot('head', -0.03, 0.08, 0.08);
+      this.setExpr(this.expr.happy, 0.7);
+      return true;
+    }
+
+    return false;
+  }
+
+  applyWalk(t, dt) {
+    if (!this.walkDir || this.mode || this.clipPlaying) return;
+    const phase = t * 9;
+    const swing = Math.sin(phase);
+    this.addRot('leftUpperLeg', -swing * 0.34, 0, 0);
+    this.addRot('rightUpperLeg', swing * 0.34, 0, 0);
+    this.addRot('leftLowerLeg', 0.12 + Math.max(0, swing) * 0.35, 0, 0);
+    this.addRot('rightLowerLeg', 0.12 + Math.max(0, -swing) * 0.35, 0, 0);
+    this.addRot('leftUpperArm', 0, 0, -swing * 0.28);
+    this.addRot('rightUpperArm', 0, 0, swing * 0.28);
+    this.addRot('spine', -0.02, 0, Math.sin(phase * 2) * 0.02);
+    this.addRot('head', 0, 0, Math.sin(phase) * 0.02);
+    this.jump = Math.abs(Math.sin(phase)) * 0.012;
+    const stepIndex = Math.floor(phase / Math.PI);
+    if (stepIndex !== this.lastStepIndex) {
+      this.lastStepIndex = stepIndex;
+      audio.step();
+    }
+    this.setExpr(this.expr.happy, 0.18);
+  }
+
+  // ---- chibi ---------------------------------------------------------------
+
+  setChibi(on, silent = false) {
+    this.chibiTarget = on ? 1 : 0;
+    if (silent) return;
+    audio.chibi(on);
+    burst('spark', on ? 8 : 4, 50, 55);
+  }
+
+  applyChibi(dt) {
+    this.chibi = damp(this.chibi, this.chibiTarget, 7, dt);
+    // Mate-Engine's ChibiToggle: armature ×0.3, head ×2.7 relative,
+    // upper legs ×0.6 relative. The same ratios keep the head huge compared
+    // with the tiny body without making the world-space head gigantic.
+    const scale = 1 - 0.68 * this.chibi;
+    this.root.scale.setScalar(scale);
+    if (this.raw.head) {
+      const headScale = 1 + 1.7 * this.chibi;
+      this.raw.head.scale.setScalar(headScale);
+    }
+    // Upper legs shrink to 0.6 like ChibiToggle.cs. Scaling them up (the old
+    // 2.0) stretched the legs out of the skirt and left the sleeves reading as
+    // detached from the hands.
+    if (this.raw.leftUpperLeg) this.raw.leftUpperLeg.scale.setScalar(1 - 0.4 * this.chibi);
+    if (this.raw.rightUpperLeg) this.raw.rightUpperLeg.scale.setScalar(1 - 0.4 * this.chibi);
+
+    if (Math.abs(this.chibi - this.lastChibiFit) > 0.015) {
+      this.lastChibiFit = this.chibi;
+      this.measureGround();
+      this.fitCamera(this.chibi);
+    }
+  }
+
+  measureGround() {
+    const savedY = this.root.position.y;
+    this.root.position.y = 0;
+    this.root.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(this.root);
+    this.groundOffset = Number.isFinite(box.min.y) ? -box.min.y : 0;
+    // Real bounds drive the camera fit: hardcoded heights clipped the chibi
+    // head because head-bone scaling changes the silhouette far more than a
+    // uniform root scale suggests.
+    if (Number.isFinite(box.max.y)) {
+      this.measuredHeight = Math.max(0.25, box.max.y - box.min.y);
+      this.measuredWidth = Math.max(0.2, box.max.x - box.min.x);
+    }
+    this.root.position.y = savedY;
+  }
+
+  fitCamera(chibiMix = 0) {
+    // Fixed stage framing with a Chibi-aware dolly. Skinned bboxes report the
+    // bind pose (bone scaling is invisible to Box3), so measure nothing: the
+    // chibi silhouette is ~0.7m tall at root ×0.32, and blending the stage by
+    // 0.30 keeps the pet filling the panel in both modes without clipping.
+    const stage = 1 - 0.30 * chibiMix;
+    const height = 1.55 * stage;
+    const width = 1.35 * stage;
+    const vFov = camera.fov * DEG;
+    const hFov = 2 * Math.atan(Math.tan(vFov / 2) * camera.aspect);
+    const distanceV = (height * 0.5) / Math.tan(vFov / 2);
+    const distanceH = (width * 0.5) / Math.tan(hFov / 2);
+    const distance = Math.max(distanceV, distanceH) * 1.22;
+    // Chibi keeps a little floor margin: its baked clips dip the hips, and the
+    // fixed stage must not push the feet through the bottom edge.
+    const lookY = height * (0.50 - 0.03 * chibiMix);
+    this.cameraGoal.set(0, lookY + height * 0.02, distance);
+    this.cameraLook.set(0, lookY, 0);
+  }
+
+  resize() {
+    const width = window.innerWidth;
+    const height = Math.max(1, window.innerHeight);
+    renderer.setSize(width, height, false);
+    camera.aspect = width / height;
+    camera.updateProjectionMatrix();
+    this.fitCamera(this.chibi);
+  }
+
+  // ---- frame ---------------------------------------------------------------
+
+  update(dt, now) {
+    const t = now / 1000;
+    this.jump = 0;
+    this.modeY = 0;
+    this.dragEnergy.x = damp(this.dragEnergy.x, 0, 7, dt);
+    this.dragEnergy.y = damp(this.dragEnergy.y, 0, 7, dt);
+    for (const name of Object.keys(this.offset)) this.offset[name].set(0, 0, 0);
+    const procedural = !this.clipPlaying;
+
+    if (procedural) {
+      this.applyBasePose();
+      const modePose = this.applyMode(now, t, dt);
+      if (!modePose) this.applyState(t, dt);
+
+      if (this.dragActive) {
+        this.applyDrag(t, dt);
+      } else {
+        this.lean = damp(this.lean, 0, 7, dt);
+        this.dragEnergy.x *= Math.exp(-dt * 10);
+        this.dragEnergy.y *= Math.exp(-dt * 10);
+        this.addRot('hips', 0, 0, this.lean * 0.4);
+        this.addRot('spine', 0, 0, this.lean * 0.35);
+      }
+
+      this.applyGesture(now);
+      this.applyPoke(now);
+      this.applyPet(now);
+      this.applyWalk(t, dt);
+    }
+
+    this.applyLook(t, dt);
+    this.applyTalking(now, dt);
+    this.applyBlink(now);
+    if (!procedural) this.applyStateExpressions();
+
+    if (procedural) {
+      this.applyPoseToBones();
+    }
+    this.mixer.update(dt);
+
+    if (this.clipPlaying && this.state === 'idle' && !this.mode
+        && !this.dragActive && this.walkDir === 0
+        && this.currentClip && this.currentClip.startsWith('idle_')
+        && now >= this.nextIdleSwitch) {
+      this.idleClipIndex = (this.idleClipIndex + 1) % 4;
+      this.playClip('idle_0' + (this.idleClipIndex + 1), true);
+      this.nextIdleSwitch = now + 12000;
+    }
+
+    this.applyChibi(dt);
+
+    // Root motion: ground offset + jump. The drag lean is applied to the hips
+    // and spine above; the root itself stays upright so the contact shadow
+    // does not stretch with the body.
+    this.root.position.y = this.groundOffset + this.jump + this.modeY;
+
+    // Shadow reacts to height: farther from the ground = smaller and softer.
+    const lift = clamp(this.jump / 0.10, 0, 1);
+    shadow.scale.setScalar(1 - lift * 0.25);
+    shadow.material.opacity = 0.95 - lift * 0.35;
+
+    // Camera follows the chibi/height goal smoothly.
+    camera.position.x = damp(camera.position.x, this.cameraGoal.x, 6, dt);
+    camera.position.y = damp(camera.position.y, this.cameraGoal.y, 6, dt);
+    camera.position.z = damp(camera.position.z, this.cameraGoal.z, 6, dt);
+    this.cameraLook.x = damp(this.cameraLook.x, 0, 6, dt);
+    this.cameraLook.y = damp(this.cameraLook.y, this.cameraGoal.y, 6, dt);
+    this.cameraLook.z = damp(this.cameraLook.z, 0, 6, dt);
+    camera.lookAt(this.cameraLook);
+
+    this.commitExpressions(dt);
+    this.vrm.update(dt);
+
+    if (this.mode && now >= this.modeUntil) this.endMode();
+  }
+
+  // ---- offline-baked VRMA clips -------------------------------------------
+
+  async loadBakedClips(vrm, gltfLoader) {
+    await Promise.all(BAKED_CLIP_NAMES.map(async (name) => {
+      try {
+        const gltf = await gltfLoader.loadAsync('./Animations/' + name + '.vrma');
+        const animation = gltf.userData.vrmAnimations && gltf.userData.vrmAnimations[0];
+        if (!animation) return;
+        this.bakedClips[name] = createVRMAnimationClip(animation, vrm);
+      } catch (error) {
+        console.warn('[MatePet] VRMA load failed:', name, error);
+      }
+    }));
+    this.clipsReady = true;
+    bridge.log('baked clips ready: ' + Object.keys(this.bakedClips).length);
+    if (this.state === 'idle' && !this.mode && !this.dragActive && this.walkDir === 0) {
+      this.playStateClip();
+    }
+  }
+
+  stateClip(state) {
+    switch (state) {
+      case 'idle': return 'idle_0' + (this.idleClipIndex + 1);
+      case 'thinking': return 'pose_01';
+      case 'talking': return 'idle_0' + (this.idleClipIndex + 1);
+      case 'scanning': return 'pose_01';
+      case 'cleaning': return 'idle_0' + (this.idleClipIndex + 1);
+      case 'celebrating': return 'happy';
+      case 'sleeping': return 'sleep';
+      case 'sad': return 'shy';
+      default: return 'idle_01';
+    }
+  }
+
+  playClip(name, loops = true) {
+    const clip = this.bakedClips[name];
+    if (!clip) return false;
+    this.mixer.stopAllAction();
+    const action = this.mixer.clipAction(clip);
+    action.reset();
+    action.enabled = true;
+    action.setEffectiveWeight(1);
+    action.setLoop(loops ? THREE.LoopRepeat : THREE.LoopOnce, loops ? Infinity : 1);
+    action.clampWhenFinished = !loops;
+    action.play();
+    this.currentClip = name;
+    this.clipPlaying = true;
+    this.currentAction = action;
+    return true;
+  }
+
+  playStateClip() {
+    if (!this.clipsReady || this.mode || this.dragActive || this.walkDir !== 0) return;
+    if (this.playClip(this.stateClip(this.state), true) && this.state === 'idle') {
+      this.nextIdleSwitch = performance.now() + 12000;
+    }
+  }
+
+  setWalking(direction) {
+    const next = Math.max(-1, Math.min(1, direction));
+    if (next === this.walkDir) return;
+    this.walkDir = next;
+    if (next === 0) {
+      this.playStateClip();
+    } else {
+      this.playClip(next < 0 ? 'walk_left' : 'walk_right', true);
+    }
+  }
+
+  stopClip() {
+    this.mixer.stopAllAction();
+    this.currentClip = null;
+    this.currentAction = null;
+    this.clipPlaying = false;
+  }
+
+  playOneShot(name) {
+    if (!this.playClip(name, false)) return;
+    this.oneShotGeneration = (this.oneShotGeneration || 0) + 1;
+    const generation = this.oneShotGeneration;
+    const clip = this.bakedClips[name];
+    const seconds = clip ? clip.duration : 1.2;
+    setTimeout(() => {
+      if (this.oneShotGeneration !== generation) return;
+      if (this.mode || this.dragActive || this.walkDir !== 0) return;
+      this.playStateClip();
+    }, Math.max(0.4, seconds) * 1000);
+  }
+
+  applyStateExpressions() {
+    switch (this.state) {
+      case 'celebrating':
+        this.setExpr(this.expr.happy, 1);
+        this.setExpr(this.expr.star, 0.8);
+        this.setExpr(this.expr.heart, 0.35);
+        break;
+      case 'sleeping':
+        this.setExpr(this.expr.blink, 1);
+        this.setExpr(this.expr.relaxed, 0.6);
+        break;
+      case 'sad':
+        this.setExpr(this.expr.sad, 1);
+        break;
+      case 'thinking':
+        this.setExpr(this.expr.relaxed, 0.55);
+        this.setExpr(this.expr.lookUp, 0.45);
+        break;
+      case 'talking':
+        this.setExpr(this.expr.happy, 0.35);
+        break;
+      default:
+        break;
+    }
+  }
+
+  setState(state) {
+    if (this.state === state) return;
+    this.state = state;
+    if (state === 'sleeping') {
+      this.gesture = null;
+    }
+    this.playStateClip();
+  }
+
+  setTalking(on) {
+    this.talking = !!on;
+    this.talkingUntil = on ? Infinity : 0;
+    this.visemeClock = 0;
+  }
+
+  say(text, seconds) {
+    this.sayText = String(text || '');
+    const duration = seconds != null ? seconds : clamp(1.2 + this.sayText.length * 0.035, 1.2, 6.5);
+    this.talking = true;
+    this.talkingUntil = performance.now() + duration * 1000;
+    this.visemeClock = 0;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Load VRM
+// ---------------------------------------------------------------------------
+
+let rig = null;
+let paused = false;
+let lastFrame = performance.now();
+const clock = new THREE.Clock();
+
+function setVeilText(text) {
+  const el = document.getElementById('veil-text');
+  if (el) el.textContent = text;
+}
+
+function captureCanvas() {
+  try {
+    renderer.render(scene, camera);
+    const url = canvas.toDataURL('image/png');
+    const comma = url.indexOf(',');
+    bridge.post('snapshot', { data: comma >= 0 ? url.slice(comma + 1) : '' });
+  } catch (error) {
+    bridge.error(error);
+  }
+}
+
+function finishLoading() {
+  const veil = document.getElementById('veil');
+  if (veil) {
+    veil.classList.add('done');
+    setTimeout(() => veil.remove(), 700);
+  }
+  bridge.post('modelReady');
+  const probeParams = new URLSearchParams(location.search);
+  if (probeParams.has('probe')) {
+    // Character probe: wait for the baked clips (or 5s) so the shot shows the
+    // real Mate animation, then render synchronously. A second frame is
+    // attempted after 900ms in case WebKit throttles the first paint.
+    const finishProbe = () => {
+      const s = probeParams.get('state');
+      if (s === 'dance') rig.play('dance');
+      else if (s) rig.setState(s);
+      if (probeParams.get('chibi') === '1') {
+        rig.chibi = 1;
+        rig.chibiTarget = 1;
+        rig.applyChibi(1 / 60);
+        rig.measureGround();
+        rig.fitCamera(1);
+        camera.position.copy(rig.cameraGoal);
+      }
+      rig.update(1 / 60, performance.now());
+      renderer.render(scene, camera);
+      captureCanvas();
+      setTimeout(captureCanvas, 900);
+    };
+    if (rig.clipLoadPromise) {
+      Promise.race([
+        rig.clipLoadPromise,
+        new Promise((resolve) => setTimeout(resolve, 5000)),
+      ]).then(finishProbe);
+    } else {
+      finishProbe();
+    }
+  }
+}
+
+function showFallback(message) {
+  const fallback = document.getElementById('fallback');
+  const error = document.getElementById('fb-error');
+  if (error) error.textContent = message;
+  if (fallback) fallback.classList.add('on');
+  const veil = document.getElementById('veil');
+  if (veil) veil.remove();
+}
+
+window.__matePetWantedChibi = false;
+
+const loader = new GLTFLoader();
+loader.register((parser) => new VRMLoaderPlugin(parser));
+
+// Offline-baked Unity Humanoid clips (Unity -> VRMA).
+const animationLoader = new GLTFLoader();
+animationLoader.register((parser) => new VRMAnimationLoaderPlugin(parser));
+const BAKED_CLIP_NAMES = [
+  'idle_01', 'idle_02', 'idle_03', 'idle_04',
+  'happy', 'laugh', 'drag', 'shy',
+  'dance_01', 'dance_02', 'dance_03', 'dance_04',
+  'sleep', 'walk_left', 'walk_right', 'hide', 'pose_01', 'intro',
+];
+
+loader.load(
+  './Zome.vrm',
+  (gltf) => {
+    try {
+      const vrm = gltf.userData.vrm;
+      if (!vrm) throw new Error('VRM extension missing');
+      VRMUtils.rotateVRM0(vrm);
+      vrm.scene.traverse((node) => {
+        if (node.isMesh || node.isSkinnedMesh) node.frustumCulled = false;
+      });
+      avatarRoot.add(vrm.scene);
+      rig = new PetRig(vrm);
+      rig.clipLoadPromise = rig.loadBakedClips(vrm, animationLoader);
+      const params = new URLSearchParams(location.search);
+      if (params.get('chibi') === '1' || window.__matePetWantedChibi === true) rig.setChibi(true, true);
+      if (params.get('muted') === '1') audio.setMuted(true);
+      const probeState = params.get('state');
+      if (probeState === 'dance') rig.play('dance');
+      else if (probeState) rig.setState(probeState);
+      rig.resize();
+      finishLoading();
+    } catch (error) {
+      showFallback('VRM 加载失败：' + (error.message || error));
+      bridge.error(error);
+    }
+  },
+  (event) => {
+    if (event && event.total) {
+      const percent = Math.min(99, Math.round((event.loaded / event.total) * 100));
+      setVeilText('正在唤醒… ' + percent + '%');
+    }
+  },
+  (error) => {
+    const message = error && error.message ? error.message : String(error);
+    showFallback('Zome.vrm 加载失败：' + message);
+    bridge.error(error);
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Render loop
+// ---------------------------------------------------------------------------
+
+function animate() {
+  requestAnimationFrame(animate);
+  if (paused) { clock.getDelta(); return; }
+  const now = performance.now();
+  const dt = Math.min(0.05, Math.max(0.001, clock.getDelta()));
+  if (rig) rig.update(dt, now);
+  shadow.visible = !!rig;
+  renderer.render(scene, camera);
+  lastFrame = now;
+}
+
+window.addEventListener('resize', () => {
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  if (rig) rig.resize();
+  else {
+    renderer.setSize(window.innerWidth, window.innerHeight, false);
+    camera.aspect = window.innerWidth / Math.max(1, window.innerHeight);
+    camera.updateProjectionMatrix();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Native command surface
+// ---------------------------------------------------------------------------
+
+window.matePet = {
+  receive(message) {
+    if (!message || !message.cmd) return;
+    const cmd = message.cmd;
+    const value = message.value;
+
+    // Settings that can arrive before the VRM is ready: keep them for the
+    // loader instead of dropping them.
+    if (cmd === 'setChibi') {
+      const chibiOn = (value && typeof value === 'object') ? !!value.on : !!value;
+      const silent = (value && typeof value === 'object') ? !!value.silent : false;
+      window.__matePetWantedChibi = chibiOn;
+      if (rig) rig.setChibi(chibiOn, silent);
+      return;
+    }
+    if (cmd === 'setMuted') {
+      audio.setMuted(!!value);
+      return;
+    }
+    if (cmd === 'audioUnlock') {
+      audio.unlock();
+      return;
+    }
+    if (!rig) return;
+
+    switch (cmd) {
+      case 'setState':
+        rig.setState(String(value || 'idle'));
+        break;
+      case 'setTalking':
+        rig.setTalking(!!value);
+        break;
+      case 'say':
+        if (value && typeof value === 'object') {
+          rig.say(String(value.text || ''), value.seconds != null ? Number(value.seconds) : null);
+        }
+        break;
+      case 'look':
+        if (value) rig.setLook(Number(value.x), Number(value.y));
+        break;
+      case 'dragBegan':
+        rig.dragBegan();
+        break;
+      case 'dragMoved':
+        if (value) rig.dragMoved(Number(value.dx) || 0, Number(value.dy) || 0);
+        break;
+      case 'dragEnded':
+        if (value) rig.dragEnded(Number(value.vx) || 0, Number(value.vy) || 0);
+        break;
+      case 'poke':
+        if (value) rig.poke(String(value.region || 'body'), Number(value.count) || 1);
+        break;
+      case 'play':
+        rig.play(String(value || ''));
+        break;
+      case 'setWalking':
+        rig.setWalking(Math.max(-1, Math.min(1, Number(value) || 0)));
+        break;
+      case 'setPaused':
+        paused = !!value;
+        if (!paused) clock.getDelta();
+        break;
+      case 'capture':
+        captureCanvas();
+        break;
+      default:
+        break;
+    }
+  },
+};
+
+// Tell the host the page is alive so it can reveal the panel; the model may
+// still be streaming in behind the veil.
+bridge.post('ready');
+animate();
+</script>
+</body>
+</html>

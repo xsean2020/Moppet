@@ -1,7 +1,7 @@
 import SwiftUI
 import AppKit
-import SceneKit
 import Observation
+import MatePet
 
 /// Borderless panels refuse key status by default, which would starve the
 /// quick-chat input of keyboard focus — override it (spotlight-style).
@@ -60,7 +60,7 @@ enum PetSettings {
 
 /// airi-style desktop pet: a transparent, borderless, always-on-top panel
 /// (stage-tamagotchi's window config: no frame, no shadow, floating level,
-/// visible on all spaces) hosting the mole mascot. The panel is pure AppKit
+/// visible on all spaces) hosting the MatePet avatar. The panel is pure AppKit
 /// and fully independent of the SwiftUI scene lifecycle — the pet keeps
 /// running when every document window is closed, and can reopen them via
 /// `WindowRouter`.
@@ -71,27 +71,96 @@ final class PetPanelController {
 
     private var panel: NSPanel?
 
+    /// Native RealityKit on macOS 15+, WKWebView + three-vrm on macOS 14.
+    /// `MOPPET_PET_WEBVIEW=1` forces the compatibility renderer (useful when
+    /// diagnosing a native/RealityKit regression without rebuilding).
+    private lazy var engine: any MatePetRendering = {
+        let engine: any MatePetRendering
+        if ProcessInfo.processInfo.environment["MOPPET_PET_WEBVIEW"] == "1" {
+            engine = MatePetEngine()
+        } else if #available(macOS 15.0, *) {
+            engine = MatePetNativeEngine()
+        } else {
+            engine = MatePetEngine()
+        }
+        engine.onEvent = { [weak self] event in
+            self?.handle(event)
+        }
+        return engine
+    }()
+
+    private func handle(_ event: MatePetEvent) {
+        switch event {
+        case .ready:
+            revealPanel()
+            engine.syncPreferences()
+        case .modelReady:
+            MatePetWander.shared.refresh()
+        case .loadError(let message):
+            FileHandle.standardError.write(Data("mate-pet: \(message)\n".utf8))
+            revealPanel()
+        case .hideFinished:
+            hide()
+        case .log, .petted:
+            break
+        }
+    }
+
+    private func revealPanel() {
+        guard let panel else { return }
+        if panel.alphaValue < 1 {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.35
+                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                panel.animator().alphaValue = 1
+            }
+        }
+    }
+
     func show() {
+        if panel == nil { buildPanel() }
+        panel?.orderFrontRegardless()
+        engine.setPaused(false)
+        if engine.isPageReady { revealPanel() }
+        MatePetWander.shared.refresh()
         if panel == nil { buildPanel() }
         panel?.orderFrontRegardless()
         PetPanelVisibilityFlag.shared.visible = true
         // The pet panel can present model questions (request_user_input).
         UserInputCenter.petSurfaceVisible = true
-        // Safety net: if the first-frame reveal callback never fires
-        // (SceneKit failure, unusual display setup), never leave the
-        // panel stuck invisible.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak panel] in
-            if let panel, panel.alphaValue < 0.01 { panel.animator().alphaValue = 1 }
+        // Safety net: if the page-ready event never fires (WKWebView failure,
+        // unusual display setup), never leave the panel stuck invisible.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+            guard let self, let panel = self.panel, panel.isVisible else { return }
+            self.revealPanel()
+        }
+    }
+
+    /// Menu-facing hide: let the avatar crouch out of frame first, then
+    /// order the panel out (the page also emits hideFinished as a backup).
+    func hideWithAnimation() {
+        engine.play(.hide)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [weak self] in
+            self?.hide()
         }
     }
 
     func hide() {
+        engine.setPaused(true)
+        MatePetWander.shared.suspend()
         panel?.orderOut(nil)
         UserInputCenter.petSurfaceVisible = false
         PetPanelVisibilityFlag.shared.visible = false
     }
 
     var isVisible: Bool { panel?.isVisible ?? false }
+
+    /// Host accessors for the locomotion helper (MatePetWander).
+    var petPanel: NSPanel? { panel }
+
+    func setPetWalking(_ direction: Int) {
+        engine.setWalking(direction)
+    }
 
     /// Screen the pet panel currently sits on (for sibling floaters like the
     /// quick-chat bar that must appear next to the pet, not on NSScreen.main).
@@ -165,10 +234,10 @@ final class PetPanelController {
         panel.ignoresMouseEvents = false
 
         // PetPanelHostingView (not plain NSHostingView): the panel can be
-        // much wider than the mole while a wide answer is showing, and its
-        // hitTest falls through everywhere except real content (mole,
+        // much wider than the avatar while a wide answer is showing, and its
+        // hitTest falls through everywhere except real content (avatar,
         // bubble, cards) — see PetPanelHostingView.
-        let view = PetPanelHostingView(rootView: PetView(panel: panel))
+        let view = PetPanelHostingView(rootView: PetView(panel: panel, engine: engine))
         panel.contentView = view
 
         // Restore the last dragged position when it still overlaps a real
@@ -191,18 +260,25 @@ final class PetPanelController {
         // Persist drags so relaunch keeps the pet where the user put it.
         moveObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.didMoveNotification, object: panel, queue: .main
-        ) { [weak panel] _ in
-            guard let panel else { return }
-            PetSettings.savedFrame = panel.frame
+        ) { [weak self, weak panel] _ in
+            Task { @MainActor in
+                guard let self, let panel else { return }
+                // Locomotion moves the window at 30 Hz; persisting every step
+                // would encode JSON into UserDefaults sixty times a second.
+                let now = Date()
+                guard now.timeIntervalSince(self.lastFrameSave) > 0.4 else { return }
+                self.lastFrameSave = now
+                PetSettings.savedFrame = panel.frame
+            }
         }
-        // Reveal happens on the first rendered SceneKit frame (see
-        // SceneReadyCoordinator) so the lazily-loaded pet never shows the
-        // window's white backing store while the scene warms up.
+        // Reveal on the page-ready event (see `handle`) so the transparent
+        // panel never flashes its backing store while WKWebView warms up.
         panel.alphaValue = 0
         panel.orderFrontRegardless()
     }
 
     private var moveObserver: Any?
+    private var lastFrameSave = Date.distantPast
 
     /// Re-apply a new size scale (Settings): keep the bottom-right corner
     /// anchored so the pet "grows" in place.
@@ -225,28 +301,6 @@ final class PetPanelController {
             content.needsLayout = true
             content.layoutSubtreeIfNeeded()
             content.needsDisplay = true
-        }
-    }
-}
-
-/// Reveals the pet panel after SceneKit rendered its first frame, wiping out
-/// the "white rectangle → then transparent" flash during lazy load.
-final class SceneReadyCoordinator: NSObject, SCNSceneRendererDelegate {
-    private var revealed = false
-    weak var scnView: NSView?
-
-    func renderer(_ renderer: SCNSceneRenderer, didRenderScene scene: SCNScene, atTime time: TimeInterval) {
-        guard !revealed else { return }
-        revealed = true
-        // Rendering only happens for views already on screen, so the window
-        // is guaranteed to be resolvable here.
-        DispatchQueue.main.async { [weak self] in
-            guard let window = self?.scnView?.window else { return }
-            NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.35
-                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                window.animator().alphaValue = 1
-            }
         }
     }
 }
@@ -454,6 +508,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var activateMonitor: Any?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Character render probe: WKWebView only gets a compositor once the
+        // application has launched, so this must run here, not in App.init.
+        let launchArgs = CommandLine.arguments
+        if let index = launchArgs.firstIndex(of: "--probe-pet-shot") {
+            let output = launchArgs.count > index + 1 ? launchArgs[index + 1] : "/tmp/moppet-pet.png"
+            let width = launchArgs.count > index + 2 ? (CGFloat(Double(launchArgs[index + 2]) ?? 460)) : 460
+            let height = launchArgs.count > index + 3 ? (CGFloat(Double(launchArgs[index + 3]) ?? 540)) : 540
+            let state = launchArgs.count > index + 4 ? launchArgs[index + 4] : nil
+            let chibi = launchArgs.count > index + 5 && launchArgs[index + 5] == "chibi"
+            PetShotProbe.run(outputPath: output, width: width, height: height,
+                             state: state, chibi: chibi)
+        }
         // Bare SPM binaries (no .app bundle) launched from a terminal never
         // get activated by the system: windows render and clicks pass
         // through, but the app never becomes "active" — so keyboard input is

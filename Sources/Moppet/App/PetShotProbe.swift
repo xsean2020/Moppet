@@ -1,82 +1,122 @@
 import AppKit
-import SceneKit
+import MatePet
 
-/// `--probe-pet-shot <png> [width height]`: renders the procedural SceneKit
-/// pet into a transparent PNG offscreen.
+/// `--probe-pet-shot <png> [width height]`: renders the MatePet WKWebView into
+/// a transparent PNG offscreen.
 ///
-/// Same rationale as `PageRenderProbe`: a terminal-launched binary usually
-/// lacks screen-recording permission, and `PageRenderProbe` cannot host a
-/// SceneKit view (the Metal layer draws nothing into `cacheDisplay`).
-/// `SCNView.snapshot()` renders through the scene's own renderer instead, so
-/// no visible window and no permission are needed. The setup mirrors
-/// `MoleSceneView.makeNSView` minus the interaction delegate.
+/// The old probe used `SCNView.snapshot()`; the MatePet renderer is WebGL
+/// inside WKWebView, so the equivalent is `WKWebView.takeSnapshot`. A real
+/// (but transparent, mouse-ignoring) window is required because WebKit only
+/// paints views attached to a window. No screen-recording permission is
+/// involved: the snapshot comes from the web view's own compositor.
 @MainActor
 enum PetShotProbe {
 
-    static func run(outputPath: String, width: CGFloat = 460, height: CGFloat = 540) {
-        let puppet = MolePuppet()
-        let view = SCNView(frame: NSRect(x: 0, y: 0, width: width, height: height))
-        view.scene = puppet.scene
-        view.backgroundColor = .clear
-        view.antialiasingMode = .multisampling2X
-        view.isPlaying = true
-        PetSceneBridge.shared.puppet = puppet
-
-        // The idle loop blinks at random moments; sample a few frames and
-        // keep the one with the most dark eye-band rows (i.e. eyes open) so
-        // the shot doesn't catch a blink.
-        var best: CGImage?
-        var bestOpenness = -1
-        for _ in 0..<5 {
-            RunLoop.main.run(until: Date().addingTimeInterval(0.4))
-            var rect = CGRect.zero
-            guard let image = view.snapshot()
-                .cgImage(forProposedRect: &rect, context: nil, hints: nil),
-                  let openness = estimateEyeOpenness(image) else { continue }
-            if openness > bestOpenness {
-                bestOpenness = openness
-                best = image
+    static func run(outputPath: String,
+                    width: CGFloat = 460,
+                    height: CGFloat = 540,
+                    state: String? = nil,
+                    chibi: Bool = false) {
+        let engine = MatePetEngine()
+        var pngData: Data?
+        var finished = false
+        engine.onSnapshot = { data in
+            pngData = data
+            finished = true
+        }
+        var modelReady = false
+        var failure: String?
+        engine.onEvent = { event in
+            switch event {
+            case .modelReady:
+                modelReady = true
+                print("probe-pet-shot: model ready")
+            case .loadError(let message):
+                failure = message
+            case .ready:
+                print("probe-pet-shot: page ready")
+            case .log(let message):
+                print("probe-pet-shot: log: \(message)")
+            default:
+                break
             }
         }
-        guard let best, let png = NSBitmapImageRep(cgImage: best)
-            .representation(using: .png, properties: [:]) else {
-            FileHandle.standardError.write(Data("probe-pet-shot: render failed\n".utf8))
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: width, height: height),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = false
+        window.level = .screenSaver
+        window.ignoresMouseEvents = true
+        window.collectionBehavior = [.canJoinAllSpaces, .stationary]
+
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+        container.wantsLayer = true
+        container.layer?.backgroundColor = NSColor.clear.cgColor
+        engine.webView.frame = container.bounds
+        engine.webView.autoresizingMask = [.width, .height]
+        container.addSubview(engine.webView)
+        window.contentView = container
+
+        // Park it on-screen while the compositor warms up; it is fully
+        // transparent and ignores clicks, so it cannot disturb the user.
+        if let screen = NSScreen.main {
+            window.setFrameOrigin(NSPoint(x: screen.visibleFrame.minX + 24,
+                                          y: screen.visibleFrame.minY + 24))
+        }
+        window.orderFrontRegardless()
+        NSApp.activate(ignoringOtherApps: true)
+        engine.startIfNeeded(probeMode: true, probeState: state, probeChibi: chibi)
+
+        let deadline = Date().addingTimeInterval(30)
+        while !modelReady && failure == nil && Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        if let failure {
+            FileHandle.standardError.write(Data("probe-pet-shot: \(failure)\n".utf8))
+            engine.stop()
+            window.close()
+            exit(1)
+        }
+        guard modelReady else {
+            FileHandle.standardError.write(Data("probe-pet-shot: VRM did not finish loading\n".utf8))
+            engine.stop()
+            window.close()
+            exit(1)
+        }
+
+        // Let the first animation frame and the camera easing settle.
+        RunLoop.main.run(until: Date().addingTimeInterval(1.2))
+
+        // The page self-captures when loaded with ?probe=1; no native → JS
+        // command is involved (see mate-pet.html captureCanvas()).
+        let snapshotDeadline = Date().addingTimeInterval(25)
+        while !finished && Date() < snapshotDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        }
+
+        defer {
+            engine.stop()
+            window.close()
+        }
+
+        guard let pngData, !pngData.isEmpty else {
+            FileHandle.standardError.write(Data("probe-pet-shot: snapshot failed\n".utf8))
             exit(1)
         }
         do {
-            try png.write(to: URL(fileURLWithPath: outputPath))
+            try pngData.write(to: URL(fileURLWithPath: outputPath))
         } catch {
             FileHandle.standardError.write(
                 Data("probe-pet-shot: write failed — \(error.localizedDescription)\n".utf8))
             exit(1)
         }
-        print("probe-pet-shot: \(best.width)x\(best.height) → \(outputPath)")
+        print("probe-pet-shot: \(Int(width))x\(Int(height)) → \(outputPath)")
         exit(0)
-    }
-
-    /// Rough blink detector: open eyes are dark blobs inside the head band;
-    /// a blink collapses them. Counts mid rows of the upper-middle band that
-    /// contain a dark pixel. Not science — just enough to prefer an
-    /// open-eyed frame when every frame is otherwise identical.
-    private static func estimateEyeOpenness(_ image: CGImage) -> Int? {
-        let w = image.width, h = image.height
-        guard let ctx = CGContext(data: nil, width: w, height: h,
-                                  bitsPerComponent: 8, bytesPerRow: w * 4,
-                                  space: CGColorSpaceCreateDeviceRGB(),
-                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
-              let data = ctx.data else { return nil }
-        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
-        let buf = data.bindMemory(to: UInt8.self, capacity: w * h * 4)
-        var darkRows = 0
-        for y in stride(from: h * 55 / 100, to: h * 75 / 100, by: 2) {
-            for x in stride(from: w * 30 / 100, to: w * 70 / 100, by: 2) {
-                let i = (y * w + x) * 4
-                if buf[i] < 90 && buf[i + 1] < 90 && buf[i + 2] < 90 {
-                    darkRows += 1
-                    break
-                }
-            }
-        }
-        return darkRows
     }
 }

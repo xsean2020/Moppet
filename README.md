@@ -4,7 +4,7 @@
 
 # Moppet
 
-**会干活的 macOS 清理工具。** 14 个清理模块 + Codex 级 agent 大脑 + 程序化 3D 桌宠，全部本地运行。
+**会干活的 macOS 清理工具。** 14 个清理模块 + Codex 级 agent 大脑 + MatePet VRM 桌宠（RealityKit 原生 / WebView 回退），全部本地运行。
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%2014%2B-lightgrey.svg?style=flat-square)](#要求)
@@ -19,7 +19,7 @@
 
 > **不是又一个清理软件。** 别的工具给你一个勾选列表；Moppet 给你一个**能自己动手、但每次删除都要你点头**的智能体，外加一个蹲在桌面右下角、会把结果讲给你听的宠物。
 >
-> 纯 SwiftUI + SceneKit，**没有 WebView、没有 Electron、没有云端**。断网也能正常清理；只有你配置了 AI 供应商时，对话与 AI 工具才会参与。
+> 原生 SwiftUI 外壳 + 独立 MatePet 模块：**macOS 15+ 用 RealityKit + VRMRealityKit 原生渲染 Zome.vrm**，macOS 14 自动回退 WKWebView + three-vrm。**没有 Electron、没有云端**。断网也能正常清理；只有你配置了 AI 供应商时，对话与 AI 工具才会参与。
 
 ---
 
@@ -57,7 +57,7 @@
 | 删除安全性 | "点一下就好" | 只删家目录、25 类保护路径、白名单永远优先、删除前二次校验、逐路径审计；**任何删除（含 AI、含补丁）都要审批** |
 | AI 的形态 | 侧边栏聊天窗口 | 宠物本身就是对话入口：单击说话、双击开完整聊天窗、结果回到头顶气泡 |
 | 可被外部驱动 | 无 | 内置 **MCP 服务器**（stdio + 回环 HTTP，31 个工具），Claude Code / Cursor / Codex 可以直接调用同一套清理能力 |
-| 技术栈 | Electron / 大量框架 | 单进程 SwiftUI + SceneKit；4 个依赖；debug 二进制 74 MB，`--smoke` 全量自测约 3 秒 |
+| 技术栈 | Electron / 大量框架 | 单进程 SwiftUI + MatePet（macOS 15+ RealityKit/VRMRealityKit，14 回退 WebView/three-vrm）；`--smoke` 全量自测约 3 秒 |
 
 **它适合谁**：想要一个能真正解释"为什么删这个"的清理工具的人；愿意把删除权限交给一个有护栏的 agent 的人；喜欢桌宠作为交互层的人。
 
@@ -84,7 +84,7 @@
 
 <p align="center">
   <img src="assets/screenshots/pet.png" width="150" alt="桌宠" /><br/>
-  <b>桌宠 Moley</b> — 程序化 SceneKit 3D 角色（不依赖任何模型文件），蹲在桌面右下角，
+  <b>桌宠 Zome</b> — Mate-Engine 的 VRM 少女（`Zome.vrm`），蹲在桌面右下角，
   单击说话、双击开聊天窗、AI 删除前头顶弹审批卡
 </p>
 
@@ -147,7 +147,7 @@ swift run Moppet --brain-exec "清理浏览器缓存并报告" --yes  # 自动�
 | `--probe-floater` | 离屏渲染浮层配色，验证动态 token 在无边框面板里的解析结果 |
 | `--probe-render` | 离屏渲染页面为 PNG（`--probe-render clean\|optimize\|status\|spacehogs\|startup\|settings <png> [light\|dark] [expanded] [h=1500]`），无录屏权限也能检查布局；`h=` 用于渲染长页面（默认 860 会裁掉下半截） |
 | `--probe-window` | 离屏渲染**完整窗口**为 PNG（`--probe-window dashboard\|clean\|optimize\|status\|spacehogs\|startup\|settings <png> [light\|dark] [expanded] [h=N]`）：真实侧栏 + 真实页面组合，README 截图即出自它 |
-| `--probe-pet-shot` | 离屏渲染程序化桌宠为透明 PNG（`--probe-pet-shot <png> [width height]`），`SCNView.snapshot()` 直出，无需录屏权限 |
+| `--probe-pet-shot` | 用 WebView 兼容渲染器离屏渲染 MatePet 为透明 PNG（`--probe-pet-shot <png> [width height] [state] [chibi]`），页面用 `canvas.toDataURL()` 直出，无需录屏权限 |
 | `--route-perf` | 依次切换全部路由，打印每次提交/渲染耗时（排查卡顿） |
 | `--win-debug` | 每 4 秒输出窗口 frame / visible / occlusion / key / firstResponder |
 
@@ -201,22 +201,33 @@ swift build
 
 ---
 
-## 桌宠
+## 桌宠：MatePet（独立模块）
 
-程序化 **SceneKit 3D 角色**（几何体 + PBR 材质 + 三灯布光 + 接触阴影）——不依赖任何 3D 资源文件，构建完就能看到。
+桌宠现在是独立 SwiftPM target **`MatePet`**：用 Mate-Engine 的 `Zome.vrm`（VRM 0.x，53 根人形骨骼、24 组 BlendShape、头发/裙摆 springBone）渲染。Mate-Engine 的 Unity Humanoid `.anim` 已用 Unity `VrmAnimationExporter` 离线烘焙成 **18 个标准 `.vrma`**（`Sources/MatePet/Resources/Animations/`），两套渲染器播放同一份烘焙动画。**macOS 15+ 默认走 RealityKit + VRMRealityKit 原生渲染**（MToon、骨骼、表情、springBone 全部由 VRMRealityKit 驱动）；**macOS 14 自动回退 WKWebView + three.js/three-vrm**。模型、表情、视线、骨骼动作都来自同一份 VRM；Brain 仍然是本项目的 `PetBus → QuickChat → BrainAgent`，桌宠只是它的表演层。
+
+> 模块/WebView 回退规格见 [`docs/MATE-PET-MODULE.md`](docs/MATE-PET-MODULE.md)；原生 RealityKit 规格见 [`docs/MATE-PET-NATIVE.md`](docs/MATE-PET-NATIVE.md)。
 
 | 交互 | 行为 |
 |---|---|
-| **单击** | 弹出屏幕中央的快捷输入条（⏎ 发送 / Esc 关闭 / 点空白关闭 / 再点宠物切换）；回答**流式**显示在头顶气泡 |
-| **双击** | 打开完整聊天窗（会话列表 + 历史 + 运行控制条） |
-| **右键** | 快速扫描、打开主窗口、睡眠、退出 |
-| **拖拽** | 自由摆放；位置持久化；跟随主窗口所在显示器 |
-| **AI 需要删除时** | 头顶直接弹 **Approve / Deny** 内联卡片，不用切窗口 |
+| **单击** | 戳一戳（头部/身体分区反应 + 音效 + 爱心/星星），并弹出快捷输入条；回答**流式**显示在头顶气泡 |
+| **连续摸头** | 3 次以上触发摸头彩蛋：开心表情、Wink、爱心粒子、purr 音效 |
+| **双击** | 打开完整聊天窗 |
+| **右键** | 快速扫描、聊天、主窗口、**Dance / Wave / Stretch**、**Chibi Mode**、**Wander**、**Sound**、睡眠/唤醒、**Hide Pet** |
+| **拖拽** | 自由摆放；面板跟手、身体按拖拽速度后仰、手脚摆动；松手回弹；位置持久化 |
+| **鼠标移动** | 头/颈/脊柱/眼睛跟随光标（头 38°/俯仰 24°，平滑阻尼） |
+| **AI 需要删除时** | 头顶直接弹 **Approve / Deny** 内联卡片 |
 | **AI 提问时** | 头顶弹出紧凑问题卡（同一请求也会出现在聊天窗，先答者生效） |
+| **闲置漫步** | 每 20–44 秒沿屏幕底边慢走 2.6–5.2 秒；任何点击/拖拽立即停止 |
 
-**7 种状态动画**：待机（呼吸/摆动/随机眨眼）· 思考（浮动）· 说话（鼻尖脉冲）· 扫描（左右扫视）· 清理（颤抖）· 庆祝（跳跃旋转）· 睡觉（侧倒打鼾闭眼）。任何状态切换都会先重置基础姿态——不会卡在旋转一半朝向墙的姿势。
+**8 种大脑状态**（播放 Unity 烘焙 VRMA）：idle（idle_01..04 轮换/眨眼/小动作）· thinking（手托下巴）· talking（口型 viseme + 点头）· scanning（左右张望）· cleaning（擦洗）· celebrating（跳跃举臂 + 星星）· sleeping（闭眼 + Zzz）· sad（垂头）。
 
-**气泡只讲结果**：工具调用与进度用姿态表达（扫描=扫视、清理=颤抖），不把过程文本塞进气泡。回答完成显示结果与 token 数；出错显示错误。
+> **渲染后端**：macOS 15+ 默认 `MatePetNativeEngine`（RealityKit + VRMRealityKit，原生 MToon/骨骼/表情/springBone）；macOS 14 自动 `MatePetEngine`（WKWebView + three-vrm/three-vrm-animation）。可用 `MOPPET_PET_WEBVIEW=1` 强制回退 WebView，便于对比/排障。原生路径的合成音效是独立 AVAudioEngine 小合成器，WebView 路径是 Web Audio。
+>
+> **离线烘焙**：`tools/matepet-vrma-bake.cs` 是 Unity Editor 脚本，把 Mate-Engine 的 Humanoid `.anim` 采样为 `.vrma`；重新烘焙命令见 `docs/MATE-PET-NATIVE.md` §4.1。
+
+**彩蛋动作**：Dance（9 秒编舞 + Web Audio 鼓点/贝斯/五声音阶）· Wave · Stretch · Chibi（头部世界尺寸约 0.86×、身体约 0.32×，复刻 Mate-Engine 的 0.3/2.7 比例）· Hide（下蹲淡出）· Wander（原生 NSPanel 漫步）。
+
+**气泡只讲结果**：工具调用与进度用姿态表达，不把过程文本塞进气泡。回答完成显示结果与 token 数；出错显示错误。
 
 宠物与窗口互相独立：关掉所有窗口宠物还在；从宠物菜单或菜单栏能把主窗口/聊天窗重新拉起。
 

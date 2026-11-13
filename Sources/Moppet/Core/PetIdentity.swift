@@ -6,7 +6,7 @@ import Foundation
 enum PetIdentity {
 
     static let nameKey = "pet.name"
-    static var defaultName = "Moley"
+    static var defaultName = "Zome"
 
     static var name: String {
         let stored = UserDefaults.standard.string(forKey: nameKey) ?? ""

@@ -18,11 +18,30 @@ let package = Package(
         .package(url: "https://github.com/kishikawakatsumi/KeychainAccess.git", from: "4.2.2"),
         // Launch at login (SMAppService) for the desktop pet.
         .package(url: "https://github.com/sindresorhus/LaunchAtLogin-Modern.git", from: "1.1.0"),
+        // Swift-native VRM parser + RealityKit renderer. The RealityKit
+        // product is gated to macOS 15 by its own @available annotations;
+        // MatePet keeps a WKWebView fallback for macOS 14.
+        .package(url: "https://github.com/tattn/VRMKit.git", from: "0.11.0"),
     ],
     targets: [
+        // Desktop-pet avatar engine, kept independent of the app's Brain /
+        // cleaning / network modules. macOS 15+ uses RealityKit/VRMRealityKit;
+        // macOS 14 falls back to WKWebView + three-vrm. Moppet only feeds it
+        // `PetBus` state and user intent.
+        .target(
+            name: "MatePet",
+            dependencies: [
+                .product(name: "VRMKit", package: "VRMKit"),
+                .product(name: "VRMRealityKit", package: "VRMKit"),
+            ],
+            path: "Sources/MatePet",
+            resources: [.copy("Resources")],
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
         .executableTarget(
             name: "Moppet",
             dependencies: [
+                .target(name: "MatePet"),
                 .product(name: "SwiftAISDK", package: "swift-ai-sdk"),
                 .product(name: "OpenAIProvider", package: "swift-ai-sdk"),
                 .product(name: "OpenAICompatibleProvider", package: "swift-ai-sdk"),
@@ -38,8 +57,6 @@ let package = Package(
             ],
             path: "Sources/Moppet",
             resources: [
-                // 3D pet renderer assets (idle_loop.vrma comes from airi, MIT).
-                .copy("Resources/pet"),
                 // airi's emotion stickers (MIT) — chat avatar reacts to pet state.
                 .copy("Resources/stickers"),
                 // Brand icon for the sidebar / title bar (full app icon).

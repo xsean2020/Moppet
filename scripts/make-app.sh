@@ -22,9 +22,13 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 echo "→ bundling binary + resources…"
 cp "$ROOT/.build/release/Moppet" "$APP/Contents/MacOS/Moppet"
 # SPM resource bundle (stickers + vrma) must sit in Contents/Resources.
-if [ -d "$ROOT/.build/release/Moppet_Moppet.bundle" ]; then
-  cp -R "$ROOT/.build/release/Moppet_Moppet.bundle" "$APP/Contents/Resources/"
-fi
+# SwiftPM emits one resource bundle per target. MatePet owns the VRM page,
+# three.js/vendor files and Zome.vrm; VRMRealityKit owns its MToon metallibs.
+for bundle in "$ROOT"/.build/release/*.bundle; do
+  if [ -d "$bundle" ]; then
+    cp -R "$bundle" "$APP/Contents/Resources/"
+  fi
+done
 
 # App icon: assets/Moppet.iconset → Moppet.icns (CFBundleIconFile).
 iconutil -c icns "$ROOT/assets/Moppet.iconset" \
@@ -47,6 +51,12 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>NSPrincipalClass</key><string>NSApplication</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
+  <!-- MatePet serves its bundled WebGL page from a loopback-only static
+       server (file:// origins cannot load three-vrm's ES modules + VRM). -->
+  <key>NSAppTransportSecurity</key>
+  <dict>
+    <key>NSAllowsLocalNetworking</key><true/>
+  </dict>
 </dict>
 </plist>
 PLIST

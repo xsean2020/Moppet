@@ -108,7 +108,7 @@ struct SettingsView: View {
                     .foregroundStyle(Airi.neutral950)
 
                 labeledField(L("Name"), field: .petName) {
-                    TextField("Moley", text: $petName)
+                    TextField("Zome", text: $petName)
                         .textFieldStyle(.plain)
                 }
 
@@ -846,7 +846,7 @@ struct SettingsView: View {
                     .font(Airi.cardTitleFont)
                     .foregroundStyle(Airi.neutral950)
                 ToggleRow(title: L("Launch at login"),
-                          subtitle: L("Start Moley with your Mac (SMAppService)"),
+                          subtitle: String(format: L("Start %@ with your Mac (SMAppService)"), PetIdentity.name),
                           isOn: Binding(
                             get: { launchAtLogin },
                             set: { newValue in

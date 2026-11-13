@@ -188,17 +188,10 @@ struct MoppetApp: App {
         if args.contains("--probe-floater") {
             Airi.probeFloaterColors()
         }
-        // Pet character render: `--probe-pet-shot <png> [width height]` writes
-        // a transparent PNG of the procedural SceneKit pet offscreen (no
-        // screen-recording grant; see PetShotProbe).
-        if let index = args.firstIndex(of: "--probe-pet-shot") {
-            let output = args.count > index + 1 ? args[index + 1] : "/tmp/moppet-pet.png"
-            let width = args.count > index + 2 ? (CGFloat(Double(args[index + 2]) ?? 460)) : 460
-            let height = args.count > index + 3 ? (CGFloat(Double(args[index + 3]) ?? 540)) : 540
-            Task { @MainActor in
-                PetShotProbe.run(outputPath: output, width: width, height: height)
-            }
-        }
+        // Pet character render runs from `applicationDidFinishLaunching`
+        // instead of here: WKWebView needs a launched NSApplication, and a
+        // probe that spins its own run loop before launch never gets a
+        // compositor. See AppDelegate.
         // Full-window render: `--probe-window <page> <png> [light|dark] [h=N]`
         // draws the real sidebar beside the real page — the README gallery
         // format (see WindowRenderProbe).
